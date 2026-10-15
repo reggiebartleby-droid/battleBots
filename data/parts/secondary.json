@@ -1,0 +1,3 @@
+[
+  { "id": "sec_flame", "name": "Flamethrower", "type": "secondary", "kind": "flame", "stats": { "hp": 8, "damage": 6 }, "traits": ["burn"], "description": "Secondary-slot flame. Never a body." }
+]

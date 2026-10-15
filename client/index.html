@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BattleBots — prototype</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #0b0d10; overflow: hidden; font-family: system-ui, sans-serif; color: #eee; }
+    #c { width: 100%; height: 100%; display: block; outline: none; }
+    #hud { position: absolute; left: 0; right: 0; bottom: 0; display: flex; justify-content: space-between; align-items: flex-end; padding: 12px 18px; pointer-events: none; }
+    .board { background: rgba(20,22,26,.85); border: 2px solid #4a4f58; border-radius: 8px; padding: 8px 12px; min-width: 220px; }
+    .board h3 { margin: 0 0 6px; font-size: 14px; letter-spacing: .08em; text-transform: uppercase; }
+    .part { display: grid; grid-template-columns: 70px 1fr 36px; gap: 8px; font-size: 12px; align-items: center; line-height: 18px; }
+    .bar { height: 8px; background: #2a2d33; border-radius: 4px; overflow: hidden; }
+    .bar i { display: block; height: 100%; background: #2ecc71; }
+    .bar i.mid { background: #f1c40f; } .bar i.low { background: #e74c3c; } .bar i.dead { background: #555; }
+    #timer { font-size: 40px; font-weight: 800; font-variant-numeric: tabular-nums; background: rgba(20,22,26,.85); border: 3px solid #c9a227; border-radius: 50%; width: 110px; height: 110px; display: flex; align-items: center; justify-content: center; }
+    #finish { position: absolute; top: 14%; left: 0; right: 0; text-align: center; font-size: 56px; font-weight: 900; color: #ff1a1a; text-shadow: 0 0 18px #f00; display: none; letter-spacing: .06em; }
+    #finish.on { display: block; animation: blink .45s steps(1) infinite; }
+    @keyframes blink { 50% { opacity: 0; } }
+    #winner { position: absolute; top: 40%; left: 0; right: 0; text-align: center; font-size: 48px; font-weight: 900; display: none; text-shadow: 0 0 14px #000; }
+    #sign { position: absolute; top: 22%; left: 0; right: 0; text-align: center; font-size: 40px; font-weight: 900; letter-spacing: .12em; display: none; text-shadow: 0 0 14px #000; pointer-events: none; }
+    #sign.on { display: block; }
+    body.inlab #sign { display: none; }
+    #help { position: absolute; top: 10px; left: 12px; font-size: 12px; opacity: .7; }
+    /* weapon status + hit stats rows in the scoreboards */
+    .part.flash { background: rgba(255,60,60,.45); border-radius: 4px; }
+    .part.wpn .bar i.w { background: #3ee6c4; box-shadow: 0 0 6px #3ee6c4; }
+    .part.wpn.off .bar i.w { background: #556; box-shadow: none; }
+    .part.wpn.hit .bar i.w { background: #fff; box-shadow: 0 0 10px #fff; }
+    .part.wpn.dead .bar i.w { background: #555; }
+    .part.wpn .lbl { font-size: 10px; white-space: nowrap; letter-spacing: .04em; }
+    .part.wpn.on .lbl, .part.wpn.hit .lbl { color: #3ee6c4; }
+    .part.wpn.dead .lbl { color: #e45a5a; }
+    .part.stats { grid-template-columns: 1fr 1fr 1fr; opacity: .85; margin-top: 4px; border-top: 1px solid #333; padding-top: 4px; }
+    /* floating hit labels */
+    #fxlayer { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+    .fxlabel { position: absolute; left: 0; top: 0; font-weight: 900; font-size: 28px; text-shadow: 0 0 6px #000, 0 0 12px #000; will-change: transform, opacity; }
+    .fxlabel.bump { font-size: 15px; font-weight: 600; opacity: .8; }
+    /* controls card shown at match start */
+    #controls { position: absolute; top: 64px; left: 50%; transform: translateX(-50%); background: rgba(20,22,26,.9); border: 2px solid #4a4f58; border-radius: 8px; padding: 10px 16px; font-size: 13px; line-height: 1.6; display: none; max-width: 720px; text-align: center; pointer-events: none; }
+    #controls.on { display: block; }
+    #controls b { color: #f2b134; }
+    body.inlab #hud, body.inlab #help, body.inlab #finish, body.inlab #winner, body.inlab #controls, body.inlab #fxlayer { display: none; }
+
+    /* ---- Lab / bot builder (Option A: 3D lab scene + HTML instrument panels) ---- */
+    #lab { position: absolute; inset: 0; display: none; pointer-events: none; font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; color: #d7e3e6; }
+    #lab.on { display: block; }
+    #lab .inst { position: absolute; pointer-events: auto; background: #141b20; border: 2px solid #2a363f; border-radius: 6px; box-shadow: 0 0 0 1px #0a0e11, 0 20px 50px rgba(0,0,0,.6); display: flex; flex-direction: column; overflow: hidden; }
+    #lab .inst h3 { margin: 0; padding: 10px 14px; border-bottom: 2px solid #2a363f; background: #1a2228; font: 700 13px/1 system-ui, sans-serif; letter-spacing: .14em; color: #8fa3ad; display: flex; justify-content: space-between; align-items: center; }
+    #lab .led { width: 10px; height: 10px; border-radius: 50%; background: #3ee6c4; box-shadow: 0 0 8px #3ee6c4; }
+    #lab .inst .pad { padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; overflow: auto; }
+    #rack { left: 24px; top: 24px; bottom: 24px; width: 330px; }
+    #bin { right: 24px; top: 24px; width: 300px; max-height: calc(100% - 300px); }
+    #tele { right: 24px; bottom: 24px; width: 300px; }
+    #deploybar { position: absolute; left: 380px; right: 350px; bottom: 24px; display: flex; align-items: center; gap: 12px; pointer-events: auto; flex-wrap: wrap; }
+    #lab .fld { display: flex; flex-direction: column; gap: 4px; font-size: 11px; letter-spacing: .1em; color: #8fa3ad; }
+    #lab select, #lab input[type=text] { font: inherit; font-size: 13px; background: #0b1013; color: #d7e3e6; border: 1px solid #33424c; border-radius: 3px; padding: 8px 10px; }
+    #lab input[type=color] { width: 36px; height: 34px; border: 1px solid #33424c; background: #0b1013; padding: 0; border-radius: 3px; cursor: pointer; }
+    #bb-desc { font-size: 11px; color: #6f8089; min-height: 14px; }
+    .rack-row, .bin-item { font: inherit; text-align: left; cursor: pointer; background: #0b1013; color: #d7e3e6; border: 1px solid #33424c; border-radius: 3px; padding: 8px 10px; display: grid; grid-template-columns: 1fr auto; row-gap: 2px; }
+    .rack-row:hover, .bin-item:hover { border-color: #5a6f7c; }
+    .rack-row.sel { border-color: #f2b134; background: #1d1f1a; }
+    .rack-row.empty .pn { color: #6f8089; }
+    .rack-row .lbl { grid-column: 1 / 3; font-size: 10px; letter-spacing: .12em; color: #8fa3ad; }
+    .rack-row.sel .lbl { color: #f2b134; }
+    .rack-row .pn, .bin-item .pn { font-size: 13px; }
+    .rack-row .ps, .bin-item .ps { grid-column: 1 / 3; font-size: 11px; color: #8fa3ad; }
+    .bin-item.sel { border-color: #3ee6c4; background: #1d2b2a; }
+    .bin-item .pw { font-size: 12px; color: #8fa3ad; }
+    .bin-item.sel .pw { color: #3ee6c4; }
+    .scope { background: #06110f; border: 1px solid #1e3a34; border-radius: 3px; padding: 8px 10px; box-shadow: inset 0 0 24px #0a2a24; display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+    .scope .kv { display: flex; justify-content: space-between; }
+    .scope .kv b { color: #3ee6c4; font-weight: 600; }
+    .scope .mbar { height: 8px; background: #0f1d1a; border-radius: 4px; overflow: hidden; }
+    .scope .mbar i { display: block; height: 100%; background: #3ee6c4; box-shadow: 0 0 8px #3ee6c4; transition: width .15s; }
+    .scope .mbar i.tight { background: #f2b134; box-shadow: 0 0 8px #f2b134; }
+    .scope .mbar i.over { background: #e45a5a; box-shadow: 0 0 8px #e45a5a; }
+    #bb-status { font-size: 11px; letter-spacing: .08em; }
+    #bb-status.ok { color: #3ee6c4; } #bb-status.bad { color: #e45a5a; }
+    #bb-errors { margin: 0; padding-left: 16px; font-size: 11px; color: #ff8a8a; }
+    #bb-deploy { font: 700 18px/1 system-ui, sans-serif; letter-spacing: .14em; background: #f2b134; color: #141b20; border: 0; border-radius: 4px; padding: 14px 28px; cursor: pointer; margin-left: auto; }
+    #bb-deploy:disabled { background: #333; color: #777; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+  <canvas id="c" tabindex="0"></canvas>
+  <div id="fxlayer"></div>
+  <div id="help">P1: WASD + SPACE | P2: AI (T toggles) | R: restart | B: lab</div>
+  <div id="controls"></div>
+  <div id="sign"></div>
+
+  <div id="lab">
+    <div class="inst" id="rack">
+      <h3>ASSEMBLY RACK <span class="led"></span></h3>
+      <div class="pad">
+        <label class="fld">CHASSIS <select id="bb-body"></select></label>
+        <div id="bb-desc"></div>
+        <label class="fld">PRESET <select id="bb-presets"></select></label>
+        <div id="bb-rack" style="display:flex;flex-direction:column;gap:6px"></div>
+      </div>
+    </div>
+
+    <div class="inst" id="bin">
+      <h3 id="bb-bin-title">PARTS BIN</h3>
+      <div class="pad" id="bb-bin"></div>
+    </div>
+
+    <div class="inst" id="tele">
+      <h3>TELEMETRY</h3>
+      <div class="pad">
+        <div class="scope">
+          <div class="kv"><span>MASS</span><b id="bb-mass">0 / 0</b></div>
+          <div class="mbar"><i id="bb-mass-bar"></i></div>
+          <div class="kv"><span>HP TOTAL</span><b id="bb-hp">0</b></div>
+          <div class="kv"><span>ARMOR</span><b id="bb-armor">0</b></div>
+          <div class="kv"><span>SPEED</span><b id="bb-speed">0</b></div>
+        </div>
+        <div id="bb-status" class="ok">✓ BUILD VALID</div>
+        <ul id="bb-errors"></ul>
+      </div>
+    </div>
+
+    <div id="deploybar">
+      <label class="fld">CALLSIGN <input id="bb-name" type="text" maxlength="16"></label>
+      <label class="fld">PAINT <input id="bb-paint" type="color"></label>
+      <label class="fld">OPPONENT (AI) <select id="bb-opponent"></select></label>
+      <label class="fld">AI LEVEL <select id="bb-difficulty"><option value="easy">Easy</option><option value="normal" selected>Normal</option><option value="hard">Hard</option></select></label>
+      <button id="bb-deploy" type="button">DEPLOY ▶</button>
+    </div>
+  </div>
+  <div id="finish">FINISH HIM/HER!</div>
+  <div id="winner"></div>
+  <div id="hud">
+    <div class="board" id="board1"></div>
+    <div id="timer">3:00</div>
+    <div class="board" id="board2"></div>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

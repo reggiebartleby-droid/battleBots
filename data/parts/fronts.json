@@ -1,0 +1,5 @@
+[
+  { "id": "front_wedge",    "name": "Wedge",    "type": "front", "kind": "wedge",    "stats": { "hp": 20, "armor": 5 }, "traits": ["fixed"],  "description": "Fixed wedge - beats horizontals." },
+  { "id": "front_wedgelet", "name": "Wedgelets","type": "front", "kind": "wedgelet", "stats": { "hp": 14, "armor": 3 }, "traits": ["hinged"], "description": "Hinged wedgelets - resist verticals." },
+  { "id": "front_plow",     "name": "Plow",     "type": "front", "kind": "plow",     "stats": { "hp": 30, "armor": 8 }, "traits": ["fixed"],  "description": "Heavy plow. Tanky, costly." }
+]

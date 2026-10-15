@@ -1,0 +1,9 @@
+[
+  { "id": "wheels_light",  "name": "Light Wheels",  "type": "wheels", "stats": { "hp": 12 }, "description": "Exposed, easy to knock off." },
+  { "id": "wheels_std",    "name": "Standard Wheels","type": "wheels", "stats": { "hp": 20 }, "description": "Standard set." },
+  { "id": "wheels_armored","name": "Armored Wheels","type": "wheels", "stats": { "hp": 24, "armor": 4 }, "description": "Shielded hubs." },
+
+  { "id": "motor_std",   "name": "Standard Motor", "type": "motor", "stats": { "hp": 15, "speed": 8 },  "description": "Reliable drive." },
+  { "id": "motor_fast",  "name": "Fast Motor",     "type": "motor", "stats": { "hp": 12, "speed": 12 }, "description": "Quick, less durable." },
+  { "id": "motor_tank",  "name": "Tank Motor",     "type": "motor", "stats": { "hp": 22, "speed": 5 },  "description": "Slow and hard to kill." }
+]

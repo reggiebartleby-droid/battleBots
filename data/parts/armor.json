@@ -1,0 +1,5 @@
+[
+  { "id": "armor_light",  "name": "Light Plating",  "type": "armor", "stats": { "hp": 8,  "armor": 6 },  "description": "Cheap, thin." },
+  { "id": "armor_medium", "name": "Medium Plating", "type": "armor", "stats": { "hp": 12, "armor": 10 }, "description": "Standard plating." },
+  { "id": "armor_heavy",  "name": "Heavy Plating",  "type": "armor", "stats": { "hp": 18, "armor": 14 }, "description": "Thick plating. Heavy." }
+]

@@ -1,0 +1,16 @@
+{
+  "baseWeight": {
+    "weapon": 20,
+    "front": 5,
+    "armor": 5,
+    "wheels": 10,
+    "motor": 10,
+    "secondary": 8
+  },
+  "coefficients": {
+    "hp": 1.0,
+    "armor": 2.0,
+    "damage": 2.5,
+    "speed": 1.5
+  }
+}

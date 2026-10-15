@@ -1,0 +1,17 @@
+{
+  "name": "battlebots",
+  "version": "0.1.0",
+  "description": "BattleBots game - engine-agnostic bot-building core (TypeScript + JSON parts)",
+  "private": true,
+  "type": "module",
+  "main": "dist/core/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && node --test dist/test/*.test.js",
+    "demo": "tsc -p tsconfig.json && node dist/examples/demo.js"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^5.9.3"
+  }
+}
