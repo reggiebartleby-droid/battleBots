@@ -64,12 +64,6 @@ export class Fx {
     this.label('bump', point.add(new Vector3(0, 0.5, 0)), '#8a8f98', 'bump');
   }
 
-  /** Wedge rule fired: this bot got lifted. */
-  wedge(point: Vector3) {
-    this.spawnSparks(point, 5, this.bumpMat, 2);
-    this.label('WEDGED', point.add(new Vector3(0, 0.4, 0)), '#f2b134', 'bump');
-  }
-
   /**
    * Bot eliminated (knocked out of the arena): fireball + every part flies off tumbling.
    * Clones the bot's meshes as free debris so the real bot can be hidden/frozen by the caller.

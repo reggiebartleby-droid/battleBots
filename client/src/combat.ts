@@ -7,64 +7,41 @@
  * spinner spun up, hammer/flipper mid-swing, lifter/grappler key held.
  * Everything else is a "bump" — feedback only, no damage.
  *
- * v0.4 "feel" layer (all numbers in FEEL):
- *  - every bot-bot contact gets a separation impulse scaled by closing speed,
- *    so charges bounce bots apart instead of grinding;
- *  - weapon hits knock the defender back hard and cut its traction briefly
- *    so it actually flies instead of driving through the hit;
- *  - hitstop: a short physics freeze on big hits;
- *  - wedge rule: nose-to-nose, the LOWER front wins (plow < wedge < wedgelet < none):
- *    the loser gets lifted (small up+back impulse) and loses traction.
- *  - contacts that persist (a push/grind) re-check every FEEL.continuedMs so a
- *    live weapon keeps working in a shove and the wedge rule resolves pins.
+ * v0.7 "plain physics":
+ *  - NO separation impulse, NO wedge rule, NO traction cuts, NO hitstop. Shoves, lifts, climbs
+ *    and tumbles come from the compound collision shapes (bot.ts) and mass.
+ *  - Damage scales with the contact impulse Havok actually resolved (ev.impulse), so a hard
+ *    hit hurts more than a graze; falls back to closing speed if the solver gives no impulse.
+ *  - Weapon hits still apply a stand-in impulse (the weapon colliders don't move yet -- Phase 2
+ *    turns spinners / arms / plates into real driven bodies). It is applied AT THE CONTACT POINT,
+ *    so an off-centre hit spins the victim for real, and the attacker takes a share of the
+ *    reaction (Newton's third law, scaled: the rest of the energy came from the spinning mass).
  */
 import { Vector3, type IPhysicsCollisionEvent, PhysicsEventType } from '@babylonjs/core';
 import { applyDamage, canAttack } from '../../src/core/state.js';
 import { forward, type Bot } from './bot.js';
 import type { Fx } from './fx.js';
 
-/** Tuning knobs for collision feel. Arcade on top of real physics. */
+/** Tuning knobs. */
 export const FEEL = {
   weaponCone: Math.cos(Math.PI / 4),   // attacker must face the defender within 45° for a weapon hit
-  refSpeed: 4,                         // m/s at which a hit does full weapon damage
+  refSpeed: 4,                         // m/s equivalent at which a hit does full weapon damage
   continuedMs: 220,                    // how often a persistent contact is re-evaluated
-  // Separation on ANY bot-bot contact (bumps included). Impulse per kg, m/s.
-  sep: { base: 1.2, perClosingSpeed: 0.55, max: 4.5 },
-  // Weapon hit knockback (per kg, m/s) + defender traction loss
-  hit: { base: 5.0, perDmg: 0.28, max: 14, upKick: 0.6, tractionMs: 420, tractionScale: 0.15 },
-  // Vertical spinners add an upward launch
-  vertical: { up: 4.5, upPerDmg: 0.12 },
-  // v0.6 vertical-spinner extras:
-  //  tumble: random pitch/roll (rad/s) on the launched bot; level damping is off for tumbleMs
-  //  recoil: the ATTACKER pops up too (fraction of the victim's launch) and back a touch;
-  //          hits >= tumbleMinDmg also give the attacker a (smaller) random tumble
-  vTumble: { min: 6, max: 9, tumbleMs: 900 },
-  vRecoil: { upFrac: 0.4, back: 1.2, tumbleMinDmg: 8, tumbleFrac: 0.5, tractionMs: 300, tractionScale: 0.4 },
-  // Hitstop: freeze physics briefly on big hits
-  hitstop: { minDmg: 8, ms: 70, bigDmg: 25, bigMs: 110 },
-  // Wedge rule: lower front wins the nose-to-nose
-  wedge: { cone: Math.cos(Math.PI / 3), lift: 2.2, back: 2.0, tractionMs: 500, tractionScale: 0.25, repeatMs: 450 },
+  spinnerStored: 2.5,                  // m/s-equivalent a fully spun spinner adds to the contact
+  // Stand-in weapon impulse (per kg of defender, m/s) until Phase 2 makes weapons real bodies
+  hit: { base: 3.5, perDmg: 0.22, max: 11, upKick: 0.4 },
+  vertical: { up: 4.5, upPerDmg: 0.12 },   // vertical spinners launch (the only real upward kick)
+  reaction: 0.35,                      // attacker gets this fraction of the hit impulse back (recoil)
 };
 
-/** Lower rank = lower to the ground = wins the wedge war. Missing/destroyed front = 3. */
-export function frontRank(bot: Bot): number {
-  const f = bot.state.parts['front'];
-  if (!f || f.hp <= 0) return 3;
-  switch (f.part.kind) { case 'plow': return 0; case 'wedge': return 1; case 'wedgelet': return 2; default: return 3; }
-}
-
 export interface HitLog { t: number; attacker: 'A' | 'B'; socket: string; dmg: number }
-export interface Stats { hits: number; dmg: number; bumps: number; wedges: number }
+export interface Stats { hits: number; dmg: number; bumps: number; maxImpulse: number }
 
 export class Combat {
   private lastHit = new Map<string, number>();
-  private lastWedge = new Map<string, number>();
   private lastContinued = 0;
-  private hitstopUntil = 0;
   log: HitLog[] = [];
-  stats: Record<'A' | 'B', Stats> = { A: { hits: 0, dmg: 0, bumps: 0, wedges: 0 }, B: { hits: 0, dmg: 0, bumps: 0, wedges: 0 } };
-  /** Set when a hitstop starts; main.ts shows the HITSTOP sign and clears it. */
-  hitstopStarted = false;
+  stats: Record<'A' | 'B', Stats> = { A: { hits: 0, dmg: 0, bumps: 0, maxImpulse: 0 }, B: { hits: 0, dmg: 0, bumps: 0, maxImpulse: 0 } };
 
   constructor(private bots: Bot[], private fx: Fx) {
     for (const b of bots) {
@@ -72,23 +49,15 @@ export class Combat {
     }
   }
 
-  inHitstop(now = performance.now()) { return now < this.hitstopUntil; }
-
-  /** 0..1 multiplier on drive force for this bot right now. */
-  traction(bot: Bot, now = performance.now()): number {
-    return now < (bot.lowTractionUntil ?? 0) ? (bot.lowTractionScale ?? 1) : 1;
-  }
-
   private other(b: Bot) { return this.bots.find(x => x !== b)!; }
 
   private onCollision(self: Bot, ev: IPhysicsCollisionEvent) {
     const other = this.other(self);
-    if (ev.collidedAgainst !== other.body) return;      // wall/floor hit: no damage (v1)
+    if (ev.collidedAgainst !== other.body) return;      // wall/floor hit: no damage (hazards are a later topic)
     if (ev.type === PhysicsEventType.COLLISION_STARTED) {
-      this.separate(self, other, ev);
       this.resolve(self, other, ev, true);
     } else if (ev.type === PhysicsEventType.COLLISION_CONTINUED) {
-      // Persistent contact (push / grind): re-check at a fixed rate, no separation impulse
+      // Persistent contact (push / grind): re-check at a fixed rate
       const now = performance.now();
       if (now - this.lastContinued < FEEL.continuedMs) return;
       this.lastContinued = now;
@@ -100,17 +69,15 @@ export class Combat {
     return ev.point ?? a.root.position.add(b.root.position).scale(0.5);
   }
 
-  /** Arcade separation: both bots get shoved apart along their centre line, scaled by closing speed. */
-  private separate(self: Bot, other: Bot, _ev: IPhysicsCollisionEvent) {
-    if (this.inHitstop()) return;
-    const away = self.root.position.subtract(other.root.position); away.y = 0;
-    if (away.lengthSquared() < 1e-6) return;
-    away.normalize();
-    const rel = other.body.getLinearVelocity().subtract(self.body.getLinearVelocity());
-    const closing = Math.max(0, Vector3.Dot(rel, away));
-    const mag = Math.min(FEEL.sep.max, FEEL.sep.base + closing * FEEL.sep.perClosingSpeed);
-    const mass = self.body.getMassProperties().mass ?? 50;
-    self.body.applyImpulse(away.scale(mag * mass), self.root.position);
+  /** How hard the contact was, as an equivalent closing speed (m/s): solver impulse / reduced mass. */
+  private contactSpeed(a: Bot, b: Bot, ev: IPhysicsCollisionEvent, toDef: Vector3): number {
+    const ma = a.body.getMassProperties().mass ?? 50, mb = b.body.getMassProperties().mass ?? 50;
+    const reduced = (ma * mb) / (ma + mb);
+    const imp = ev.impulse;
+    if (Number.isFinite(imp) && imp > 0) return imp / reduced;
+    // fallback: relative closing speed along the attack line
+    const rel = a.body.getLinearVelocity().subtract(b.body.getLinearVelocity());
+    return Math.max(0, Vector3.Dot(rel, toDef));
   }
 
   private resolve(attacker: Bot, defender: Bot, ev: IPhysicsCollisionEvent, started: boolean) {
@@ -124,24 +91,22 @@ export class Combat {
     const facing = Vector3.Dot(fwd, toDef);
     const aimed = isFbs || facing >= FEEL.weaponCone;
 
-    // Wedge rule: both noses pointed at each other → lower front wins
-    this.wedgeCheck(attacker, defender, facing, now);
+    const speed = this.contactSpeed(attacker, defender, ev, toDef);
+    this.stats[attacker.id].maxImpulse = Math.max(this.stats[attacker.id].maxImpulse, Math.round(speed * 10) / 10);
 
     const power = canAttack(attacker.state) ? attacker.weapon.power() : 0;
     if (!aimed || power <= 0) { if (started) this.bump(attacker, point); return; }
 
     if (now - (this.lastHit.get(attacker.id) ?? -1e9) < attacker.weapon.hitCooldownMs()) return;
 
-    // Relative closing speed scales damage; spinners add stored energy proportional to spin
-    const rel = attacker.body.getLinearVelocity().subtract(defender.body.getLinearVelocity());
-    const closing = Math.max(0, Vector3.Dot(rel, toDef));
+    // Contact hardness scales damage; spinners add stored energy proportional to spin
     let scale: number;
     if (attacker.weapon.mode === 'spinner') {
-      const stored = 2.5 * attacker.weapon.spinLevel;
-      scale = Math.min(1.5, Math.max(0.25, (closing + stored) / FEEL.refSpeed));
+      const stored = FEEL.spinnerStored * attacker.weapon.spinLevel;
+      scale = Math.min(1.5, Math.max(0.25, (speed + stored) / FEEL.refSpeed));
     } else {
       // swings / flips / grips don't need run-up speed
-      scale = Math.min(1.3, Math.max(0.8, closing / FEEL.refSpeed + 0.8));
+      scale = Math.min(1.3, Math.max(0.8, speed / FEEL.refSpeed + 0.8));
     }
 
     const weapon = attacker.state.parts['weapon'];
@@ -157,70 +122,18 @@ export class Combat {
     defender.lastHit = { socket, t: now };
     this.fx.hit(point, dealt, defender, attacker.build.cosmetics.paint ?? '#fff');
 
-    // Knockback: hard shove along the attack line + traction loss so the defender flies
+    // Stand-in weapon impulse at the contact point (off-centre hits spin the victim for real)
     const mag = Math.min(FEEL.hit.max, FEEL.hit.base + raw * FEEL.hit.perDmg);
     const kick = toDef.scale(mag);
     kick.y = FEEL.hit.upKick;
     if (attacker.spinAxis === 'x') kick.y = FEEL.vertical.up + raw * FEEL.vertical.upPerDmg;   // vertical spinners launch
     const mass = defender.body.getMassProperties().mass ?? 50;
-    defender.body.applyImpulse(kick.scale(mass), defender.root.position);
-    defender.lowTractionUntil = now + FEEL.hit.tractionMs;
-    defender.lowTractionScale = FEEL.hit.tractionScale;
+    const impulse = kick.scale(mass);
+    defender.body.applyImpulse(impulse, point);
+    // Reaction on the attacker (recoil), at the same point: a hard vertical hit can tip the attacker too
+    attacker.body.applyImpulse(impulse.scale(-FEEL.reaction), point);
 
-    if (attacker.spinAxis === 'x') this.verticalExtras(attacker, defender, kick.y, raw, toDef, now);
-    attacker.weapon.spinReset();      // v0.6: any spinner hit dumps the spin; motor stays ON and ramps back
-
-    // Hitstop on big hits
-    if (raw >= FEEL.hitstop.minDmg) {
-      const ms = raw >= FEEL.hitstop.bigDmg ? FEEL.hitstop.bigMs : FEEL.hitstop.ms;
-      this.hitstopUntil = now + ms;
-      this.hitstopStarted = true;
-    }
-  }
-
-  /** v0.6 vertical spinner: victim tumbles; attacker recoils (and sometimes tumbles too). */
-  private verticalExtras(attacker: Bot, defender: Bot, launchUp: number, raw: number, toDef: Vector3, now: number) {
-    const rnd = (lo: number, hi: number) => lo + Math.random() * (hi - lo);
-    const randSpin = (mag: number) => {
-      const a = Math.random() * Math.PI * 2;              // random horizontal axis = pitch/roll mix, no yaw
-      return new Vector3(Math.cos(a) * mag, 0, Math.sin(a) * mag);
-    };
-    // Victim: tumble on top of the launch
-    const t = rnd(FEEL.vTumble.min, FEEL.vTumble.max);
-    defender.body.setAngularVelocity(defender.body.getAngularVelocity().add(randSpin(t)));
-    defender.tumbleUntil = now + FEEL.vTumble.tumbleMs;
-    // Attacker: recoil hop + a step back
-    const r = FEEL.vRecoil;
-    const recoil = toDef.scale(-r.back); recoil.y = launchUp * r.upFrac;
-    const am = attacker.body.getMassProperties().mass ?? 50;
-    attacker.body.applyImpulse(recoil.scale(am), attacker.root.position);
-    attacker.lowTractionUntil = now + r.tractionMs;
-    attacker.lowTractionScale = r.tractionScale;
-    if (raw >= r.tumbleMinDmg) {
-      attacker.body.setAngularVelocity(attacker.body.getAngularVelocity().add(randSpin(t * r.tumbleFrac)));
-      attacker.tumbleUntil = now + FEEL.vTumble.tumbleMs;
-    }
-  }
-
-  /** Nose-to-nose: the bot with the lower front gets under the other one. */
-  private wedgeCheck(a: Bot, b: Bot, aFacing: number, now: number) {
-    if (aFacing < FEEL.wedge.cone) return;
-    const toA = a.root.position.subtract(b.root.position); toA.y = 0; toA.normalize();
-    const bFwd = forward(b); bFwd.y = 0; bFwd.normalize();
-    if (Vector3.Dot(bFwd, toA) < FEEL.wedge.cone) return;            // b isn't facing a
-    const ra = frontRank(a), rb = frontRank(b);
-    if (ra >= rb) return;                                            // a is not lower than b
-    if (now - (this.lastWedge.get(a.id) ?? -1e9) < FEEL.wedge.repeatMs) return;
-    this.lastWedge.set(a.id, now);
-    this.stats[a.id].wedges++;
-    // b gets lifted: up + pushed back along a's forward, and loses traction
-    const aFwd = forward(a); aFwd.y = 0; aFwd.normalize();
-    const kick = aFwd.scale(FEEL.wedge.back); kick.y = FEEL.wedge.lift;
-    const mass = b.body.getMassProperties().mass ?? 50;
-    b.body.applyImpulse(kick.scale(mass), b.root.position.add(aFwd.scale(-0.5)));   // off-centre → nose lifts
-    b.lowTractionUntil = now + FEEL.wedge.tractionMs;
-    b.lowTractionScale = FEEL.wedge.tractionScale;
-    this.fx.wedge(b.root.position.add(new Vector3(0, 0.5, 0)));
+    attacker.weapon.spinReset();      // any spinner hit dumps the spin; motor stays ON and ramps back
   }
 
   private bump(attacker: Bot, point: Vector3) {

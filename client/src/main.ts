@@ -6,7 +6,7 @@ import type { BotBuild } from '../../src/core/types.js';
 import { canAttack, currentSpeed, isDestroyed, isImmobilized } from '../../src/core/state.js';
 import { catalog } from './catalog.js';
 import { buildArena, WALL_H } from './arena.js';
-import { buildBot, forward, type Bot } from './bot.js';
+import { buildBot, forward, upVector, REST_Y, type Bot } from './bot.js';
 import { readDrive, isDown, KEYS, type Drive } from './input.js';
 import { Combat } from './combat.js';
 import { Hud } from './hud.js';
@@ -17,15 +17,19 @@ import { aiDrive, type Difficulty } from './ai.js';
 
 const MATCH_SECONDS = 180;
 const SPIN_VISUAL = { x: 25, y: 20 };     // rad/s at full spin
-/** Drive feel. Push strength = mass x (baseAccel + accelPerSpeed x speed). */
+/** Drive feel. Push strength = mass x (baseAccel + accelPerSpeed x speed).
+ *  v0.7: the drive only acts while the wheels are actually on the floor (grounded + upright) --
+ *  a bot lifted on a wedge, launched, or tipped has no grip, which is what makes lifts work. */
 const DRIVE = {
   speedScale: 0.6,      // motor speed stat -> m/s
   gain: 6,              // how hard it chases the target speed (1/s)
-  baseAccel: 16,        // m/s^2 every motor can manage (v0.6: up from 10)
-  accelPerSpeed: 3.5,   // extra m/s^2 per m/s of top speed (stronger motor pushes harder) (v0.6: up from 2.5)
-  wheelsDownDot: 0.6,   // up-vector . world-up must be above this for the wheels to grip at all
+  baseAccel: 16,        // m/s^2 every motor can manage
+  accelPerSpeed: 3.5,   // extra m/s^2 per m/s of top speed (stronger motor pushes harder)
+  wheelsDownDot: 0.8,   // up-vector . world-up must be above this for the wheels to grip at all
+  groundedY: 0.08,      // chassis centre may be this far above its rest height and still count as on the floor
   lateralGrip: 8,       // sideways velocity damping (1/s)
   turnRate: 3.0,        // rad/s at full stick
+  turnGain: 10,         // how fast yaw rate chases the stick (1/s) -- applied as a torque-like velocity blend
 };
 const PHYS_STEP = 1 / 60;
 /** OUT of the arena (v0.5): a bot is out once its centre is past a wall plane AND has dropped
@@ -37,15 +41,15 @@ const OUT = {
   camLerp: 0.16,       // faster camera pull when following a flyer (normal is 0.08)
 };
 
-/** v0.6 upside-down + self-right. A bot is INVERTED once its up-vector points mostly down and it has
- *  settled near the floor: no drive, weapon suppressed (defenseless) for selfRightMs, then a scripted
- *  hop + roll and the chassis is snapped back onto its wheels. */
+/** Upside-down + self-right (built-in srimech). A bot is INVERTED once its up-vector points mostly down
+ *  and it has settled near the floor: no drive, weapon suppressed (defenseless) for selfRightMs, then a
+ *  scripted hop + roll and the chassis is snapped back onto its wheels. */
 const INVERT = {
   upDot: -0.35,        // up-vector . world-up below this = upside down (past ~110 deg of tilt). A bot on its
                        // side/end never rests there: the low centre of mass (bot.ts) rolls it to wheels or back.
   restVy: 0.6,         // |vertical speed| below this = settled
   restY: 1.2,          // centre height below this = on (or near) the floor
-  selfRightMs: 2000,   // helpless this long, then self-right
+  selfRightMs: 1000,   // helpless this long, then self-right (v0.7: 1 s, was 2)
   hopUp: 3.2,          // m/s hop
   roll: 8,             // rad/s roll about the chassis forward axis during the hop
   snapMs: 420,         // after this long in the hop, snap upright (yaw kept)
@@ -129,11 +133,8 @@ async function main() {
     if (isDown('KeyT') && performance.now() - lastToggle > 400) { p2Human = !p2Human; lastToggle = performance.now(); hud.showControls(controlLines(), 4000); }
     helpEl.innerHTML = `P1: ${KEYS.A.label} &nbsp;|&nbsp; P2: ${p2Human ? KEYS.B.label + ' (human)' : 'AI ' + difficulty.toUpperCase()} (T toggles) &nbsp;|&nbsp; R: restart &nbsp;|&nbsp; B: lab`;
 
-    // Hitstop: freeze physics for a few frames after a big hit (sign shown for testing)
     const now = performance.now();
-    const frozen = combat.inHitstop(now);
-    if (combat.hitstopStarted) { combat.hitstopStarted = false; hud.sign('HITSTOP', 350); }
-    scene.getPhysicsEngine()?.setTimeStep(frozen ? 1e-5 : PHYS_STEP);
+    scene.getPhysicsEngine()?.setTimeStep(PHYS_STEP);
 
     // Drive + weapons
     for (const b of bots) {
@@ -142,39 +143,36 @@ async function main() {
         ? readDrive(b.id)
         : (over ? { throttle: 0, turn: 0, fire: false } : aiDrive(b, bots[0], arena.half, dt, difficulty));
 
-      // Upside down? (v0.6) -- helpless until the self-right fires
+      // Upside down? -- helpless until the self-right fires
       updateInverted(b, now);
       b.weapon.suppressed = !!b.inverted || !!b.rightingUntil;
-      b.weapon.update(frozen ? 0 : dt, d.fire && !over, canAttack(b.state));
+      b.weapon.update(dt, d.fire && !over, canAttack(b.state));
       const helpless = !!b.inverted || !!b.rightingUntil;
 
-      // Force-based drive (v0.4): push toward the target speed with a force capped by the
-      // motor, so mass x motor wins shoves and knockback impulses aren't overwritten.
+      // Force-based drive: push toward the target speed with a force capped by the motor, so
+      // mass x motor wins shoves and impulses aren't overwritten. Only while the wheels are on
+      // the floor: upright enough AND the chassis sitting at (or near) its rest height.
       const spd = currentSpeed(b.state) * DRIVE.speedScale;   // motor speed stat -> m/s
       const v = b.body.getLinearVelocity();
-      // Drive along the FLAT forward (v0.6): a tilted chassis must never push itself skyward,
-      // and a bot whose wheels aren't down gets no drive at all.
       const fwd = forward(b); fwd.y = 0;
-      const upDotNow = Vector3.Dot(Vector3.TransformNormal(Vector3.Up(), b.root.getWorldMatrix()).normalize(), Vector3.Up());
-      const wheelsDown = upDotNow > DRIVE.wheelsDownDot && fwd.lengthSquared() > 1e-4;
+      const upDotNow = Vector3.Dot(upVector(b), Vector3.Up());
+      const grounded = b.root.position.y < REST_Y + DRIVE.groundedY;
+      const wheelsDown = upDotNow > DRIVE.wheelsDownDot && grounded && fwd.lengthSquared() > 1e-4;
       if (wheelsDown) fwd.normalize();
-      if (spd > 0 && !over && !frozen && !helpless && wheelsDown) {
+      if (spd > 0 && !over && !helpless && wheelsDown) {
         const mass = b.body.getMassProperties().mass ?? 50;
-        const grip = combat.traction(b, now);
         const right = Vector3.Cross(Vector3.Up(), fwd);
         const vf = Vector3.Dot(v, fwd), vr = Vector3.Dot(v, right);
         const maxAccel = DRIVE.baseAccel + DRIVE.accelPerSpeed * spd;             // motor strength
         const wantAccel = (d.throttle * spd - vf) * DRIVE.gain;
-        const accel = Math.max(-maxAccel, Math.min(maxAccel, wantAccel)) * grip;
-        const lateral = -vr * DRIVE.lateralGrip * grip;                           // tyres resist sliding
+        const accel = Math.max(-maxAccel, Math.min(maxAccel, wantAccel));
+        const lateral = -vr * DRIVE.lateralGrip;                                  // tyres resist sliding
         const force = fwd.scale(accel * mass).add(right.scale(lateral * mass));
         b.body.applyForce(force, b.root.position);
+        // Steering: blend the yaw rate toward the stick; pitch/roll are left to physics now
         const av = b.body.getAngularVelocity();
-        const tumbling = now < (b.tumbleUntil ?? 0);               // v0.6: let a launch tumble play out
-        b.body.setAngularDamping(tumbling ? 0.5 : 3);              // (heavy damping would kill the tumble)
-        b.body.setAngularVelocity(tumbling
-          ? new Vector3(av.x, av.y + d.turn * DRIVE.turnRate * grip * 0.3, av.z)
-          : new Vector3(av.x * 0.5, d.turn * DRIVE.turnRate * grip, av.z * 0.5));
+        const k = Math.min(1, dt * DRIVE.turnGain);
+        b.body.setAngularVelocity(new Vector3(av.x, av.y + (d.turn * DRIVE.turnRate - av.y) * k, av.z));
       }
 
       // Weapon visuals
@@ -243,10 +241,9 @@ async function main() {
 
   function end(text: string, color: string) { over = true; hud.showWinner(text + '  (R restart · B lab)', color); }
 
-  /** v0.6: track upside-down / self-righting for one bot. */
+  /** Track upside-down / self-righting for one bot. */
   function updateInverted(b: Bot, now: number) {
-    const up = Vector3.TransformNormal(Vector3.Up(), b.root.getWorldMatrix()).normalize();
-    const upDot = Vector3.Dot(up, Vector3.Up());
+    const upDot = Vector3.Dot(upVector(b), Vector3.Up());
 
     // Self-right in progress: at snap time put the chassis back on its wheels (yaw kept).
     if (b.rightingUntil) {
@@ -277,7 +274,6 @@ async function main() {
       const fwd = forward(b); fwd.y = 0; fwd.normalize();
       b.body.setLinearVelocity(new Vector3(vel.x, INVERT.hopUp, vel.z));
       b.body.setAngularVelocity(fwd.scale(INVERT.roll));
-      b.tumbleUntil = now + INVERT.snapMs + 100;
       b.rightingUntil = now + INVERT.snapMs;
       hud.sign('SELF-RIGHT!', 700, '#4dd2ff');
     }

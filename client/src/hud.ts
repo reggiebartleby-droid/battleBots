@@ -58,7 +58,7 @@ export class Hud {
     const ws = b.weapon.status(canAttack(b.state));
     const weaponRow = `<div class="part wpn ${ws.cls}"><span>weapon</span><div class="bar"><i class="w" style="width:${ws.pct}%"></i></div><span class="lbl">${ws.label}</span></div>`;
     const statRow = st
-      ? `<div class="part stats"><span>hits ${st.hits}</span><span>dealt ${st.dmg}</span><span>bumps ${st.bumps} · wedges ${st.wedges}</span></div>`
+      ? `<div class="part stats"><span>hits ${st.hits}</span><span>dealt ${st.dmg}</span><span>bumps ${st.bumps} · hit ${st.maxImpulse} m/s</span></div>`
       : '';
     return `<h3 style="color:${b.build.cosmetics.paint}">${b.build.cosmetics.name}</h3>${rows}${weaponRow}${statRow}<div class="part" style="opacity:.6"><span>dmg taken</span><span></span><span>${b.state.totalDamageTaken}</span></div>`;
   }

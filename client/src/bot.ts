@@ -1,10 +1,18 @@
 /**
  * Assembles a visual + physical bot from a BotBuild using placeholder primitives.
- * One rigid body per bot (the chassis); parts are child meshes.
+ *
+ * v0.7 "plain physics": one rigid body per bot, but its collision shape is a COMPOUND of
+ * real part colliders (PhysicsShapeContainer):
+ *   - chassis box
+ *   - four wheel cylinders (so the chassis has real ground clearance -- a lower ramp can get under it)
+ *   - the front part as a real sloped wedge prism (plow / wedge / wedgelet differ in angle and tip height)
+ *   - the weapon's shape (hull of its mesh, or a sweep cylinder for spinners)
+ *   - side armor plates
+ * Lifting / stacking / tipping now come from geometry and mass, not scripted impulses.
  */
 import {
-  Color3, Mesh, MeshBuilder, PhysicsAggregate, PhysicsBody, PhysicsShapeType, Scene,
-  StandardMaterial, Vector3, Quaternion,
+  Color3, Mesh, MeshBuilder, PhysicsBody, PhysicsMotionType, PhysicsShape, PhysicsShapeBox, PhysicsShapeContainer,
+  PhysicsShapeConvexHull, PhysicsShapeCylinder, PhysicsMaterialCombineMode, Scene, StandardMaterial, Vector3, VertexData, Quaternion,
 } from '@babylonjs/core';
 import type { BotBuild, Catalog, PartDef, WeaponKind } from '../../src/core/types.js';
 import { createBotState, type BotState } from '../../src/core/state.js';
@@ -25,22 +33,41 @@ export interface Bot {
   weapon: Weapon;                     // activation state (spin level, swing phase, grip)
   weaponRestRotX: number;             // weaponMesh.rotation.x at rest, for swing/flip animation
   lastHit?: { socket: string; t: number };   // most recent damage taken (HUD flash)
-  lowTractionUntil?: number;          // drive force is scaled by lowTractionScale until this time (combat.ts)
-  lowTractionScale?: number;
   /** Set when the bot is knocked out of the arena (main.ts OUT block): the moment, where it was
    *  and how fast it was going. This is the hook for the elimination animation (fx.explode). */
   eliminated?: { t: number; pos: Vector3; vel: Vector3; reason: 'out' };
-  /** v0.6: while now < tumbleUntil the per-frame "stay level" damping in main.ts is off,
-   *  so a launch / recoil tumble actually happens. */
-  tumbleUntil?: number;
-  /** v0.6: set while the bot is resting upside down (main.ts). since = when it landed inverted. */
+  /** Set while the bot is resting upside down (main.ts). since = when it landed inverted. */
   inverted?: { since: number };
-  /** v0.6: self-right in progress: at this time the chassis is snapped back onto its wheels. */
+  /** Self-right in progress: at this time the chassis is snapped back onto its wheels. */
   rightingUntil?: number;
 }
 
-const CHASSIS = { w: 1.4, h: 0.35, d: 1.6 };
-const COM_DROP = 0.12;   // centre of mass this far below the chassis centre (v0.6)
+export const CHASSIS = { w: 1.4, h: 0.35, d: 1.6 };
+export const WHEEL = { r: 0.25, w: 0.2, y: -0.05, x: CHASSIS.w / 2 + 0.12 };
+/** Chassis centre height when the wheels sit on the floor (floor top is y = 0). */
+export const REST_Y = WHEEL.r - WHEEL.y;          // 0.30
+
+/** Physics tuning for the body (v0.7). */
+export const BODY = {
+  massScale: 0.4,          // bot weight stat -> kg
+  minMass: 20,
+  comDrop: 0.12,           // centre of mass this far below the chassis centre (bottom-heavy)
+  angularDamping: 0.5,     // low: tumbles are real now
+  linearDamping: 0.1,
+  // per-part materials (friction combines by geometric mean with whatever it touches)
+  chassis: { friction: 0.5, restitution: 0.35 },
+  wheel:   { friction: 0.15, restitution: 0.1 },   // low: the drive model supplies grip; wheels mostly roll
+  front:   { friction: 0.12, restitution: 0.2 },   // slick ramp so things slide up it
+  weapon:  { friction: 0.4, restitution: 0.4 },
+  armor:   { friction: 0.5, restitution: 0.35 },
+};
+
+/** Front ramps: slope angle, how high the tip sits (floor contact is y = -REST_Y) and where the top meets the chassis. */
+const FRONT: Record<string, { angleDeg: number; tipY: number; topY: number }> = {
+  plow:     { angleDeg: 20, tipY: -REST_Y + 0.010, topY: 0.05 },             // lowest, longest, heavy
+  wedge:    { angleDeg: 30, tipY: -REST_Y + 0.025, topY: CHASSIS.h / 2 },
+  wedgelet: { angleDeg: 35, tipY: -REST_Y + 0.040, topY: CHASSIS.h / 2 },    // hinged in real life: sits a touch higher
+};
 
 function mat(scene: Scene, name: string, hex: string, alpha = 1) {
   const m = new StandardMaterial(name, scene);
@@ -58,6 +85,7 @@ export interface BotMesh {
   partMeshes: Record<string, Mesh>;
   totalWeight: number;
   weaponRestRotX: number;
+  partKinds: Record<string, PartDef>;   // socketId -> part (for the collider pass)
 }
 
 export function assembleBotMesh(id: string, build: BotBuild, catalog: Catalog, scene: Scene): BotMesh {
@@ -69,6 +97,7 @@ export function assembleBotMesh(id: string, build: BotBuild, catalog: Catalog, s
   root.material = mat(scene, `paint${id}`, paint);
 
   const partMeshes: Record<string, Mesh> = {};
+  const partKinds: Record<string, PartDef> = {};
   let weaponMesh: Mesh | undefined;
   let weaponKind: WeaponKind | undefined;
   let spinAxis: Bot['spinAxis'] = 'none';
@@ -81,6 +110,7 @@ export function assembleBotMesh(id: string, build: BotBuild, catalog: Catalog, s
     if (!m) continue;
     m.parent = root;
     partMeshes[socketId] = m;
+    partKinds[socketId] = part;
     if (part.type === 'weapon') {
       weaponMesh = m;
       weaponKind = part.kind as WeaponKind;
@@ -91,7 +121,7 @@ export function assembleBotMesh(id: string, build: BotBuild, catalog: Catalog, s
   // Full-body spinners: hide the chassis inside the shell
   if (build.bodyId === 'full_body_spinner') root.visibility = 0.001;
 
-  return { root, weaponMesh, weaponKind, spinAxis, partMeshes, totalWeight: v.totalWeight, weaponRestRotX: weaponMesh?.rotation.x ?? 0 };
+  return { root, weaponMesh, weaponKind, spinAxis, partMeshes, partKinds, totalWeight: v.totalWeight, weaponRestRotX: weaponMesh?.rotation.x ?? 0 };
 }
 
 export function buildBot(id: 'A' | 'B', build: BotBuild, catalog: Catalog, scene: Scene, pos: Vector3, facing: number): Bot {
@@ -100,21 +130,74 @@ export function buildBot(id: 'A' | 'B', build: BotBuild, catalog: Catalog, scene
   const { root } = mesh;
   root.position.copyFrom(pos);
   root.rotationQuaternion = Quaternion.RotationAxis(Vector3.Up(), facing);
+  root.computeWorldMatrix(true);
 
-  const agg = new PhysicsAggregate(root, PhysicsShapeType.BOX, {
-    mass: Math.max(20, mesh.totalWeight * 0.4), friction: 0.6, restitution: 0.6,   // bouncy bot-bot contacts (feel)
-  }, scene);
-  agg.body.setCollisionCallbackEnabled(true);
-  // v0.6: bottom-heavy, like a real bot (wheels/batteries low). A bot can't rest on its side or
-  // stand on end -- it rolls onto its wheels or its back by itself; only "on its back" is a state.
-  const mp = agg.body.getMassProperties();
-  agg.body.setMassProperties({ ...mp, centerOfMass: new Vector3(0, -COM_DROP, 0) });
-  // keep bots upright-ish: heavy angular damping
-  agg.body.setAngularDamping(3);
-  agg.body.setLinearDamping(0.4);     // lower than v0.3 so knockback carries
+  // ---- Compound collision shape ----
+  const shape = new PhysicsShapeContainer(scene);
+  const add = (s: PhysicsShape, m: PhysicsMaterialLike, child?: Mesh) => {
+    s.material = { ...m, frictionCombine: PhysicsMaterialCombineMode.GEOMETRIC_MEAN, restitutionCombine: PhysicsMaterialCombineMode.GEOMETRIC_MEAN };
+    if (child) { child.computeWorldMatrix(true); shape.addChildFromParent(root, s, child); }
+    else shape.addChild(s);
+  };
 
-  return { id, build, state, body: agg.body, weapon: new Weapon(mesh.weaponKind), ...mesh };
+  // chassis
+  add(new PhysicsShapeBox(Vector3.Zero(), Quaternion.Identity(), new Vector3(CHASSIS.w, CHASSIS.h, CHASSIS.d), scene), BODY.chassis);
+
+  // wheels: cylinders along x at each wheel position (the visual wheels are children of the wheels mesh)
+  for (const [socketId, m] of Object.entries(mesh.partMeshes)) {
+    const part = mesh.partKinds[socketId];
+    switch (part.type) {
+      case 'wheels':
+        for (const w of m.getChildMeshes()) {
+          const p = (w as Mesh).position;   // local to the wheels group, which sits at the chassis origin
+          add(new PhysicsShapeCylinder(new Vector3(p.x - WHEEL.w / 2, p.y, p.z), new Vector3(p.x + WHEEL.w / 2, p.y, p.z), WHEEL.r, scene), BODY.wheel);
+        }
+        break;
+      case 'front':
+        add(new PhysicsShapeConvexHull(m, scene), BODY.front, m);
+        break;
+      case 'weapon': {
+        const kind = part.kind as WeaponKind;
+        // Spinners: a sweep cylinder matching the spinning visual (the collider doesn't rotate; Phase 2 makes it a real body)
+        if (mesh.spinAxis === 'x') {
+          const r = kind === 'drum' ? 0.275 : kind === 'bar' ? 0.55 : 0.45;
+          const half = kind === 'drum' ? 0.6 : kind === 'bar' ? 0.09 : 0.04;
+          const c = m.position;
+          add(new PhysicsShapeCylinder(new Vector3(c.x - half, c.y, c.z), new Vector3(c.x + half, c.y, c.z), r, scene), BODY.weapon);
+        } else if (mesh.spinAxis === 'y') {
+          const r = kind === 'shell' || kind === 'cage' ? 1.0 : kind === 'h_bar' ? 1.0 : kind === 'h_disc' ? 0.8 : 0.9;
+          const half = kind === 'shell' ? 0.25 : kind === 'cage' ? 0.075 : 0.04;
+          const c = m.position;
+          add(new PhysicsShapeCylinder(new Vector3(c.x, c.y - half, c.z), new Vector3(c.x, c.y + half, c.z), r, scene), BODY.weapon);
+        } else {
+          add(new PhysicsShapeConvexHull(m, scene), BODY.weapon, m);   // arm / plate at its rest pose
+        }
+        break;
+      }
+      case 'armor':
+        if (socketId !== 'armor') add(new PhysicsShapeConvexHull(m, scene), BODY.armor, m);   // side plates stick out; top plate is inside the hull anyway
+        break;
+    }
+  }
+
+  const body = new PhysicsBody(root, PhysicsMotionType.DYNAMIC, false, scene);
+  body.shape = shape;
+  body.setCollisionCallbackEnabled(true);
+
+  // Mass from the weight stat. Havok keeps the inertia it computed from the compound shape
+  // (stored per unit mass, so it stays consistent when the mass is overridden -- verified in
+  // a headless test); centre of mass dropped so the bot is bottom-heavy like a real one.
+  const mp = body.getMassProperties();
+  const mass = Math.max(BODY.minMass, mesh.totalWeight * BODY.massScale);
+  const com = (mp.centerOfMass ?? Vector3.Zero()).add(new Vector3(0, -BODY.comDrop, 0));
+  body.setMassProperties({ mass, centerOfMass: com });
+  body.setAngularDamping(BODY.angularDamping);
+  body.setLinearDamping(BODY.linearDamping);
+
+  return { id, build, state, body, weapon: new Weapon(mesh.weaponKind), ...mesh };
 }
+
+type PhysicsMaterialLike = { friction: number; restitution: number };
 
 function spinAxisFor(kind: WeaponKind): Bot['spinAxis'] {
   if (['disc', 'bar', 'drum'].includes(kind)) return 'x';
@@ -124,15 +207,40 @@ function spinAxisFor(kind: WeaponKind): Bot['spinAxis'] {
 
 type Mats = { dark: StandardMaterial; steel: StandardMaterial; rubber: StandardMaterial; paint: StandardMaterial };
 
+/** A triangular wedge prism in chassis-local coordinates: back face flush with the chassis front, tip out front. */
+function wedgePrism(scene: Scene, name: string, kind: string): Mesh {
+  const f = FRONT[kind] ?? FRONT.wedge;
+  const z0 = CHASSIS.d / 2;
+  const len = (f.topY - f.tipY) / Math.tan((f.angleDeg * Math.PI) / 180);
+  const hw = CHASSIS.w / 2;
+  // triangle (z, y): back-bottom, back-top, tip   -- extruded along x
+  const tri = [[z0, f.tipY], [z0, f.topY], [z0 + len, f.tipY]] as const;
+  const positions: number[] = [];
+  for (const x of [-hw, hw]) for (const [z, y] of tri) positions.push(x, y, z);
+  // indices: left tri (0,1,2), right tri (3,4,5), and 3 quads between them
+  const indices = [
+    0, 1, 2,  3, 5, 4,      // left / right triangles
+    0, 4, 1,  0, 3, 4,      // back face
+    1, 5, 2,  1, 4, 5,      // slope
+    2, 3, 0,  2, 5, 3,      // bottom
+  ];
+  const vd = new VertexData();
+  vd.positions = positions; vd.indices = indices;
+  const normals: number[] = [];
+  VertexData.ComputeNormals(positions, indices, normals);
+  vd.normals = normals;
+  const m = new Mesh(name, scene);
+  vd.applyToMesh(m);
+  return m;
+}
+
 function partMesh(scene: Scene, id: string, socketId: string, part: PartDef, mats: Mats): Mesh | undefined {
   const n = `${id}_${socketId}`;
   const front = CHASSIS.d / 2;
   switch (part.type) {
     case 'weapon': return weaponMesh(scene, n, part.kind as WeaponKind, mats);
     case 'front': {
-      const m = MeshBuilder.CreateBox(n, { width: CHASSIS.w, height: 0.3, depth: 0.5 }, scene);
-      m.position.set(0, -0.02, front + 0.25);
-      m.rotation.x = part.kind === 'plow' ? 0.35 : 0.55;
+      const m = wedgePrism(scene, n, part.kind ?? "wedge");
       m.material = mats.steel;
       return m;
     }
@@ -149,9 +257,9 @@ function partMesh(scene: Scene, id: string, socketId: string, part: PartDef, mat
       const zOff = socketId === 'wheels_1' ? 0.45 : socketId === 'wheels_2' ? -0.45 : 0;
       const zs = zOff ? [zOff] : [0.5, -0.5];
       for (const z of zs) for (const x of [-1, 1]) {
-        const w = MeshBuilder.CreateCylinder(`${n}_${x}_${z}`, { diameter: 0.5, height: 0.2 }, scene);
+        const w = MeshBuilder.CreateCylinder(`${n}_${x}_${z}`, { diameter: WHEEL.r * 2, height: WHEEL.w }, scene);
         w.rotation.z = Math.PI / 2;
-        w.position.set(x * (CHASSIS.w / 2 + 0.12), -0.05, z);
+        w.position.set(x * WHEEL.x, WHEEL.y, z);
         w.material = mats.rubber;
         w.parent = m;
       }
@@ -216,4 +324,9 @@ function weaponMesh(scene: Scene, n: string, kind: WeaponKind, mats: Mats): Mesh
 /** Forward direction in world space (bot faces +Z locally). */
 export function forward(bot: Bot): Vector3 {
   return Vector3.TransformNormal(Vector3.Forward(), bot.root.getWorldMatrix()).normalize();
+}
+
+/** Bot's up vector in world space. */
+export function upVector(bot: Bot): Vector3 {
+  return Vector3.TransformNormal(Vector3.Up(), bot.root.getWorldMatrix()).normalize();
 }
