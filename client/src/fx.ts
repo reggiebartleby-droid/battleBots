@@ -7,7 +7,7 @@ import { botMeshes, type Bot } from './bot.js';
 
 interface Spark { m: Mesh; v: Vector3; life: number; max: number }
 interface Label { el: HTMLElement; pos: Vector3; life: number; max: number }
-interface Flash { mat: StandardMaterial; life: number }
+interface Flash { mat: { emissiveColor: Color3 }; life: number }   // v0.16: bots use PBR materials
 interface Debris { m: Mesh; v: Vector3; w: Vector3; life: number; max: number }
 
 const SPARK_LIFE = 0.45;
@@ -175,9 +175,10 @@ export class Fx {
   }
 
   private flash(bot: Bot) {
-    const mats = new Set<StandardMaterial>();
+    const mats = new Set<{ emissiveColor: Color3 }>();
     for (const m of botMeshes(bot)) {
-      if (m.material instanceof StandardMaterial) mats.add(m.material);
+      const mm = m.material as unknown as { emissiveColor?: Color3 } | null;
+      if (mm?.emissiveColor) mats.add(mm as { emissiveColor: Color3 });
     }
     for (const mat of mats) {
       const existing = this.flashes.find(f => f.mat === mat);

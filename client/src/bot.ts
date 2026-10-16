@@ -46,15 +46,16 @@
  *    friction can take (TYRE), instead of yawing the light chassis around.
  */
 import {
-  Color3, Matrix, Mesh, type TransformNode, MeshBuilder, PhysicsBody, PhysicsMotionType, PhysicsShape, PhysicsShapeBox, PhysicsShapeContainer,
-  PhysicsShapeConvexHull, PhysicsShapeCylinder, PhysicsMaterialCombineMode, Scene, StandardMaterial, Vector3, VertexData, Quaternion,
+  Color3, Matrix, Mesh, TransformNode, MeshBuilder, type Material, type Node, PhysicsBody, PhysicsMotionType, PhysicsShape, PhysicsShapeBox, PhysicsShapeContainer,
+  PhysicsShapeConvexHull, PhysicsShapeCylinder, PhysicsMaterialCombineMode, Scene, Vector3, VertexData, Quaternion,
   Physics6DoFConstraint, PhysicsConstraintAxis, PhysicsConstraintMotorType, type AbstractMesh,
 } from '@babylonjs/core';
 import type { BotBuild, Catalog, PartDef, WeaponKind } from '../../src/core/types.js';
-import { createBotState, type BotState } from '../../src/core/state.js';
+import { createBotState, type BotState, type StateOptions } from '../../src/core/state.js';
 import { validateBuild } from '../../src/core/validate.js';
 import { partWeight } from '../../src/core/weight.js';
 import { Weapon } from './weapon.js';
+import { botMaterials, type BotMats } from './look.js';
 
 const CHASSIS_H = 0.35;   // = CHASSIS.h (ARM below needs it before CHASSIS is declared)
 
@@ -298,12 +299,6 @@ const FRONT: Record<string, { angleDeg: number; tipY: number; topY: number }> = 
   wedgelet: { angleDeg: 35, tipY: -REST_Y + 0.040, topY: CHASSIS.h / 2 },    // hinged in real life: sits a touch higher
 };
 
-function mat(scene: Scene, name: string, hex: string, alpha = 1) {
-  const m = new StandardMaterial(name, scene);
-  m.diffuseColor = Color3.FromHexString(hex);
-  m.alpha = alpha;
-  return m;
-}
 
 /** Visual-only assembly (no physics). Used by the lab preview and by buildBot(). */
 export interface BotMesh {
@@ -323,19 +318,17 @@ export function assembleBotMesh(id: string, build: BotBuild, catalog: Catalog, s
   const paint = build.cosmetics.paint ?? (id === 'A' ? '#e63946' : '#1d7cf2');
 
   const root = MeshBuilder.CreateBox(`bot${id}`, { width: CHASSIS.w, height: CHASSIS.h, depth: CHASSIS.d }, scene);
-  root.material = mat(scene, `paint${id}`, paint);
+  const mats = botMaterials(scene, id, paint);   // v0.16 battle-worn PBR set (look.ts)
+  root.material = mats.paint;
 
   const partMeshes: Record<string, Mesh> = {};
   const partKinds: Record<string, PartDef> = {};
   let weaponMesh: Mesh | undefined;
   let weaponKind: WeaponKind | undefined;
   let spinAxis: Bot['spinAxis'] = 'none';
-  const dark = mat(scene, `dark${id}`, '#3a3d44');
-  const steel = mat(scene, `steel${id}`, '#9aa3ad');
-  const rubber = mat(scene, `rubber${id}`, '#15171a');
 
   for (const [socketId, part] of Object.entries(v.resolved)) {
-    const m = partMesh(scene, id, socketId, part, { dark, steel, rubber, paint: root.material as StandardMaterial }, build.bodyId);
+    const m = partMesh(scene, id, socketId, part, mats, build.bodyId);
     if (!m) continue;
     m.parent = root;
     partMeshes[socketId] = m;
@@ -354,15 +347,17 @@ export function assembleBotMesh(id: string, build: BotBuild, catalog: Catalog, s
   if (WHEELIE.bodies.includes(build.bodyId)) {
     const g = wheelieGeom();
     const wb = MeshBuilder.CreateBox(`bot${id}_wheelie`, { width: WHEELIE.width, height: WHEELIE.thick, depth: g.len }, scene);
-    wb.material = steel; wb.parent = root; wb.position.copyFrom(g.centre); wb.rotation.x = g.rotX;
+    wb.material = mats.steel; wb.parent = root; wb.position.copyFrom(g.centre); wb.rotation.x = g.rotX;
   }
+
+  addDetails(scene, root, build.bodyId, partMeshes, partKinds, mats);   // v0.16 visual-only detail
 
   return { root, weaponMesh, weaponKind, spinAxis, partMeshes, partKinds, totalWeight: v.totalWeight, weaponRestRotX: weaponMesh?.rotation.x ?? 0 };
 }
 
-export function buildBot(id: 'A' | 'B', build: BotBuild, catalog: Catalog, scene: Scene, pos: Vector3, facing: number): Bot {
+export function buildBot(id: 'A' | 'B', build: BotBuild, catalog: Catalog, scene: Scene, pos: Vector3, facing: number, opts: StateOptions = {}): Bot {
   const mesh = assembleBotMesh(id, build, catalog, scene);
-  const state = createBotState(build, catalog);
+  const state = createBotState(build, catalog, opts);
   const { root } = mesh;
   root.position.copyFrom(pos);
   root.rotationQuaternion = Quaternion.RotationAxis(Vector3.Up(), facing);
@@ -385,7 +380,7 @@ export function buildBot(id: 'A' | 'B', build: BotBuild, catalog: Catalog, scene
     const part = mesh.partKinds[socketId];
     switch (part.type) {
       case 'wheels':
-        for (const w of m.getChildMeshes()) {
+        for (const w of m.getChildMeshes(true)) {   // direct children = the tyres (v0.16: hub detail sits under each tyre)
           const p = (w as Mesh).position;   // local to the wheels group, which sits at the chassis origin
           add(new PhysicsShapeCylinder(new Vector3(p.x - WHEEL.w / 2, p.y, p.z), new Vector3(p.x + WHEEL.w / 2, p.y, p.z), WHEEL.r, scene), BODY.wheel);
         }
@@ -527,6 +522,7 @@ function buildHinges(scene: Scene, root: Mesh, chassis: PhysicsBody, wm: Mesh, k
     const slick = { ...BODY.front, frictionCombine: PhysicsMaterialCombineMode.GEOMETRIC_MEAN, restitutionCombine: PhysicsMaterialCombineMode.GEOMETRIC_MEAN };
     const bite = { friction: SPINNER.toothFriction, restitution: 0.2, frictionCombine: PhysicsMaterialCombineMode.MAXIMUM, restitutionCombine: PhysicsMaterialCombineMode.GEOMETRIC_MEAN };
     for (const c of node.getChildMeshes(false) as Mesh[]) {
+      if (isDeco(c)) continue;                                 // v0.16 visual detail: no collider
       c.computeWorldMatrix(true);
       const ext = c.getBoundingInfo().boundingBox.extendSize.scale(2);
       const s = new PhysicsShapeBox(Vector3.Zero(), Quaternion.Identity(), ext, scene);
@@ -677,7 +673,7 @@ function buildArm(scene: Scene, root: Mesh, chassis: PhysicsBody, wm: Mesh, kind
   const shape = new PhysicsShapeContainer(scene);
   const mat = { ...BODY.weapon, frictionCombine: PhysicsMaterialCombineMode.GEOMETRIC_MEAN, restitutionCombine: PhysicsMaterialCombineMode.GEOMETRIC_MEAN };
   for (const c of wm.getChildMeshes(true) as Mesh[]) {
-    if (c.name.endsWith('_saw')) continue;
+    if (c.name.endsWith('_saw') || isDeco(c)) continue;
     c.computeWorldMatrix(true);
     const ext = c.getBoundingInfo().boundingBox.extendSize.scale(2);
     const s = new PhysicsShapeBox(Vector3.Zero(), Quaternion.Identity(), ext, scene);
@@ -1115,7 +1111,7 @@ function spinAxisFor(kind: WeaponKind): Bot['spinAxis'] {
   return 'none';
 }
 
-type Mats = { dark: StandardMaterial; steel: StandardMaterial; rubber: StandardMaterial; paint: StandardMaterial };
+type Mats = BotMats;
 
 /** A triangular wedge prism in chassis-local coordinates: back face flush with the chassis front, tip out front. */
 function wedgePrism(scene: Scene, name: string, kind: string): Mesh {
@@ -1125,17 +1121,26 @@ function wedgePrism(scene: Scene, name: string, kind: string): Mesh {
   const hw = CHASSIS.w / 2;
   // triangle (z, y): back-bottom, back-top, tip   -- extruded along x
   const tri = [[z0, f.tipY], [z0, f.topY], [z0 + len, f.tipY]] as const;
-  const positions: number[] = [];
-  for (const x of [-hw, hw]) for (const [z, y] of tri) positions.push(x, y, z);
-  // indices: left tri (0,1,2), right tri (3,4,5), and 3 quads between them
-  const indices = [
-    0, 1, 2,  3, 5, 4,      // left / right triangles
-    0, 4, 1,  0, 3, 4,      // back face
-    1, 5, 2,  1, 4, 5,      // slope
-    2, 3, 0,  2, 5, 3,      // bottom
-  ];
+  const L = tri.map(([z, y]) => [-hw, y, z]), R = tri.map(([z, y]) => [hw, y, z]);
+  // v0.16: flat-shaded faces with their own UVs (the worn-steel texture needs UVs; same vertex positions,
+  // so the convex-hull collider is unchanged)
+  const positions: number[] = [], uvs: number[] = [], indices: number[] = [];
+  const tri3 = (a: number[], b: number[], c: number[], ua: number[], ub: number[], uc: number[]) => {
+    const i = positions.length / 3;
+    positions.push(...a, ...b, ...c); uvs.push(...ua, ...ub, ...uc); indices.push(i, i + 1, i + 2);
+  };
+  const side = (p: number[]) => [(p[2] - z0) / len, (p[1] - f.tipY) / (f.topY - f.tipY)];
+  tri3(L[0], L[1], L[2], side(L[0]), side(L[1]), side(L[2]));                          // left
+  tri3(R[0], R[2], R[1], side(R[0]), side(R[2]), side(R[1]));                          // right
+  const quad = (La: number[], Lb: number[], Ra: number[], Rb: number[]) => {           // a-edge v=0, b-edge v=1
+    tri3(La, Rb, Lb, [0, 0], [1, 1], [0, 1]);
+    tri3(La, Ra, Rb, [0, 0], [1, 0], [1, 1]);
+  };
+  quad(L[0], L[1], R[0], R[1]);                                                       // back
+  quad(L[1], L[2], R[1], R[2]);                                                       // slope
+  quad(L[2], L[0], R[2], R[0]);                                                       // bottom
   const vd = new VertexData();
-  vd.positions = positions; vd.indices = indices;
+  vd.positions = positions; vd.indices = indices; vd.uvs = uvs;
   const normals: number[] = [];
   VertexData.ComputeNormals(positions, indices, normals);
   vd.normals = normals;
@@ -1184,7 +1189,7 @@ function partMesh(scene: Scene, id: string, socketId: string, part: PartDef, mat
       const m = MeshBuilder.CreateBox(n, { width: socketId.endsWith('2') || socketId.endsWith('1') ? 0.08 : CHASSIS.w * 0.9, height: socketId === 'armor' ? 0.06 : 0.3, depth: CHASSIS.d * 0.9 }, scene);
       if (socketId === 'armor') m.position.set(0, CHASSIS.h / 2 + 0.03, 0);
       else m.position.set((socketId.endsWith('1') ? -1 : 1) * (CHASSIS.w / 2 + 0.04), 0, 0);
-      m.material = mats.dark;
+      m.material = socketId === 'armor' ? mats.paint : mats.dark;   // v0.16: top plate carries the paint job
       return m;
     }
     case 'wheels': {
@@ -1299,7 +1304,7 @@ function weaponMesh(scene: Scene, n: string, kind: WeaponKind, mats: Mats): Mesh
 
 /** A plate sloping DOWN-forward at deg from its top edge `top` (chassis space), lying just above a wedge face
  *  of the same angle. Parent is a node positioned at `origin` (chassis space). */
-function slopePiece(scene: Scene, name: string, parent: Mesh, origin: Vector3, len: number, deg: number, width: number, thick: number, material: StandardMaterial, topIn?: Vector3) {
+function slopePiece(scene: Scene, name: string, parent: Mesh, origin: Vector3, len: number, deg: number, width: number, thick: number, material: Material, topIn?: Vector3) {
   const a = (deg * Math.PI) / 180;
   const top = topIn ?? new Vector3(0, origin.y, CHASSIS.d / 2);
   const dir = new Vector3(0, -Math.sin(a), Math.cos(a)), nrm = new Vector3(0, Math.cos(a), Math.sin(a));
@@ -1317,4 +1322,293 @@ export function forward(bot: Bot): Vector3 {
 /** Bot's up vector in world space. */
 export function upVector(bot: Bot): Vector3 {
   return Vector3.TransformNormal(Vector3.Up(), bot.root.getWorldMatrix()).normalize();
+}
+
+// =====================================================================================================
+// v0.16 visual detail (looks only). Detail meshes carry DECO in their name so no collider pass picks them
+// up, ram anchors are TransformNodes (never meshes), and pieces sharing a parent + material are merged
+// into one mesh to keep draw calls down. Nothing here changes mass, colliders or balance.
+// =====================================================================================================
+const DECO = '_deco';
+export function isDeco(m: { name: string }) { return m.name.includes(DECO); }
+
+class DecoBin {
+  private groups = new Map<string, { parent: Node; mat: Material; meshes: Mesh[] }>();
+  constructor(readonly scene: Scene) {}
+  /** `m` is built unparented, in `parent`'s local space. */
+  add(parent: Node, mat: Material, m: Mesh): Mesh {
+    const key = `${parent.uniqueId}:${mat.uniqueId}`;
+    let g = this.groups.get(key);
+    if (!g) { g = { parent, mat, meshes: [] }; this.groups.set(key, g); }
+    g.meshes.push(m);
+    return m;
+  }
+  flush() {
+    for (const g of this.groups.values()) {
+      const merged = g.meshes.length === 1 ? g.meshes[0] : Mesh.MergeMeshes(g.meshes, true, true);
+      if (!merged) continue;
+      merged.name = `${g.parent.name}${DECO}_${g.mat.name}`;
+      merged.parent = g.parent;
+      merged.material = g.mat;
+      merged.isPickable = false;
+    }
+    this.groups.clear();
+  }
+}
+
+const V = (x: number, y: number, z: number) => new Vector3(x, y, z);
+type Axis = 'x' | 'y' | 'z';
+const BOLT_H = 0.016, B = BOLT_H / 2;
+
+function cyl(bin: DecoBin, parent: Node, mat: Material, at: Vector3, axis: Axis, d: number, h: number, tess = 16): Mesh {
+  const m = MeshBuilder.CreateCylinder('deco', { diameter: d, height: h, tessellation: tess }, bin.scene);
+  m.position.copyFrom(at);
+  if (axis === 'x') m.rotation.z = Math.PI / 2; else if (axis === 'z') m.rotation.x = Math.PI / 2;
+  return bin.add(parent, mat, m);
+}
+function box(bin: DecoBin, parent: Node, mat: Material, at: Vector3, w: number, h: number, d: number): Mesh {
+  const m = MeshBuilder.CreateBox('deco', { width: w, height: h, depth: d }, bin.scene);
+  m.position.copyFrom(at);
+  return bin.add(parent, mat, m);
+}
+/** A box from a to b (its depth runs along the segment); w = width across, h = height. */
+function beam(bin: DecoBin, parent: Node, mat: Material, a: Vector3, b: Vector3, w: number, h: number): Mesh {
+  const d = b.subtract(a), L = d.length();
+  const m = MeshBuilder.CreateBox('deco', { width: w, height: h, depth: L }, bin.scene);
+  m.position.copyFrom(a.add(b).scale(0.5));
+  m.rotation.y = Math.atan2(d.x, d.z);
+  m.rotation.x = -Math.atan2(d.y, Math.hypot(d.x, d.z));
+  return bin.add(parent, mat, m);
+}
+/** Hex bolt head; `at` is the bolt centre (surface + B along the axis). */
+function bolt(bin: DecoBin, parent: Node, mat: Material, at: Vector3, axis: Axis): Mesh {
+  return cyl(bin, parent, mat, at, axis, 0.034, BOLT_H, 6);
+}
+function boltLine(bin: DecoBin, parent: Node, mat: Material, a: Vector3, b: Vector3, spacing: number, axis: Axis, skipEnds = false) {
+  const n = Math.max(2, Math.round(Vector3.Distance(a, b) / spacing) + 1);
+  for (let i = skipEnds ? 1 : 0; i < (skipEnds ? n - 1 : n); i++) bolt(bin, parent, mat, Vector3.Lerp(a, b, i / (n - 1)), axis);
+}
+/** Bolts round the edge of a face: c = face centre (already lifted by B), u / v = half extents along the face. */
+function boltFrame(bin: DecoBin, parent: Node, mat: Material, c: Vector3, u: Vector3, v: Vector3, axis: Axis, inset: number, spacing: number) {
+  const ui = u.normalizeToNew().scale(u.length() - inset), vi = v.normalizeToNew().scale(v.length() - inset);
+  const k = [c.add(ui).add(vi), c.subtract(ui).add(vi), c.subtract(ui).subtract(vi), c.add(ui).subtract(vi)];
+  for (let i = 0; i < 4; i++) boltLine(bin, parent, mat, k[i], k[(i + 1) % 4], spacing, axis, i % 2 === 1);
+}
+/** Ring of bolts round an axis. */
+function boltRing(bin: DecoBin, parent: Node, mat: Material, c: Vector3, axis: Axis, r: number, n: number) {
+  for (let i = 0; i < n; i++) {
+    const t = (i / n) * Math.PI * 2, a = Math.cos(t) * r, b = Math.sin(t) * r;
+    bolt(bin, parent, mat, axis === 'y' ? c.add(V(a, 0, b)) : axis === 'x' ? c.add(V(0, a, b)) : c.add(V(a, b, 0)), axis);
+  }
+}
+
+// ---- hydraulic rams: barrel on the chassis, rod on the moving part, re-aimed every frame ----
+interface Ram { a: Vector3; b: TransformNode; barrel: Mesh; rod: Mesh; len: number }
+function addRam(scene: Scene, root: Mesh, mats: Mats, rams: Ram[], a: Vector3, parent: Node, bLocal: Vector3, r = 0.04, len = 0.3) {
+  const tn = new TransformNode(`${root.name}${DECO}_ramB`, scene);
+  tn.parent = parent; tn.position.copyFrom(bLocal);
+  const barrel = MeshBuilder.CreateCylinder(`${root.name}${DECO}_ram`, { diameter: r * 2, height: 1, tessellation: 14 }, scene);
+  const rod = MeshBuilder.CreateCylinder(`${root.name}${DECO}_rod`, { diameter: r, height: 1, tessellation: 10 }, scene);
+  barrel.material = mats.dark; rod.material = mats.chrome;
+  for (const m of [barrel, rod]) { m.parent = root; m.rotationQuaternion = new Quaternion(); m.isPickable = false; }
+  rams.push({ a, b: tn, barrel, rod, len });
+}
+function updateRams(root: Mesh, rams: Ram[]) {
+  root.computeWorldMatrix(true);
+  const inv = Matrix.Invert(root.getWorldMatrix());
+  for (const r of rams) {
+    r.b.computeWorldMatrix(true);
+    const b = Vector3.TransformCoordinates(r.b.getAbsolutePosition(), inv);
+    const d = b.subtract(r.a), L = Math.max(d.length(), 1e-4);
+    d.scaleInPlace(1 / L);
+    const lb = Math.min(r.len, L * 0.8);                    // barrel from the chassis end
+    r.barrel.position.copyFrom(r.a).addInPlace(d.scale(lb / 2)); r.barrel.scaling.y = lb;
+    const lr = Math.max(L - lb * 0.25, 0.01);                // rod from the moving end, sliding into the barrel
+    r.rod.position.copyFrom(b).subtractInPlace(d.scale(lr / 2)); r.rod.scaling.y = lr;
+    Quaternion.FromUnitVectorsToRef(Vector3.UpReadOnly, d, r.barrel.rotationQuaternion!);
+    r.rod.rotationQuaternion!.copyFrom(r.barrel.rotationQuaternion!);
+  }
+}
+
+/** Belt between two pulleys whose axes are parallel to `axis` ('x' or 'y'); centres in `parent` space. */
+function belt(bin: DecoBin, parent: Node, mat: Material, p1: Vector3, r1: number, p2: Vector3, r2: number, axis: 'x' | 'y') {
+  const d = p2.subtract(p1).normalize();
+  const n = axis === 'x' ? V(0, d.z, -d.y) : V(d.z, 0, -d.x);   // in the belt plane, perpendicular to the run
+  for (const s of [1, -1]) {
+    const a = p1.add(n.scale(s * r1)), b = p2.add(n.scale(s * r2));
+    if (axis === 'x') beam(bin, parent, mat, a, b, 0.03, 0.012);
+    else beam(bin, parent, mat, a, b, 0.012, 0.03);
+  }
+}
+
+function addDetails(scene: Scene, root: Mesh, bodyId: string, parts: Record<string, Mesh>, kinds: Record<string, PartDef>, mats: Mats) {
+  const bin = new DecoBin(scene);
+  const rams: Ram[] = [];
+  const H = CHASSIS.h / 2, W = CHASSIS.w / 2, D = CHASSIS.d / 2;
+  const fbs = bodyId === 'full_body_spinner';
+  const topBusy = bodyId === 'flipper' || bodyId === 'control';   // plates / forks lie on the top and the wedge
+
+  // ---- chassis: angle-iron rails on the top edges, bolted panels ----
+  if (!fbs) {
+    for (const sx of [-1, 1]) {
+      box(bin, root, mats.dark, V(sx * (W - 0.03), H + 0.015, 0), 0.06, 0.03, CHASSIS.d);
+      boltLine(bin, root, mats.bolt, V(sx * (W - 0.03), H + 0.03 + B, -D + 0.08), V(sx * (W - 0.03), H + 0.03 + B, D - 0.08), 0.2, 'y');
+      boltLine(bin, root, mats.bolt, V(sx * (W + B), 0.07, -D + 0.1), V(sx * (W + B), 0.07, D - 0.1), 0.22, 'x');
+    }
+    for (const sz of topBusy ? [-1] : [-1, 1]) {
+      box(bin, root, mats.dark, V(0, H + 0.015, sz * (D - 0.03)), CHASSIS.w - 0.12, 0.03, 0.06);
+      boltLine(bin, root, mats.bolt, V(-W + 0.14, H + 0.03 + B, sz * (D - 0.03)), V(W - 0.14, H + 0.03 + B, sz * (D - 0.03)), 0.2, 'y');
+    }
+    boltFrame(bin, root, mats.bolt, V(0, 0, -D - B), V(W, 0, 0), V(0, H, 0), 'z', 0.06, 0.2);
+  }
+
+  const wmm = parts['weapon_motor'];
+  for (const [sid, m] of Object.entries(parts)) {
+    const k = kinds[sid];
+    switch (k.type) {
+      case 'armor':
+        if (sid === 'armor') { if (!topBusy && bodyId !== 'flipper') boltFrame(bin, m, mats.bolt, V(0, 0.03 + B, 0), V(CHASSIS.w * 0.45, 0, 0), V(0, 0, CHASSIS.d * 0.45), 'y', 0.05, 0.22); }
+        else { const sx = sid.endsWith('1') ? -1 : 1; boltFrame(bin, m, mats.bolt, V(sx * (0.04 + B), 0, 0), V(0, 0.15, 0), V(0, 0, CHASSIS.d * 0.45), 'x', 0.04, 0.24); }
+        break;
+      case 'front': {
+        if (topBusy) break;                                     // a flipper lip / fork lies on the wedge face
+        const f = FRONT[k.kind ?? 'wedge'] ?? FRONT.wedge, a = (f.angleDeg * Math.PI) / 180;
+        const p0 = V(0, f.topY, D).add(V(0, -Math.sin(a), Math.cos(a)).scale(0.07)).add(V(0, Math.cos(a), Math.sin(a)).scale(B));
+        for (let i = 0; i < 7; i++) bolt(bin, m, mats.bolt, p0.add(V(-W + 0.1 + (i * (2 * W - 0.2)) / 6, 0, 0)), 'y').rotation.x = a;
+        break;
+      }
+      case 'wheels':
+        for (const w of m.getChildMeshes(true) as Mesh[]) {      // tyre: local y is the axle (rotated onto world x)
+          const out = -(Math.sign(w.position.x) || 1), y0 = out * WHEEL.w / 2;
+          cyl(bin, w, mats.bolt, V(0, y0 + out * 0.012, 0), 'y', WHEEL.r * 1.15, 0.024, 20);   // hub
+          boltRing(bin, w, mats.chrome, V(0, y0 + out * (0.024 + B), 0), 'y', 0.075, 5);         // wheel nuts
+          cyl(bin, w, mats.dark, V(0, y0 + out * 0.03, 0), 'y', 0.07, 0.03, 12);                  // centre cap
+          cyl(bin, w, mats.bolt, V(0, -y0 - out * 0.01, 0), 'y', WHEEL.r * 0.9, 0.02, 16);       // inner hub
+        }
+        break;
+      case 'weapon_motor': {
+        const hSpin = ['h_bar', 'h_disc', 'undercutter'].includes(kinds.weapon?.kind ?? '');
+        if (hSpin) cyl(bin, m, mats.can, V(0, 0.09 + 0.025, 0), 'y', 0.18, 0.05, 20);           // pancake outrunner
+        else {
+          cyl(bin, m, mats.can, V(0, 0.09 + 0.08, 0), 'x', 0.16, 0.3, 16);                       // motor can
+          for (const sx of [-1, 1]) cyl(bin, m, mats.bolt, V(sx * 0.16, 0.17, 0), 'x', 0.13, 0.02, 16);   // end bells
+        }
+        boltFrame(bin, m, mats.bolt, V(0, 0.09 + B, 0), V(0.175, 0, 0), V(0, 0, 0.15), 'y', 0.03, 0.4);
+        break;
+      }
+      case 'motor':
+        for (const sz of [-1, 1]) {                                                               // two drive motors
+          cyl(bin, m, mats.can, V(0, 0.1 + 0.07, sz * 0.12), 'x', 0.14, 0.42, 16);
+          for (const sx of [-1, 1]) cyl(bin, m, mats.bolt, V(sx * 0.215, 0.17, sz * 0.12), 'x', 0.11, 0.02, 16);
+        }
+        boltFrame(bin, m, mats.bolt, V(0, 0.1 + B, 0), V(0.25, 0, 0), V(0, 0, 0.25), 'y', 0.04, 0.45);
+        break;
+      case 'weapon':
+        weaponDetail(scene, bin, rams, root, m, k.kind as WeaponKind, mats, wmm);
+        break;
+    }
+  }
+  bin.flush();
+  if (rams.length) {
+    updateRams(root, rams);
+    const obs = scene.onBeforeRenderObservable.add(() => updateRams(root, rams));
+    root.onDisposeObservable.add(() => scene.onBeforeRenderObservable.remove(obs));
+  }
+}
+
+function weaponDetail(scene: Scene, bin: DecoBin, rams: Ram[], root: Mesh, wm: Mesh, kind: WeaponKind, mats: Mats, wmm?: Mesh) {
+  const H = CHASSIS.h / 2;
+  const child = (suffix: string) => (wm.getChildMeshes(false) as Mesh[]).find(c => c.name.endsWith(suffix));
+  const P = wm.position.clone();
+  switch (kind) {
+    case 'disc': case 'bar': case 'drum': {
+      // spinning: hub boss + bolts (weapon local: disc / drum y = spin axis, bar x = spin axis)
+      if (kind === 'disc') {
+        cyl(bin, wm, mats.bolt, Vector3.Zero(), 'y', 0.2, 0.14, 20);
+        for (const s of [-1, 1]) boltRing(bin, wm, mats.chrome, V(0, s * (0.07 + B), 0), 'y', 0.065, 6);
+      } else if (kind === 'drum') {
+        for (const s of [-1, 1]) { cyl(bin, wm, mats.dark, V(0, s * 0.6, 0), 'y', 0.45, 0.04, 20); boltRing(bin, wm, mats.bolt, V(0, s * (0.62 + B), 0), 'y', 0.15, 6); }
+      } else {
+        cyl(bin, wm, mats.bolt, Vector3.Zero(), 'x', 0.22, 0.16, 20);
+        for (const s of [-1, 1]) boltRing(bin, wm, mats.chrome, V(s * (0.08 + B), 0, 0), 'x', 0.07, 6);
+      }
+      // chassis: weapon uprights + axle, belt from the weapon motor
+      const halfW = kind === 'drum' ? 0.6 : 0.06;
+      for (const sx of [-1, 1]) beam(bin, root, mats.dark, V(sx * (halfW + 0.04), H - 0.02, P.z - 0.32), V(sx * (halfW + 0.04), P.y, P.z), 0.03, 0.12);
+      cyl(bin, root, mats.chrome, P, 'x', 0.05, 2 * (halfW + 0.07), 12);
+      if (wmm) {
+        const xb = -(halfW + 0.1), o = wmm.position;
+        const p1 = V(xb, o.y + 0.17, o.z), p2 = V(xb, P.y, P.z);
+        const canEnd = xb > o.x ? o.x + 0.15 : o.x - 0.15;
+        const rel = (p: Vector3) => p.subtract(o);
+        cyl(bin, wmm, mats.chrome, rel(V((canEnd + xb) / 2, p1.y, p1.z)), 'x', 0.025, Math.abs(xb - canEnd) + 0.03, 8);   // shaft
+        cyl(bin, wmm, mats.bolt, rel(p1), 'x', 0.09, 0.035, 16);                               // motor pulley
+        cyl(bin, wmm, mats.bolt, rel(p2), 'x', 0.15, 0.035, 20);                               // weapon pulley
+        belt(bin, wmm, mats.rubber, rel(p1), 0.045, rel(p2), 0.075, 'x');
+      }
+      break;
+    }
+    case 'h_bar': case 'h_disc': case 'undercutter': {
+      const g = H_SPIN[kind];
+      cyl(bin, wm, mats.bolt, Vector3.Zero(), 'y', 0.2, g.thick + 0.06, 20);
+      boltRing(bin, wm, mats.chrome, V(0, g.thick / 2 + 0.03 + B, 0), 'y', 0.065, 6);
+      const yb = H + 0.235;                                                                       // belt plane, level with the pancake motor's pulley
+      cyl(bin, root, mats.chrome, V(0, (P.y + yb + 0.02) / 2, P.z), 'y', 0.05, yb + 0.02 - P.y, 12);   // weapon shaft
+      beam(bin, root, mats.dark, V(0, yb - 0.075, P.z - 0.38), V(0, yb - 0.075, P.z + 0.05), 0.16, 0.05);   // top bearing arm
+      if (wmm) {
+        const o = wmm.position, rel = (p: Vector3) => p.subtract(o);
+        const p1 = V(o.x, yb, o.z), p2 = V(P.x, yb, P.z);
+        cyl(bin, wmm, mats.bolt, rel(p1), 'y', 0.09, 0.035, 16);
+        cyl(bin, wmm, mats.bolt, rel(p2), 'y', 0.14, 0.035, 20);
+        belt(bin, wmm, mats.rubber, rel(p1), 0.045, rel(p2), 0.07, 'y');
+      }
+      break;
+    }
+    case 'shell':
+      cyl(bin, wm, mats.bolt, V(0, FBS.shell.h / 2 + 0.015, 0), 'y', 0.4, 0.03, 24);
+      boltRing(bin, wm, mats.chrome, V(0, FBS.shell.h / 2 + 0.03 + B, 0), 'y', 0.15, 8);
+      boltRing(bin, wm, mats.bolt, V(0, FBS.shell.h / 2 + B, 0), 'y', 0.86, 16);
+      break;
+    case 'cage':
+      cyl(bin, wm, mats.bolt, Vector3.Zero(), 'y', 0.3, 0.08, 20);
+      for (let i = 0; i < 3; i++) { const t = (i / 3) * Math.PI * 2; beam(bin, wm, mats.dark, Vector3.Zero(), V(Math.cos(t) * 0.88, 0, Math.sin(t) * 0.88), 0.06, 0.05); }
+      break;
+    case 'hammer': case 'saw': case 'hammer_saw': {
+      const pv = ARM.pivot;
+      for (const sx of [-1, 1]) box(bin, root, mats.dark, V(sx * 0.085, (H + pv.y) / 2 + 0.02, 0), 0.03, pv.y - H + 0.1, 0.18);   // pivot cheeks
+      cyl(bin, root, mats.chrome, pv, 'x', 0.05, 0.22, 12);                                       // pivot axle
+      const bar = child('_arm'), head = child('_head'), saw = child('_saw');
+      if (bar) cyl(bin, bar, mats.chrome, V(0, 0.45 - ARM.len / 2, 0), 'x', 0.03, 0.32, 10);   // ram pin
+      if (head) {
+        const hw = kind === 'hammer' ? 0.175 : 0.125, hh = kind === 'hammer' ? 0.15 : 0.11;
+        for (const sx of [-1, 1]) boltFrame(bin, head, mats.bolt, V(sx * (hw + B), 0, 0), V(0, hh, 0), V(0, 0, hh), 'x', 0.045, 0.5);
+      }
+      if (saw) { cyl(bin, saw, mats.bolt, Vector3.Zero(), 'y', 0.12, 0.1, 16); for (const s of [-1, 1]) boltRing(bin, saw, mats.chrome, V(0, s * (0.05 + B), 0), 'y', 0.04, 5); }
+      for (const sx of [-1, 1]) addRam(scene, root, mats, rams, V(sx * 0.13, H + 0.02, 0.45), wm, V(sx * 0.13, 0.45, 0));
+      break;
+    }
+    case 'pneumatic_flipper': case 'electric_flipper': {
+      const plate = child('_flipper'), flat = child('_flat'), lip = child('_lip');
+      for (const x of [-0.45, 0, 0.45]) cyl(bin, root, mats.chrome, V(x, FLIP.hinge.y, FLIP.hinge.z - 0.03), 'x', 0.06, 0.2, 12);   // hinge knuckles
+      if (flat) { const fl = CHASSIS.d / 2 - FLIP.hinge.z; boltLine(bin, flat, mats.bolt, V(-FLIP.width / 2 + 0.08, FLIP.thick / 2 + B, -fl / 2 + 0.1), V(FLIP.width / 2 - 0.08, FLIP.thick / 2 + B, -fl / 2 + 0.1), 0.2, 'y'); }
+      if (lip) boltLine(bin, lip, mats.bolt, V(-FLIP.width / 2 + 0.08, FLIP.thick / 2 + B, -FLIP.lipLen / 2 + 0.06), V(FLIP.width / 2 - 0.08, FLIP.thick / 2 + B, -FLIP.lipLen / 2 + 0.06), 0.2, 'y');
+      if (plate) for (const sx of [-0.35, 0.35]) addRam(scene, root, mats, rams, V(sx, -0.05, -0.3), plate, V(sx, -0.03, 0.5), 0.05, 0.32);
+      break;
+    }
+    case 'lifter': case 'grappler': case 'crusher': {
+      const F = CONTROL.fork;
+      const fork = child('_fork'), plate = child(kind === 'crusher' ? '_fixed' : '_forkplate');
+      if (plate) boltLine(bin, plate, mats.bolt, V(-F.width / 2 + 0.08, F.thick / 2 + B, -F.len / 2 + 0.06), V(F.width / 2 - 0.08, F.thick / 2 + B, -F.len / 2 + 0.06), 0.2, 'y');
+      if (fork) for (const sx of [-0.3, 0.3]) addRam(scene, root, mats, rams, V(sx, -0.05, 0.45), fork, V(sx, -0.18, 0.26));
+      if (kind !== 'lifter') {
+        const J = kind === 'grappler' ? CONTROL.jaw : CONTROL.beak, role = kind === 'grappler' ? 'jaw' : 'beak';
+        const jaw = child(`_${role}`), arm = child(`_${role}arm`);
+        const xr = kind === 'grappler' ? 0.17 : 0.13, zA = kind === 'grappler' ? 0.62 : 0.35, zB = kind === 'grappler' ? 0.5 : 0.55;
+        cyl(bin, root, mats.chrome, J.hinge, 'x', 0.06, J.width + 0.1, 12);                     // hinge pin
+        if (arm) cyl(bin, arm, mats.chrome, V(0, 0, zB - J.len / 2), 'x', 0.03, 2 * xr + 0.06, 10);   // ram pin
+        if (jaw) for (const s of [-1, 1]) addRam(scene, root, mats, rams, V(s * xr, H + 0.02, zA), jaw, V(s * xr, 0, zB));
+      }
+      break;
+    }
+  }
 }

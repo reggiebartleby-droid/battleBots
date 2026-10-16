@@ -5,8 +5,9 @@ import HavokPhysics from '@babylonjs/havok';
 import type { BotBuild } from '../../src/core/types.js';
 import { canAttack, currentSpeed, isDestroyed } from '../../src/core/state.js';
 import { catalog } from './catalog.js';
-import { buildArena, WALL_H } from './arena.js';
-import { buildBot, forward, upVector, REST_Y, driveSpinner, spinOmega, applyGyro, disposeBot, freezeBot, snapSpinner, driveArm, armBefore, armAfter, applyMagnets, magnetGrip, driveFlipper, driveControl, hingesBefore, tyreBefore, tyreAfter, type Bot } from './bot.js';
+import { buildArena, WALL_H, ARENA_COLOURS, FLOOR_GRIDS, type ArenaStyle } from './arena.js';
+import { buildBot, forward, upVector, REST_Y, driveSpinner, spinOmega, applyGyro, disposeBot, freezeBot, snapSpinner, driveArm, armBefore, armAfter, applyMagnets, magnetGrip, driveFlipper, driveControl, hingesBefore, tyreBefore, tyreAfter, botMeshes, type Bot } from './bot.js';
+import { applyEnvironment, castShadows, makeShadows } from './look.js';
 import { readDrive, isDown, KEYS, type Drive } from './input.js';
 import { Combat } from './combat.js';
 import { Hud } from './hud.js';
@@ -62,7 +63,7 @@ async function main() {
 
   // ---- Match scene (arena + physics) ----
   const scene = new Scene(engine);
-  scene.clearColor = new Color4(0.04, 0.05, 0.06, 1);
+  scene.clearColor = new Color4(0, 0, 0, 1);           // v0.18: black all around
   const havok = await HavokPhysics();
   const havokPlugin = new HavokPlugin(true, havok);
   scene.enablePhysics(new Vector3(0, -9.81, 0), havokPlugin);
@@ -70,6 +71,9 @@ async function main() {
   new HemisphericLight('hemi', new Vector3(0, 1, 0), scene).intensity = 0.5;
   const sun = new DirectionalLight('sun', new Vector3(-0.4, -1, 0.3), scene);
   sun.intensity = 1.1;
+  sun.position = new Vector3(8, 20, -6);            // v0.16: shadows need a light position (opposite the direction)
+  applyEnvironment(scene, 0.7);                     // v0.16: what the bots' metal reflects
+  const shadows = makeShadows(sun);
 
   // Low broadcast camera
   const cam = new ArcRotateCamera('cam', -Math.PI / 2, 1.42, 16, new Vector3(0, 0.5, 0), scene);
@@ -78,6 +82,8 @@ async function main() {
   cam.attachControl(canvas, true);
 
   const arena = buildArena(scene);
+  scene.getMeshByName('floor')!.receiveShadows = true;
+  setupArenaPicker(arena.setStyle, canvas);          // v0.18: neon colour + floor grid (in-match, top right)
   // v0.8: real spinners spin at up to ~70 rad/s -- make sure Havok's speed cap is well above that
   havokPlugin.setVelocityLimits(200, 400);
   const hud = new Hud();
@@ -95,6 +101,7 @@ async function main() {
   let buildB: BotBuild | null = null;
   let p2Human = false;                // debug: drive P2 with arrows instead of the AI
   let difficulty: Difficulty = 'normal';
+  let breakableWeapons = false;      // v0.17 deploy-bar setting (applies to both bots)
   let camFocus: { pos: Vector3; until: number } | null = null;   // bot flying over the cage / exploding
   const helpEl = document.getElementById('help')!;
 
@@ -102,7 +109,7 @@ async function main() {
     const lines = [`<b>P1</b> ${KEYS.A.label} — ${bots[0].weapon.hint('SPACE')}`];
     if (p2Human) lines.push(`<b>P2</b> ${KEYS.B.label} — ${bots[1].weapon.hint('Right SHIFT')}`);
     lines.push(`Damage = real energy: spinners dump stored spin · hammers the swing · flippers / lifters what they throw or lift (plus the landing) · crushers pierce while pressing. Anything else is a <i>bump</i>.`);
-    lines.push(`R restart · B lab · T toggle P2 human/AI`);
+    lines.push(`R restart · B lab · T toggle P2 human/AI · V HUD view · H details`);
     return lines;
   };
 
@@ -111,9 +118,10 @@ async function main() {
     for (const b of bots) disposeBot(b);
     fx.clear();
     bots = [
-      buildBot('A', buildA, catalog, scene, arena.spawnA, Math.PI / 4),
-      buildBot('B', buildB, catalog, scene, arena.spawnB, Math.PI + Math.PI / 4),
+      buildBot('A', buildA, catalog, scene, arena.spawnA, Math.PI / 4, { breakableWeapons }),
+      buildBot('B', buildB, catalog, scene, arena.spawnB, Math.PI + Math.PI / 4, { breakableWeapons }),
     ];
+    for (const b of bots) castShadows(shadows, botMeshes(b));   // v0.16
     combat = new Combat(bots, fx);
     timeLeft = MATCH_SECONDS; over = false; camFocus = null;
     hud.hideWinner();
@@ -124,7 +132,7 @@ async function main() {
   const openLab = () => {
     builder.show(
       b => lab.setBuild(b),
-      ({ player, opponent, difficulty: d }) => { buildA = player; buildB = opponent; difficulty = d; start(); },
+      ({ player, opponent, difficulty: d, breakableWeapons: bw }) => { buildA = player; buildB = opponent; difficulty = d; breakableWeapons = bw; start(); },
     );
   };
   openLab();
@@ -142,12 +150,20 @@ async function main() {
   });
 
   let lastToggle = 0;
+  // v0.19 HUD: V cycles the layout (top / bottom / left), H shows the test numbers. One press = one step
+  // (key events, not polling); ignored while typing in the lab.
+  window.addEventListener('keydown', e => {
+    if (e.repeat || builder.visible) return;
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
+    if (e.code === 'KeyV') hud.cycleView();
+    else if (e.code === 'KeyH') hud.toggleDetails();
+  });
   scene.onBeforeRenderObservable.add(() => {
     const dt = engine.getDeltaTime() / 1000;
     if (isDown('KeyR')) { start(); return; }
     if (isDown('KeyB')) { openLab(); return; }
     if (isDown('KeyT') && performance.now() - lastToggle > 400) { p2Human = !p2Human; lastToggle = performance.now(); hud.showControls(controlLines(), 4000); }
-    helpEl.innerHTML = `P1: ${KEYS.A.label} &nbsp;|&nbsp; P2: ${p2Human ? KEYS.B.label + ' (human)' : 'AI ' + difficulty.toUpperCase()} (T toggles) &nbsp;|&nbsp; R: restart &nbsp;|&nbsp; B: lab`;
+    helpEl.innerHTML = `P1: ${KEYS.A.label} &nbsp;|&nbsp; P2: ${p2Human ? KEYS.B.label + ' (human)' : 'AI ' + difficulty.toUpperCase()} (T toggles) &nbsp;|&nbsp; R: restart &nbsp;|&nbsp; B: lab &nbsp;|&nbsp; V: view &nbsp;|&nbsp; H: details`;
 
     const now = performance.now();
     scene.getPhysicsEngine()?.setTimeStep(PHYS_STEP);
@@ -280,7 +296,7 @@ async function main() {
         end(w ? `${w.build.cosmetics.name} WINS ON DAMAGE` : 'DRAW', w?.build.cosmetics.paint ?? '#fff');
       }
     }
-    hud.update(bots, timeLeft, combat.stats);
+    hud.update(bots, timeLeft, combat.stats, combat);
   });
 
   function end(text: string, color: string) { over = true; hud.showWinner(text + '  (R restart · B lab)', color); }
@@ -312,6 +328,7 @@ async function main() {
     if (!b.inverted) {
       if (upsideDown) {
         b.inverted = { since: now };
+        if (!over) combat.onFlipped(b);                // v0.19 arcade score: FLIP bonus to whoever put it there
         const flip = b.hinges?.some(h => h.role === 'flipper');
         hud.sign(flip ? 'UPSIDE DOWN — FIRE THE FLIPPER!' : 'UPSIDE DOWN', flip ? 1200 : 700, '#ff9f43');
       }
@@ -352,6 +369,27 @@ async function main() {
     else scene.render();
   });
   window.addEventListener('resize', () => engine.resize());
+}
+
+/** v0.18 in-match arena picker: neon colour + floor squares. Applies live, remembered in this browser. */
+function setupArenaPicker(setStyle: (s: Partial<ArenaStyle>) => ArenaStyle, canvas: HTMLCanvasElement) {
+  const KEY = 'bb-arena-style';
+  const colourSel = document.getElementById('ar-colour') as HTMLSelectElement;
+  const gridSel = document.getElementById('ar-grid') as HTMLSelectElement;
+  colourSel.innerHTML = ARENA_COLOURS.map(c => `<option value="${c.id}">${c.label}</option>`).join('');
+  gridSel.innerHTML = FLOOR_GRIDS.map(n => `<option value="${n}">${n} × ${n}</option>`).join('');
+  let saved: Partial<ArenaStyle> = {};
+  try { saved = JSON.parse(localStorage.getItem(KEY) ?? '{}'); } catch { /* ignore */ }
+  const apply = (s: Partial<ArenaStyle>) => {
+    const cur = setStyle(s);
+    colourSel.value = cur.colour; gridSel.value = String(cur.grid);
+    try { localStorage.setItem(KEY, JSON.stringify(cur)); } catch { /* ignore */ }
+  };
+  apply(saved);
+  for (const sel of [colourSel, gridSel]) {
+    sel.addEventListener('keydown', e => e.preventDefault());   // mouse only: WASD/arrows keep driving the bot
+    sel.addEventListener('change', () => { apply({ colour: colourSel.value, grid: Number(gridSel.value) }); sel.blur(); canvas.focus(); });
+  }
 }
 
 main().catch(err => { console.error(err); document.body.insertAdjacentHTML('beforeend', `<pre style="color:#f66;padding:20px">${err}</pre>`); });

@@ -5,11 +5,12 @@
  */
 import {
   ArcRotateCamera, Color3, Color4, DirectionalLight, DynamicTexture, Engine, GlowLayer, HemisphericLight,
-  Mesh, MeshBuilder, PointLight, Scene, SceneLoader, StandardMaterial, Vector3,
+  Mesh, MeshBuilder, PointLight, Scene, SceneLoader, ShadowGenerator, StandardMaterial, Vector3,
 } from '@babylonjs/core';
 import '@babylonjs/loaders/glTF';
 import type { BotBuild, Catalog } from '../../src/core/types.js';
 import { assembleBotMesh, type BotMesh } from './bot.js';
+import { applyEnvironment, castShadows, makeShadows } from './look.js';
 
 /** Stand-in Meshy models shown instead of the primitive assembly for matching presets. */
 const PROTOTYPE_MODELS: Record<string, { url: string; scale: number }> = {
@@ -24,6 +25,7 @@ export class Lab {
   private proto: Mesh | null = null;
   private loadToken = 0;
   private turntable: Mesh;
+  private shadows: ShadowGenerator;
   private angle = 0;
 
   constructor(private engine: Engine, private catalog: Catalog) {
@@ -43,6 +45,9 @@ export class Lab {
     new HemisphericLight('labhemi', new Vector3(0, 1, 0), scene).intensity = 0.25;
     const key = new DirectionalLight('labkey', new Vector3(-0.5, -1, 0.4), scene);
     key.intensity = 0.55; key.specular = new Color3(0.2, 0.2, 0.2);
+    key.position = new Vector3(5, 10, -4);                 // v0.16: shadows need a light position
+    applyEnvironment(scene, 0.7);                          // v0.16: what the bots' metal reflects
+    this.shadows = makeShadows(key, 1024);
     const spot = new PointLight('labspot', new Vector3(0, 4, 0), scene);
     spot.intensity = 0.3; spot.diffuse = new Color3(0.8, 0.95, 1); spot.specular = new Color3(0.15, 0.15, 0.15);
     const teal = new PointLight('labteal', new Vector3(0, 0.3, 0), scene);
@@ -81,6 +86,7 @@ export class Lab {
     this.turntable = MeshBuilder.CreateCylinder('turntable', { diameter: 3.2, height: 0.16, tessellation: 48 }, scene);
     this.turntable.position.y = 0.08;
     this.turntable.material = metal;
+    this.turntable.receiveShadows = true;
     const ring = MeshBuilder.CreateTorus('ring', { diameter: 3.3, thickness: 0.06, tessellation: 64 }, scene);
     ring.position.y = 0.17; ring.material = tealGlow;
     const base = MeshBuilder.CreateCylinder('ttbase', { diameter: 3.8, height: 0.1, tessellation: 48 }, scene);
@@ -205,6 +211,7 @@ export class Lab {
     this.bot = next;
     next.root.position.set(0, 0.16 + 0.35 / 2 + 0.1, 0);
     next.root.rotation.y = this.angle;
+    castShadows(this.shadows, [next.root, ...next.root.getChildMeshes()]);
     this.loadPrototype(build);
   }
 
@@ -222,6 +229,7 @@ export class Lab {
       root.scaling.set(def.scale, def.scale, -def.scale);
       root.position.set(0, 0.16, 0);
       root.rotation.y = this.angle;
+      castShadows(this.shadows, root.getChildMeshes());
       if (this.bot) this.bot.root.setEnabled(false);
       this.proto = root;
     } catch (e) {

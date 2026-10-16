@@ -81,7 +81,7 @@ function socketLabel(body: BodyDef, s: SocketDef): string {
   return SOCKET_LABEL[s.type] + (same > 1 ? ` ${s.id.split('_').pop()}` : '');
 }
 
-export interface DeployArgs { player: BotBuild; opponent: BotBuild; opponentName: string; difficulty: Difficulty }
+export interface DeployArgs { player: BotBuild; opponent: BotBuild; opponentName: string; difficulty: Difficulty; breakableWeapons: boolean }
 
 export class Builder {
   build: BotBuild;
@@ -105,6 +105,7 @@ export class Builder {
     presets: document.getElementById('bb-presets') as HTMLSelectElement,
     opponent: document.getElementById('bb-opponent') as HTMLSelectElement,
     difficulty: document.getElementById('bb-difficulty') as HTMLSelectElement,
+    breakable: document.getElementById('bb-breakable') as HTMLInputElement,
     deploy: document.getElementById('bb-deploy') as HTMLButtonElement,
   };
   private onChange: (b: BotBuild) => void = () => {};
@@ -131,6 +132,7 @@ export class Builder {
     };
     this.el.opponent.value = saved?.opponent && PRESETS[saved.opponent] ? saved.opponent : 'Blue Lift';
     this.el.difficulty.value = saved?.difficulty && DIFFICULTY[saved.difficulty] ? saved.difficulty : 'normal';
+    this.el.breakable.checked = saved?.breakableWeapons ?? false;   // v0.17: off by default
 
     this.el.name.oninput = () => { this.build.cosmetics.name = this.el.name.value.toUpperCase(); this.changed(); };
     this.el.paint.oninput = () => { this.build.cosmetics.paint = this.el.paint.value; this.changed(); };
@@ -139,7 +141,7 @@ export class Builder {
       if (!this.validation.ok) return;
       this.save();
       this.hide();
-      this.onDeploy({ player: clone(this.build), opponent: clone(PRESETS[this.el.opponent.value]), opponentName: this.el.opponent.value, difficulty: this.el.difficulty.value as Difficulty });
+      this.onDeploy({ player: clone(this.build), opponent: clone(PRESETS[this.el.opponent.value]), opponentName: this.el.opponent.value, difficulty: this.el.difficulty.value as Difficulty, breakableWeapons: this.el.breakable.checked });
     };
 
     this.render();
@@ -226,9 +228,9 @@ export class Builder {
   }
 
   private save() {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ build: this.build, opponent: this.el.opponent.value, difficulty: this.el.difficulty.value })); } catch { /* ignore */ }
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ build: this.build, opponent: this.el.opponent.value, difficulty: this.el.difficulty.value, breakableWeapons: this.el.breakable.checked })); } catch { /* ignore */ }
   }
-  private load(): { build: BotBuild; opponent?: string; difficulty?: Difficulty } | null {
+  private load(): { build: BotBuild; opponent?: string; difficulty?: Difficulty; breakableWeapons?: boolean } | null {
     try { const s = localStorage.getItem(STORAGE_KEY); return s ? JSON.parse(s) : null; } catch { return null; }
   }
 }

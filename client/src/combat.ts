@@ -83,11 +83,45 @@ interface SpinContact { bot: Bot; body: PhysicsBody; mass: number; energy: () =>
 export interface HitLog { t: number; attacker: 'A' | 'B'; socket: string; dmg: number }
 export interface Stats { hits: number; dmg: number; bumps: number; maxImpulse: number }
 
+/** v0.19 arcade score (display only -- the time-out winner is still decided on damage). */
+export const SCORE = {
+  perHit: 10,          // every damaging hit
+  bigHitFrac: 0.4,     // a single hit dealing >= this share of the victim's starting total HP ...
+  bigHitBonus: 50,     // ... is a BIG HIT
+  flipBonus: 100,      // victim ends up upside down within flipWindowMs of your last weapon touch / hit
+  flipWindowMs: 3000,
+};
+export interface ScoreBonus { text: string; pts: number; t: number }
+
 export class Combat {
   private lastHit = new Map<string, number>();
   private lastContinued = 0;
   log: HitLog[] = [];
   stats: Record<'A' | 'B', Stats> = { A: { hits: 0, dmg: 0, bumps: 0, maxImpulse: 0 }, B: { hits: 0, dmg: 0, bumps: 0, maxImpulse: 0 } };
+  /** v0.19 arcade score + the latest bonus (HUD shows it for a moment). */
+  score: Record<'A' | 'B', number> = { A: 0, B: 0 };
+  lastBonus: Partial<Record<'A' | 'B', ScoreBonus>> = {};
+
+  /** v0.19: points for a damaging hit (+ BIG HIT bonus). */
+  private credit(attacker: Bot, defender: Bot, dealt: number) {
+    if (dealt <= 0) return;
+    this.score[attacker.id] += SCORE.perHit + dealt;
+    const startHp = Object.values(defender.state.parts).reduce((a, p) => a + p.maxHp, 0);
+    if (dealt >= startHp * SCORE.bigHitFrac) this.bonus(attacker, 'BIG HIT', SCORE.bigHitBonus);
+  }
+  private bonus(attacker: Bot, text: string, pts: number) {
+    this.score[attacker.id] += pts;
+    this.lastBonus[attacker.id] = { text, pts, t: performance.now() };
+  }
+  /** v0.19: a bot just went upside down -- if the opponent's weapon touched / hit it recently, that's a FLIP. */
+  onFlipped(victim: Bot) {
+    const now = performance.now();
+    const other = this.other(victim);
+    const touch = this.lastWeaponTouch.get(victim.id);
+    const lastHit = [...this.log].reverse().find(h => h.attacker === other.id);
+    const recent = (touch && touch.by === other && now - touch.t <= SCORE.flipWindowMs) || (lastHit && now - lastHit.t <= SCORE.flipWindowMs);
+    if (recent) this.bonus(other, 'FLIP', SCORE.flipBonus);
+  }
 
   private spin: SpinContact[] = [];
 
@@ -153,6 +187,7 @@ export class Combat {
     this.log.push({ t: now, attacker: by.id, socket, dmg: dealt });
     this.stats[by.id].hits++;
     this.stats[by.id].dmg += dealt;
+    this.credit(by, self, dealt);
     self.lastHit = { socket, t: now };
     this.slams++;
     this.fx.hit(ev.point ?? self.root.position, dealt, self, by.build.cosmetics.paint ?? '#fff');
@@ -233,6 +268,7 @@ export class Combat {
     this.log.push({ t: now, attacker: attacker.id, socket, dmg: dealt });
     this.stats[attacker.id].hits++;
     this.stats[attacker.id].dmg += dealt;
+    this.credit(attacker, defender, dealt);
     defender.lastHit = { socket, t: now };
     this.fx.hit(c.point, dealt, defender, attacker.build.cosmetics.paint ?? '#fff');
   }
@@ -312,6 +348,7 @@ export class Combat {
     this.log.push({ t: now, attacker: attacker.id, socket, dmg: dealt });
     this.stats[attacker.id].hits++;
     this.stats[attacker.id].dmg += dealt;
+    this.credit(attacker, defender, dealt);
     defender.lastHit = { socket, t: now };
     this.fx.hit(point, dealt, defender, attacker.build.cosmetics.paint ?? '#fff');
 

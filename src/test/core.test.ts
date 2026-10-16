@@ -89,6 +89,24 @@ test('damage: armor reduces, 0 HP disables by socket', () => {
   assert.ok(isDestroyed(s));
 });
 
+test('v0.17 unbreakable weapons: weapon + weapon motor stop at 1 HP, KO ignores them', () => {
+  const s = createBotState(good, catalog, { breakableWeapons: false });
+  const hp0 = s.parts['weapon'].hp;
+  assert.equal(applyDamage(s, 'weapon', 999), 999 - (s.parts['weapon'].part.stats.armor ?? 0));   // full hit is reported
+  assert.equal(s.parts['weapon'].hp, 1);
+  assert.ok(canAttack(s));
+  const taken = s.totalDamageTaken;
+  assert.ok(taken >= hp0);                               // counts the whole hit, not just HP lost
+  assert.equal(applyDamage(s, 'weapon', 5), Math.max(1, 5 - (s.parts['weapon'].part.stats.armor ?? 0)));
+  assert.equal(s.parts['weapon'].hp, 1);
+  assert.ok(s.totalDamageTaken > taken);                 // hits at 1 HP still count
+  applyDamage(s, 'weapon_motor', 999);
+  assert.equal(s.parts['weapon_motor'].hp, 1);
+  for (const id of ['armor', 'motor', 'wheels', 'front']) applyDamage(s, id, 999);
+  assert.ok(isDestroyed(s));                             // every other part gone = KO
+  assert.ok(createBotState(good, catalog).breakableWeapons);   // core default unchanged
+});
+
 test('flipper: one wheel set left still mobile', () => {
   const s = createBotState({ bodyId: 'flipper', sockets: { weapon: 'fl_pneumatic', weapon_motor: 'wm_std', front: null, armor: 'armor_light', wheels_1: 'wheels_light', wheels_2: 'wheels_light', motor: 'motor_std' }, cosmetics: { name: 'F' } }, catalog);
   applyDamage(s, 'wheels_1', 999);

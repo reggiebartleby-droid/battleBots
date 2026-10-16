@@ -17,9 +17,15 @@ export interface BotState {
   build: BotBuild;
   parts: Record<string, PartState>;   // by socketId
   totalDamageTaken: number;
+  breakableWeapons: boolean;          // v0.17: false = weapon + weapon motor stop at 1 HP
 }
 
-export function createBotState(build: BotBuild, catalog: Catalog): BotState {
+export interface StateOptions {
+  /** v0.17 match setting. Default true (parts break as normal); the client defaults it to false. */
+  breakableWeapons?: boolean;
+}
+
+export function createBotState(build: BotBuild, catalog: Catalog, opts: StateOptions = {}): BotState {
   const v = validateBuild(build, catalog);
   if (!v.ok) throw new Error(`Invalid build: ${v.errors.join('; ')}`);
   const body = catalog.bodies[build.bodyId];
@@ -29,12 +35,19 @@ export function createBotState(build: BotBuild, catalog: Catalog): BotState {
     if (!part) continue;
     parts[socket.id] = { socketId: socket.id, socketType: socket.type, part, hp: part.stats.hp, maxHp: part.stats.hp };
   }
-  return { build, parts, totalDamageTaken: 0 };
+  return { build, parts, totalDamageTaken: 0, breakableWeapons: opts.breakableWeapons ?? true };
 }
 
 /** Effective armor of one socket (0 once the part is destroyed). */
 export function socketArmor(ps: PartState): number {
   return ps.hp > 0 ? (ps.part.stats.armor ?? 0) : 0;
+}
+
+const PROTECTED: SocketType[] = ['weapon', 'weapon_motor'];
+
+/** v0.17: with breakable weapons off, the weapon and weapon motor can't be destroyed. */
+export function isProtected(state: BotState, ps: PartState): boolean {
+  return !state.breakableWeapons && PROTECTED.includes(ps.socketType);
 }
 
 /**
@@ -45,6 +58,12 @@ export function applyDamage(state: BotState, socketId: string, rawDamage: number
   const ps = state.parts[socketId];
   if (!ps || ps.hp <= 0 || rawDamage <= 0) return 0;
   const dealt = Math.max(1, rawDamage - socketArmor(ps));
+  if (isProtected(state, ps)) {
+    // v0.17 unbreakable: HP stops at 1 (part keeps working); the full hit still counts as damage taken
+    ps.hp -= Math.min(ps.hp - 1, dealt);
+    state.totalDamageTaken += dealt;
+    return dealt;
+  }
   const lost = Math.min(ps.hp, dealt);
   ps.hp -= lost;
   state.totalDamageTaken += lost;
@@ -71,9 +90,9 @@ export function isImmobilized(state: BotState): boolean {
   return !(wheelsOk && motorOk);
 }
 
-/** Every part at 0 HP -> KO. */
+/** Every part at 0 HP -> KO. v0.17: unbreakable weapon parts don't count. */
 export function isDestroyed(state: BotState): boolean {
-  return Object.values(state.parts).every(p => p.hp <= 0);
+  return Object.values(state.parts).filter(p => !isProtected(state, p)).every(p => p.hp <= 0);
 }
 
 /** Current speed (0 if immobilized). */

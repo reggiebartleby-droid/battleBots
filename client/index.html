@@ -7,14 +7,34 @@
   <style>
     html, body { margin: 0; height: 100%; background: #0b0d10; overflow: hidden; font-family: system-ui, sans-serif; color: #eee; }
     #c { width: 100%; height: 100%; display: block; outline: none; }
-    #hud { position: absolute; left: 0; right: 0; bottom: 0; display: flex; justify-content: space-between; align-items: flex-end; padding: 12px 18px; pointer-events: none; }
-    .board { background: rgba(20,22,26,.85); border: 2px solid #4a4f58; border-radius: 8px; padding: 8px 12px; min-width: 220px; }
-    .board h3 { margin: 0 0 6px; font-size: 14px; letter-spacing: .08em; text-transform: uppercase; }
-    .part { display: grid; grid-template-columns: 70px 1fr 36px; gap: 8px; font-size: 12px; align-items: center; line-height: 18px; }
-    .bar { height: 8px; background: #2a2d33; border-radius: 4px; overflow: hidden; }
+    /* v0.19 HUD: compact cards; V cycles top strip / bottom corners / left strip */
+    #hud { position: absolute; display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; pointer-events: none; }
+    .board { background: rgba(14,16,20,.62); border: 1px solid rgba(120,130,145,.35); border-radius: 6px; padding: 5px 9px 6px; width: 230px; box-sizing: border-box; }
+    .board h3 { margin: 0 0 3px; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .meter { display: grid; grid-template-columns: 40px 1fr 30px; gap: 6px; font-size: 10px; align-items: center; line-height: 14px; color: #b9c2cc; letter-spacing: .06em; }
+    .meter span:last-child, .part span:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+    .meter.flash { background: rgba(255,60,60,.35); border-radius: 3px; }
+    .nums { display: flex; justify-content: space-between; font-size: 10px; letter-spacing: .06em; color: #b9c2cc; margin-top: 2px; white-space: nowrap; }
+    .nums b { color: #fff; font-size: 12px; font-variant-numeric: tabular-nums; }
+    .nums .bonus { color: #ffd166; font-weight: 800; margin-left: 5px; }
+    .details { margin-top: 4px; padding-top: 4px; border-top: 1px solid #333; }
+    .part { display: grid; grid-template-columns: 92px 1fr 30px; gap: 6px; font-size: 10px; align-items: center; line-height: 14px; }
+    .part span:first-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .bar { height: 6px; background: #2a2d33; border-radius: 3px; overflow: hidden; }
     .bar i { display: block; height: 100%; background: #2ecc71; }
+    .bar i.ar { background: #6fb7ff; }
     .bar i.mid { background: #f1c40f; } .bar i.low { background: #e74c3c; } .bar i.dead { background: #555; }
-    #timer { font-size: 40px; font-weight: 800; font-variant-numeric: tabular-nums; background: rgba(20,22,26,.85); border: 3px solid #c9a227; border-radius: 50%; width: 110px; height: 110px; display: flex; align-items: center; justify-content: center; }
+    #timer { font-size: 18px; font-weight: 800; font-variant-numeric: tabular-nums; background: rgba(14,16,20,.7); border: 2px solid #c9a227; border-radius: 50%; width: 52px; height: 52px; flex: none; display: flex; align-items: center; justify-content: center; }
+    /* 1: top strip (under the help line / arena pickers) */
+    body.hud-top #hud { top: 58px; left: 12px; right: 12px; }
+    body.hud-top #board2 h3 { text-align: right; }
+    body.hud-top #finish { top: max(24%, 145px); }
+    body.hud-top #sign { top: max(34%, 205px); }
+    body.hud-top #controls { top: auto; bottom: 16px; }
+    /* 2: bottom corners */
+    body.hud-bottom #hud { bottom: 10px; left: 12px; right: 12px; align-items: flex-end; }
+    /* 3: left strip */
+    body.hud-left #hud { top: 58px; left: 12px; flex-direction: column; align-items: center; justify-content: flex-start; width: 230px; }
     #finish { position: absolute; top: 14%; left: 0; right: 0; text-align: center; font-size: 56px; font-weight: 900; color: #ff1a1a; text-shadow: 0 0 18px #f00; display: none; letter-spacing: .06em; }
     #finish.on { display: block; animation: blink .45s steps(1) infinite; }
     @keyframes blink { 50% { opacity: 0; } }
@@ -29,10 +49,11 @@
     .part.wpn.off .bar i.w { background: #556; box-shadow: none; }
     .part.wpn.hit .bar i.w { background: #fff; box-shadow: 0 0 10px #fff; }
     .part.wpn.dead .bar i.w { background: #555; }
-    .part.wpn .lbl { font-size: 10px; white-space: nowrap; letter-spacing: .04em; }
+    .part.wpn { grid-template-columns: 50px 1fr auto; }
+    .part.wpn .lbl { font-size: 9px; white-space: nowrap; letter-spacing: .04em; }
     .part.wpn.on .lbl, .part.wpn.hit .lbl { color: #3ee6c4; }
     .part.wpn.dead .lbl { color: #e45a5a; }
-    .part.stats { grid-template-columns: 1fr 1fr 1fr; opacity: .85; margin-top: 4px; border-top: 1px solid #333; padding-top: 4px; }
+    .part.stats { grid-template-columns: 1fr 1fr 1fr; opacity: .85; margin-top: 2px; }
     /* floating hit labels */
     #fxlayer { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
     .fxlabel { position: absolute; left: 0; top: 0; font-weight: 900; font-size: 28px; text-shadow: 0 0 6px #000, 0 0 12px #000; will-change: transform, opacity; }
@@ -41,7 +62,11 @@
     #controls { position: absolute; top: 64px; left: 50%; transform: translateX(-50%); background: rgba(20,22,26,.9); border: 2px solid #4a4f58; border-radius: 8px; padding: 10px 16px; font-size: 13px; line-height: 1.6; display: none; max-width: 720px; text-align: center; pointer-events: none; }
     #controls.on { display: block; }
     #controls b { color: #f2b134; }
-    body.inlab #hud, body.inlab #help, body.inlab #finish, body.inlab #winner, body.inlab #controls, body.inlab #fxlayer { display: none; }
+    body.inlab #hud, body.inlab #help, body.inlab #finish, body.inlab #winner, body.inlab #controls, body.inlab #fxlayer, body.inlab #arenaui { display: none; }
+    /* v0.18 in-match arena picker */
+    #arenaui { position: absolute; top: 10px; right: 12px; display: flex; gap: 10px; font-size: 11px; letter-spacing: .1em; color: #8fa3ad; }
+    #arenaui label { display: flex; flex-direction: column; gap: 3px; }
+    #arenaui select { font: inherit; font-size: 12px; letter-spacing: 0; background: rgba(11,16,19,.85); color: #d7e3e6; border: 1px solid #33424c; border-radius: 3px; padding: 4px 6px; }
 
     /* ---- Lab / bot builder (Option A: 3D lab scene + HTML instrument panels) ---- */
     #lab { position: absolute; inset: 0; display: none; pointer-events: none; font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; color: #d7e3e6; }
@@ -88,6 +113,10 @@
   <div id="fxlayer"></div>
   <div id="help">P1: WASD + SPACE | P2: AI (T toggles) | R: restart | B: lab</div>
   <div id="controls"></div>
+  <div id="arenaui">
+    <label>ARENA COLOUR <select id="ar-colour"></select></label>
+    <label>FLOOR GRID <select id="ar-grid"></select></label>
+  </div>
   <div id="sign"></div>
 
   <div id="lab">
@@ -126,10 +155,11 @@
       <label class="fld">PAINT <input id="bb-paint" type="color"></label>
       <label class="fld">OPPONENT (AI) <select id="bb-opponent"></select></label>
       <label class="fld">AI LEVEL <select id="bb-difficulty"><option value="easy">Easy</option><option value="normal" selected>Normal</option><option value="hard">Hard</option></select></label>
+      <label class="fld" title="Off: weapon and weapon motor stop at 1 HP and keep working">BREAKABLE WEAPONS <input id="bb-breakable" type="checkbox"></label>
       <button id="bb-deploy" type="button">DEPLOY ▶</button>
     </div>
   </div>
-  <div id="finish">FINISH HIM/HER!</div>
+  <div id="finish">FINISH HIM!</div>
   <div id="winner"></div>
   <div id="hud">
     <div class="board" id="board1"></div>
