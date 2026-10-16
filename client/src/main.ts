@@ -1,12 +1,12 @@
 import {
-  ArcRotateCamera, Color4, DirectionalLight, Engine, HavokPlugin, HemisphericLight, PhysicsMotionType, Quaternion, Scene, Vector3,
+  ArcRotateCamera, Color4, DirectionalLight, Engine, HavokPlugin, HemisphericLight, Quaternion, Scene, Vector3,
 } from '@babylonjs/core';
 import HavokPhysics from '@babylonjs/havok';
 import type { BotBuild } from '../../src/core/types.js';
-import { canAttack, currentSpeed, isDestroyed, isImmobilized } from '../../src/core/state.js';
+import { canAttack, currentSpeed, isDestroyed } from '../../src/core/state.js';
 import { catalog } from './catalog.js';
 import { buildArena, WALL_H } from './arena.js';
-import { buildBot, forward, upVector, REST_Y, type Bot } from './bot.js';
+import { buildBot, forward, upVector, REST_Y, driveSpinner, spinOmega, applyGyro, disposeBot, freezeBot, snapSpinner, driveArm, armBefore, armAfter, applyMagnets, magnetGrip, driveFlipper, driveControl, hingesBefore, tyreBefore, tyreAfter, type Bot } from './bot.js';
 import { readDrive, isDown, KEYS, type Drive } from './input.js';
 import { Combat } from './combat.js';
 import { Hud } from './hud.js';
@@ -50,6 +50,7 @@ const INVERT = {
   restVy: 0.6,         // |vertical speed| below this = settled
   restY: 1.2,          // centre height below this = on (or near) the floor
   selfRightMs: 1000,   // helpless this long, then self-right (v0.7: 1 s, was 2)
+  flipperSelfRightMs: 3000,   // v0.12: flippers self-right with their own flipper (SPACE); the built-in one is only a backup
   hopUp: 3.2,          // m/s hop
   roll: 8,             // rad/s roll about the chassis forward axis during the hop
   snapMs: 420,         // after this long in the hop, snap upright (yaw kept)
@@ -63,7 +64,8 @@ async function main() {
   const scene = new Scene(engine);
   scene.clearColor = new Color4(0.04, 0.05, 0.06, 1);
   const havok = await HavokPhysics();
-  scene.enablePhysics(new Vector3(0, -9.81, 0), new HavokPlugin(true, havok));
+  const havokPlugin = new HavokPlugin(true, havok);
+  scene.enablePhysics(new Vector3(0, -9.81, 0), havokPlugin);
 
   new HemisphericLight('hemi', new Vector3(0, 1, 0), scene).intensity = 0.5;
   const sun = new DirectionalLight('sun', new Vector3(-0.4, -1, 0.3), scene);
@@ -76,6 +78,8 @@ async function main() {
   cam.attachControl(canvas, true);
 
   const arena = buildArena(scene);
+  // v0.8: real spinners spin at up to ~70 rad/s -- make sure Havok's speed cap is well above that
+  havokPlugin.setVelocityLimits(200, 400);
   const hud = new Hud();
   const fx = new Fx(scene, document.getElementById('fxlayer')!);
 
@@ -97,14 +101,14 @@ async function main() {
   const controlLines = () => {
     const lines = [`<b>P1</b> ${KEYS.A.label} — ${bots[0].weapon.hint('SPACE')}`];
     if (p2Human) lines.push(`<b>P2</b> ${KEYS.B.label} — ${bots[1].weapon.hint('Right SHIFT')}`);
-    lines.push(`Weapons only do damage when LIVE: spinner spun up · hammer/flipper mid-swing · lifter/grappler key held. Anything else is a <i>bump</i>.`);
+    lines.push(`Damage = real energy: spinners dump stored spin · hammers the swing · flippers / lifters what they throw or lift (plus the landing) · crushers pierce while pressing. Anything else is a <i>bump</i>.`);
     lines.push(`R restart · B lab · T toggle P2 human/AI`);
     return lines;
   };
 
   const start = () => {
     if (!buildA || !buildB) return;
-    for (const b of bots) b.root.dispose(false, true);
+    for (const b of bots) disposeBot(b);
     fx.clear();
     bots = [
       buildBot('A', buildA, catalog, scene, arena.spawnA, Math.PI / 4),
@@ -124,6 +128,18 @@ async function main() {
     );
   };
   openLab();
+
+  // v0.8 real spinner damage: weapon energy measured around every physics step
+  scene.onBeforePhysicsObservable.add(() => {
+    combat?.beforePhysics();
+    const stepDt = Math.min(0.1, Math.max(1 / 240, engine.getDeltaTime() / 1000));   // same clamp as the physics step
+    for (const b of bots) if (!b.eliminated) { applyGyro(b, stepDt); armBefore(b); applyMagnets(b, stepDt); hingesBefore(b); tyreBefore(b); }   // v0.8 gyro; v0.11 arm + magnets; v0.12 hinges + tyre grip
+  });
+  scene.onAfterPhysicsObservable.add(() => {
+    const stepDt = Math.min(0.1, Math.max(1 / 240, engine.getDeltaTime() / 1000));
+    combat?.afterPhysics(stepDt);
+    for (const b of bots) if (!b.eliminated) { armAfter(b, stepDt); tyreAfter(b, stepDt, wheelsOnFloor(b)); }   // v0.11 reactionless hammer; v0.12 tyre grip
+  });
 
   let lastToggle = 0;
   scene.onBeforeRenderObservable.add(() => {
@@ -145,9 +161,41 @@ async function main() {
 
       // Upside down? -- helpless until the self-right fires
       updateInverted(b, now);
-      b.weapon.suppressed = !!b.inverted || !!b.rightingUntil;
+      // v0.12: a flipper can still fire upside down -- that's how it self-rights
+      const flipper = b.hinges?.some(h => h.role === 'flipper') ?? false;
+      b.weapon.suppressed = (!!b.inverted && !flipper) || !!b.rightingUntil;
       b.weapon.update(dt, d.fire && !over, canAttack(b.state));
       const helpless = !!b.inverted || !!b.rightingUntil;
+
+      // v0.8 real spinner: the weapon motor drives a real body; spin level is measured, not timed
+      if (b.spinner) {
+        const motorAlive = (b.state.parts['weapon_motor']?.hp ?? 0) > 0;
+        b.weapon.motorDead = !motorAlive;
+        driveSpinner(b, b.weapon.spinning && !b.weapon.suppressed && canAttack(b.state), motorAlive);
+        b.weapon.spinLevel = Math.min(1, Math.max(0, spinOmega(b) / b.spinner.omegaMax));
+      }
+      // v0.10 real overhead arm: tap = swing, hold = pin; the saw on the arm spins whenever it can
+      if (b.arm) {
+        const motorAlive = (b.state.parts['weapon_motor']?.hp ?? 0) > 0;
+        const usable = !b.weapon.suppressed && canAttack(b.state);
+        b.weapon.motorDead = !motorAlive;
+        driveArm(b, b.weapon.fireHeld, b.weapon.pressed, usable, motorAlive, dt);
+        b.weapon.armState = b.arm.state;
+        if (b.saw) driveSpinner(b, usable && !over, motorAlive, b.saw);
+      }
+
+      // v0.12 real flipper: tap = fire (upside down = self-right shot into the floor)
+      if (flipper) {
+        const motorAlive = (b.state.parts['weapon_motor']?.hp ?? 0) > 0;
+        b.weapon.motorDead = !motorAlive;
+        const press = b.weapon.pressed || (!!b.inverted && b.id !== 'A' && !p2Human);   // the AI self-rights at once
+        driveFlipper(b, press, !b.rightingUntil && canAttack(b.state) && !over, motorAlive, !!b.inverted, dt);
+      } else if (b.hinges) {
+        // v0.12 real control weapon: hold = lift / clamp / crush
+        const motorAlive = (b.state.parts['weapon_motor']?.hp ?? 0) > 0;
+        b.weapon.motorDead = !motorAlive;
+        driveControl(b, b.weapon.held, !b.weapon.suppressed && canAttack(b.state) && !over, motorAlive, dt);
+      }
 
       // Force-based drive: push toward the target speed with a force capped by the motor, so
       // mass x motor wins shoves and impulses aren't overwritten. Only while the wheels are on
@@ -163,7 +211,7 @@ async function main() {
         const mass = b.body.getMassProperties().mass ?? 50;
         const right = Vector3.Cross(Vector3.Up(), fwd);
         const vf = Vector3.Dot(v, fwd), vr = Vector3.Dot(v, right);
-        const maxAccel = DRIVE.baseAccel + DRIVE.accelPerSpeed * spd;             // motor strength
+        const maxAccel = (DRIVE.baseAccel + DRIVE.accelPerSpeed * spd) * magnetGrip(b);   // motor strength (v0.11: x magnet grip)
         const wantAccel = (d.throttle * spd - vf) * DRIVE.gain;
         const accel = Math.max(-maxAccel, Math.min(maxAccel, wantAccel));
         const lateral = -vr * DRIVE.lateralGrip;                                  // tyres resist sliding
@@ -176,7 +224,7 @@ async function main() {
       }
 
       // Weapon visuals
-      if (b.weaponMesh) {
+      if (b.weaponMesh && !b.spinner && !b.arm && !b.hinges) {   // real weapons are moved by physics
         const w = b.weapon;
         if (w.mode === 'spinner') {
           if (b.spinAxis === 'x') b.weaponMesh.rotation.x += SPIN_VISUAL.x * w.spinLevel * dt;
@@ -226,13 +274,9 @@ async function main() {
         const w = bots.find(b => !isDestroyed(b.state));
         end(w ? `${w.build.cosmetics.name} WINS BY KO` : 'DOUBLE KO', w?.build.cosmetics.paint ?? '#fff');
       } else if (timeLeft <= 0) {
-        const imm = bots.filter(b => isImmobilized(b.state));
-        let w: Bot | undefined;
-        if (imm.length === 1) w = bots.find(b => !isImmobilized(b.state));
-        else {
-          const [a, b] = bots;
-          w = a.state.totalDamageTaken < b.state.totalDamageTaken ? a : b.state.totalDamageTaken < a.state.totalDamageTaken ? b : undefined;
-        }
+        // Time-out: whoever took more damage (from any source) loses. Nothing else counts.
+        const [a, b] = bots;
+        const w: Bot | undefined = a.state.totalDamageTaken < b.state.totalDamageTaken ? a : b.state.totalDamageTaken < a.state.totalDamageTaken ? b : undefined;
         end(w ? `${w.build.cosmetics.name} WINS ON DAMAGE` : 'DRAW', w?.build.cosmetics.paint ?? '#fff');
       }
     }
@@ -254,6 +298,7 @@ async function main() {
         b.root.rotationQuaternion = Quaternion.RotationAxis(Vector3.Up(), yaw);
         b.body.setAngularVelocity(Vector3.Zero());
         scene.onAfterRenderObservable.addOnce(() => { b.body.disablePreStep = true; });
+        snapSpinner(b, scene);                                   // weapon follows the chassis, keeps its spin
         b.rightingUntil = undefined;
         b.inverted = undefined;
       }
@@ -265,11 +310,16 @@ async function main() {
     const upsideDown = upDot < INVERT.upDot && resting;
 
     if (!b.inverted) {
-      if (upsideDown) { b.inverted = { since: now }; hud.sign('UPSIDE DOWN', 700, '#ff9f43'); }
+      if (upsideDown) {
+        b.inverted = { since: now };
+        const flip = b.hinges?.some(h => h.role === 'flipper');
+        hud.sign(flip ? 'UPSIDE DOWN — FIRE THE FLIPPER!' : 'UPSIDE DOWN', flip ? 1200 : 700, '#ff9f43');
+      }
       return;
     }
     if (!upsideDown && upDot > 0.5) { b.inverted = undefined; return; }   // got knocked back over
-    if (now - b.inverted.since >= INVERT.selfRightMs) {
+    const backup = b.hinges?.some(h => h.role === 'flipper') ? INVERT.flipperSelfRightMs : INVERT.selfRightMs;
+    if (now - b.inverted.since >= backup) {
       // Scripted self-right: hop + roll, then snap upright at snapMs
       const fwd = forward(b); fwd.y = 0; fwd.normalize();
       b.body.setLinearVelocity(new Vector3(vel.x, INVERT.hopUp, vel.z));
@@ -277,6 +327,10 @@ async function main() {
       b.rightingUntil = now + INVERT.snapMs;
       hud.sign('SELF-RIGHT!', 700, '#4dd2ff');
     }
+  }
+
+  function wheelsOnFloor(b: Bot): boolean {
+    return Vector3.Dot(upVector(b), Vector3.Up()) > DRIVE.wheelsDownDot && b.root.position.y < REST_Y + DRIVE.groundedY;
   }
 
   function isOut(b: Bot): boolean {
@@ -288,10 +342,7 @@ async function main() {
   function eliminate(b: Bot, t: number) {
     b.eliminated = { t, pos: b.root.position.clone(), vel: b.body.getLinearVelocity().clone(), reason: 'out' };
     fx.explode(b, b.eliminated.pos);
-    b.body.setLinearVelocity(Vector3.Zero());
-    b.body.setAngularVelocity(Vector3.Zero());
-    b.body.setMotionType(PhysicsMotionType.STATIC);     // stops falling forever; still safe to query
-    b.root.setEnabled(false);                           // debris clones are what you see now
+    freezeBot(b);                                       // static (stops falling forever) + hidden; debris clones are what you see now
     camFocus = { pos: b.eliminated.pos, until: t + OUT.camHoldMs };   // watch the explosion
     hud.sign('OUT OF THE ARENA!', 1500, '#ff4d4d');
   }

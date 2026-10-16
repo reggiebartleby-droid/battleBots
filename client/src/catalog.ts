@@ -7,9 +7,10 @@ import fronts from '../../data/parts/fronts.json';
 import armor from '../../data/parts/armor.json';
 import drivetrain from '../../data/parts/drivetrain.json';
 import secondary from '../../data/parts/secondary.json';
+import weaponMotors from '../../data/parts/weapon_motors.json';
 
 export const catalog = buildCatalog(
   bodies as BodyDef[],
-  [...weapons, ...fronts, ...armor, ...drivetrain, ...secondary] as PartDef[],
+  [...weapons, ...fronts, ...armor, ...drivetrain, ...secondary, ...weaponMotors] as PartDef[],
   balance as BalanceConfig,
 );

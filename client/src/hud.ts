@@ -2,7 +2,7 @@ import type { Bot } from './bot.js';
 import type { Stats } from './combat.js';
 import { canAttack, isImmobilized } from '../../src/core/state.js';
 
-const ICON: Record<string, string> = { weapon: '⚙', front: '◣', armor: '▣', wheels: '◎', motor: '⚡', secondary: '🔥' };
+const ICON: Record<string, string> = { weapon: '⚙', weapon_motor: '⟳', front: '◣', armor: '▣', wheels: '◎', motor: '⚡', secondary: '🔥' };
 const FLASH_MS = 350;
 
 export class Hud {

@@ -13,33 +13,38 @@ const STORAGE_KEY = 'battlebots.builder.v1';
 export const PRESETS: Record<string, BotBuild> = {
   'Red Disc': {
     bodyId: 'vertical_spinner',
-    sockets: { weapon: 'vs_disc', front: 'front_wedgelet', armor: 'armor_light', wheels: 'wheels_std', motor: 'motor_std', secondary: null },
+    sockets: { weapon: 'vs_disc', weapon_motor: 'wm_std', front: 'front_wedgelet', armor: 'armor_light', wheels: 'wheels_std', motor: 'motor_std', secondary: null },
     cosmetics: { name: 'RED DISC', paint: '#e63946' },
   },
   'Blue Lift': {
     bodyId: 'control',
-    sockets: { weapon: 'ct_lifter', front: 'front_wedge', armor_1: 'armor_medium', armor_2: 'armor_medium', wheels: 'wheels_std', motor: 'motor_fast', secondary: null },
+    sockets: { weapon: 'ct_lifter', weapon_motor: 'wm_std', front: 'front_wedge', armor_1: 'armor_medium', armor_2: 'armor_medium', wheels: 'wheels_std', motor: 'motor_fast', secondary: null },
     cosmetics: { name: 'BLUE LIFT', paint: '#1d7cf2' },
   },
   'Hammer Time': {
     bodyId: 'overhead',
-    sockets: { weapon: 'oh_hammer', front: null, armor_1: 'armor_medium', armor_2: 'armor_light', wheels: 'wheels_std', motor: 'motor_std' },
+    sockets: { weapon: 'oh_hammer', weapon_motor: 'wm_std', front: null, armor_1: 'armor_medium', armor_2: 'armor_light', wheels: 'wheels_std', motor: 'motor_std' },
     cosmetics: { name: 'HAMMER TIME', paint: '#f4a261' },
   },
   'Shell Shock': {
     bodyId: 'full_body_spinner',
-    sockets: { weapon: 'fbs_shell', wheels: 'wheels_std', motor: 'motor_std' },
+    sockets: { weapon: 'fbs_shell', weapon_motor: 'wm_std', wheels: 'wheels_std', motor: 'motor_std' },
     cosmetics: { name: 'SHELL SHOCK', paint: '#2a9d8f' },
+  },
+  'Noisy Cricket': {
+    bodyId: 'horizontal_spinner',
+    sockets: { weapon: 'hs_bar', weapon_motor: 'wm_std', front: null, armor: 'armor_medium', wheels: 'wheels_std', motor: 'motor_std', secondary: null },
+    cosmetics: { name: 'NOISY CRICKET', paint: '#43aa4b' },
   },
   'Flip Side': {
     bodyId: 'flipper',
-    sockets: { weapon: 'fl_pneumatic', front: 'front_wedge', armor: 'armor_light', wheels_1: 'wheels_std', wheels_2: 'wheels_std', motor: 'motor_std' },
+    sockets: { weapon: 'fl_pneumatic', weapon_motor: 'wm_std', front: 'front_wedge', armor: 'armor_light', wheels_1: 'wheels_std', wheels_2: 'wheels_std', motor: 'motor_std' },
     cosmetics: { name: 'FLIP SIDE', paint: '#9b5de5' },
   },
 };
 
 const SOCKET_LABEL: Record<string, string> = {
-  weapon: 'WEAPON', front: 'FRONT', armor: 'ARMOR', wheels: 'WHEELS', motor: 'MOTOR', secondary: 'SECONDARY',
+  weapon: 'WEAPON', weapon_motor: 'WPN MOTOR', front: 'FRONT', armor: 'ARMOR', wheels: 'WHEELS', motor: 'MOTOR', secondary: 'SECONDARY',
 };
 
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v));

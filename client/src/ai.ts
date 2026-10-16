@@ -5,7 +5,9 @@
  *  - Flanks: if the target's weapon is live and pointed at us, approach from the side/rear.
  *  - Wall avoidance: steers back toward the centre when its nose is about to hit a wall.
  *  - Stuck escape: if it's pushing but not moving, reverse and turn for a moment.
- * Full-body spinners don't need to aim, so they just close distance.
+ * Full-body spinners don't need to aim, so they just close distance (v0.12: once spun up, like real shells).
+ * v0.12 flippers fire when the opponent is actually on the plate (or very close and lined up); lifters /
+ * grappler / crusher hold while touching.
  */
 import { Vector3 } from '@babylonjs/core';
 import { forward, type Bot } from './bot.js';
@@ -67,7 +69,11 @@ export function aiDrive(self: Bot, target: Bot, arenaHalf: number, dt: number, d
   switch (w.mode) {
     case 'spinner': fire = !w.spinning; break;
     case 'strike':
-    case 'flipper': fire = w.phase === 'ready' && dist < 2.1 && facing > 0.9 && Math.random() >= D.whiff; break;
+    case 'flipper': {
+      const onPlate = self.hinges?.some(h => h.touched) ?? false;   // v0.12: they're on the plate right now
+      fire = w.phase === 'ready' && w.refill <= 0 && (onPlate || (dist < 1.9 && facing > 0.9)) && Math.random() >= D.whiff;
+      break;
+    }
     case 'hold': fire = dist < 2.2 && facing > 0.8; break;
   }
 
@@ -97,11 +103,11 @@ export function aiDrive(self: Bot, target: Bot, arenaHalf: number, dt: number, d
   const angle = Math.atan2(Vector3.Cross(fwd, dir).y, Vector3.Dot(fwd, dir));
   const turn = Math.abs(angle) < AIM_TOLERANCE ? 0 : Math.sign(angle) * Math.min(1, Math.abs(angle) * 2 + 0.3);
 
-  const needSpin = w.mode === 'spinner' && !isFbs && w.spinLevel < D.spinReady;
+  const needSpin = w.mode === 'spinner' && w.spinLevel < D.spinReady;   // v0.12: shells spin up first too
 
   let throttle: number;
-  if (isFbs) throttle = 1;
-  else if (needSpin && dist < 3.5) throttle = -0.7;                    // retreat while spinning up, keep facing them
+  if (needSpin && dist < 3.5) throttle = -0.7;                         // retreat while spinning up, keep facing them
+  else if (isFbs) throttle = needSpin ? 0 : 1;                    // retreat while spinning up, keep facing them
   else if (Math.abs(angle) > Math.PI / 2) throttle = 0;                // facing away: spin in place
   else if (dist < BACKOFF_DIST && Math.abs(angle) > AIM_TOLERANCE * 2) throttle = -0.5;   // re-aim
   else throttle = dist > LUNGE_DIST ? 1 : 0.85;

@@ -3,9 +3,10 @@
     "id": "vertical_spinner",
     "name": "Vertical Spinner",
     "description": "Vertically spinning disc, bar or drum. Launches opponents upward. The meta - tuning target.",
-    "weightLimit": 250,
+    "weightLimit": 275,
     "sockets": [
       { "id": "weapon", "type": "weapon" },
+      { "id": "weapon_motor", "type": "weapon_motor" },
       { "id": "front", "type": "front", "required": false },
       { "id": "armor", "type": "armor" },
       { "id": "wheels", "type": "wheels" },
@@ -18,9 +19,10 @@
     "id": "horizontal_spinner",
     "name": "Horizontal Spinner",
     "description": "Horizontally spinning bar, disc or undercutter. Big hits, but recoils on impact.",
-    "weightLimit": 250,
+    "weightLimit": 275,
     "sockets": [
       { "id": "weapon", "type": "weapon" },
+      { "id": "weapon_motor", "type": "weapon_motor" },
       { "id": "front", "type": "front", "required": false },
       { "id": "armor", "type": "armor" },
       { "id": "wheels", "type": "wheels" },
@@ -33,9 +35,10 @@
     "id": "overhead",
     "name": "Overhead",
     "description": "Swinging hammer, saw or hammer-saw striking from above. Two armor slots, no secondary.",
-    "weightLimit": 250,
+    "weightLimit": 275,
     "sockets": [
       { "id": "weapon", "type": "weapon" },
+      { "id": "weapon_motor", "type": "weapon_motor" },
       { "id": "front", "type": "front", "required": false },
       { "id": "armor_1", "type": "armor" },
       { "id": "armor_2", "type": "armor" },
@@ -47,10 +50,11 @@
   {
     "id": "flipper",
     "name": "Flipper",
-    "description": "Pneumatic (instant) or electric (torque) flipper. Two wheel sets, no secondary.",
-    "weightLimit": 250,
+    "description": "Rear-hinged flipper: pneumatic (huge, limited gas) or electric (weaker, unlimited). Self-rights with the flipper. Two wheel sets, no secondary.",
+    "weightLimit": 275,
     "sockets": [
       { "id": "weapon", "type": "weapon" },
+      { "id": "weapon_motor", "type": "weapon_motor" },
       { "id": "front", "type": "front", "required": false },
       { "id": "armor", "type": "armor" },
       { "id": "wheels_1", "type": "wheels" },
@@ -62,10 +66,11 @@
   {
     "id": "control",
     "name": "Control",
-    "description": "Lifter, grappler or crusher. Weight-cheap weapons, two armor slots.",
-    "weightLimit": 250,
+    "description": "Lifter, grappler or crusher. Weight-cheap weapons, two armor slots. Lifted bots lose their grip.",
+    "weightLimit": 275,
     "sockets": [
       { "id": "weapon", "type": "weapon" },
+      { "id": "weapon_motor", "type": "weapon_motor" },
       { "id": "front", "type": "front", "required": false },
       { "id": "armor_1", "type": "armor" },
       { "id": "armor_2", "type": "armor" },
@@ -78,10 +83,11 @@
   {
     "id": "full_body_spinner",
     "name": "Full-Body Spinner",
-    "description": "Spinning shell or cage - the weapon IS the armor. No front or armor sockets.",
-    "weightLimit": 250,
+    "description": "Spinning shell or cage - the weapon IS the armor. No front or armor sockets. Slow to spin up, huge stored energy.",
+    "weightLimit": 275,
     "sockets": [
       { "id": "weapon", "type": "weapon" },
+      { "id": "weapon_motor", "type": "weapon_motor" },
       { "id": "wheels", "type": "wheels" },
       { "id": "motor", "type": "motor" }
     ],

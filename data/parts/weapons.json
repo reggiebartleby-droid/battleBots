@@ -3,21 +3,21 @@
   { "id": "vs_bar",        "name": "Vertical Bar",        "type": "weapon", "kind": "bar",  "stats": { "hp": 24, "damage": 36 }, "description": "Harder hits, more fragile." },
   { "id": "vs_drum",       "name": "Drum / Eggbeater",    "type": "weapon", "kind": "drum", "stats": { "hp": 40, "damage": 22 }, "description": "Tough, lower damage, constant bites." },
 
-  { "id": "hs_bar",        "name": "Horizontal Bar",      "type": "weapon", "kind": "h_bar",       "stats": { "hp": 24, "damage": 40 }, "traits": ["recoil_on_hit"], "description": "Huge hits, recoils hard." },
-  { "id": "hs_disc",       "name": "Horizontal Disc",     "type": "weapon", "kind": "h_disc",      "stats": { "hp": 32, "damage": 30 }, "traits": ["recoil_on_hit"], "description": "Sturdier horizontal." },
-  { "id": "hs_undercutter","name": "Undercutter",         "type": "weapon", "kind": "undercutter", "stats": { "hp": 26, "damage": 32 }, "traits": ["recoil_on_hit"], "description": "Low blade - goes for wheels." },
+  { "id": "hs_bar",        "name": "Horizontal Bar",      "type": "weapon", "kind": "h_bar",       "stats": { "hp": 24, "damage": 40 }, "description": "Huge hits, recoils hard." },
+  { "id": "hs_disc",       "name": "Horizontal Disc",     "type": "weapon", "kind": "h_disc",      "stats": { "hp": 32, "damage": 30 }, "description": "Sturdier horizontal." },
+  { "id": "hs_undercutter","name": "Undercutter",         "type": "weapon", "kind": "undercutter", "stats": { "hp": 26, "damage": 32 }, "description": "Low blade - goes for wheels." },
 
   { "id": "oh_hammer",     "name": "Hammer",              "type": "weapon", "kind": "hammer",     "stats": { "hp": 30, "damage": 26 }, "description": "Blunt overhead strike." },
   { "id": "oh_saw",        "name": "Overhead Saw",        "type": "weapon", "kind": "saw",        "stats": { "hp": 22, "damage": 32 }, "description": "Cutting overhead strike." },
   { "id": "oh_hammersaw",  "name": "Hammer-Saw",          "type": "weapon", "kind": "hammer_saw", "stats": { "hp": 26, "damage": 30 }, "description": "Hammer with a spinning saw head." },
 
-  { "id": "fl_pneumatic",  "name": "Pneumatic Flipper",   "type": "weapon", "kind": "pneumatic_flipper", "stats": { "hp": 28, "damage": 16 }, "traits": ["instant"], "description": "Instant launch; limited gas." },
-  { "id": "fl_electric",   "name": "Electric Flipper",    "type": "weapon", "kind": "electric_flipper",  "stats": { "hp": 34, "damage": 14 }, "traits": ["torque"],  "description": "Slower but tireless torque lift." },
+  { "id": "fl_pneumatic",  "name": "Pneumatic Flipper",   "type": "weapon", "kind": "pneumatic_flipper", "stats": { "hp": 28, "damage": 16 }, "traits": ["instant"], "description": "Rear-hinged, huge instant throw; limited gas (20 shots)." },
+  { "id": "fl_electric",   "name": "Electric Flipper",    "type": "weapon", "kind": "electric_flipper",  "stats": { "hp": 34, "damage": 14 }, "traits": ["torque"],  "description": "Weaker, slower throw; never runs out." },
 
-  { "id": "ct_lifter",     "name": "Lifter",              "type": "weapon", "kind": "lifter",   "stats": { "hp": 30, "damage": 6 },  "description": "Weight-cheap control arm." },
-  { "id": "ct_grappler",   "name": "Grappler",            "type": "weapon", "kind": "grappler", "stats": { "hp": 26, "damage": 10 }, "traits": ["grip"], "description": "Clamps and holds." },
-  { "id": "ct_crusher",    "name": "Crusher",             "type": "weapon", "kind": "crusher",  "stats": { "hp": 24, "damage": 20 }, "traits": ["grip"], "description": "Hydraulic crushing jaw." },
+  { "id": "ct_lifter",     "name": "Lifter",              "type": "weapon", "kind": "lifter",   "stats": { "hp": 34, "armor": 10, "damage": 0 }, "description": "Wide armored fork on the wedge face (hardened plate, takes the hits first) - lifts them off their wheels." },
+  { "id": "ct_grappler",   "name": "Grappler",            "type": "weapon", "kind": "grappler", "stats": { "hp": 26, "damage": 10 }, "traits": ["grip"], "description": "Clamp jaw + lifting fork - grab and carry." },
+  { "id": "ct_crusher",    "name": "Crusher",             "type": "weapon", "kind": "crusher",  "stats": { "hp": 24, "damage": 20 }, "traits": ["grip"], "description": "Slow hydraulic beak - pierces armor while it presses." },
 
-  { "id": "fbs_shell",     "name": "Spinning Shell",      "type": "weapon", "kind": "shell", "stats": { "hp": 60, "armor": 10, "damage": 28 }, "traits": ["weapon_is_armor"], "description": "Full shell - weapon and armor in one." },
+  { "id": "fbs_shell",     "name": "Spinning Shell",      "type": "weapon", "kind": "shell", "stats": { "hp": 60, "armor": 10, "damage": 28 }, "traits": ["weapon_is_armor"], "description": "Full shell - weapon and armor in one. Biggest stored energy." },
   { "id": "fbs_cage",      "name": "Spinning Cage",       "type": "weapon", "kind": "cage",  "stats": { "hp": 50, "armor": 6,  "damage": 34 }, "traits": ["weapon_is_armor"], "description": "Open cage - lighter, hits harder." }
 ]

@@ -3,7 +3,7 @@
  * numbers (DOM overlay projected from world space) and a little camera shake.
  */
 import { Camera, Color3, Matrix, Mesh, MeshBuilder, Scene, StandardMaterial, Vector3 } from '@babylonjs/core';
-import type { Bot } from './bot.js';
+import { botMeshes, type Bot } from './bot.js';
 
 interface Spark { m: Mesh; v: Vector3; life: number; max: number }
 interface Label { el: HTMLElement; pos: Vector3; life: number; max: number }
@@ -73,7 +73,7 @@ export class Fx {
     this.spawnSparks(at, EXPLODE.sparks / 3, this.sparkMat, EXPLODE.sparkSpeed * 0.7, 1.2);
     this.label('OUT!', at.add(new Vector3(0, 1.2, 0)), '#ff4d4d', 'dmg');
     this.shake = Math.max(this.shake, EXPLODE.shake);
-    for (const src of [bot.root, ...bot.root.getChildMeshes()]) {
+    for (const src of botMeshes(bot)) {
       if (!(src instanceof Mesh) || src.visibility < 0.01) continue;
       const m = src.clone(`debris_${src.name}`, src.parent as Mesh | null, true, false);   // no children, NO physics body
       if (!m) continue;
@@ -176,7 +176,7 @@ export class Fx {
 
   private flash(bot: Bot) {
     const mats = new Set<StandardMaterial>();
-    for (const m of [bot.root, ...bot.root.getChildMeshes()]) {
+    for (const m of botMeshes(bot)) {
       if (m.material instanceof StandardMaterial) mats.add(m.material);
     }
     for (const mat of mats) {

@@ -16,7 +16,7 @@ for (const p of Object.values(catalog.parts)) {
 
 const build: BotBuild = {
   bodyId: 'vertical_spinner',
-  sockets: { weapon: 'vs_disc', front: 'front_wedgelet', armor: 'armor_light', wheels: 'wheels_std', motor: 'motor_std', secondary: null },
+  sockets: { weapon: 'vs_disc', weapon_motor: 'wm_std', front: 'front_wedgelet', armor: 'armor_light', wheels: 'wheels_std', motor: 'motor_std', secondary: null },
   cosmetics: { name: 'Demo Bot', paint: '#ff3b1f' },
 };
 

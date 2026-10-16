@@ -1,0 +1,5 @@
+[
+  { "id": "wm_std",     "name": "Weapon Motor",          "type": "weapon_motor", "stats": { "hp": 14 },             "description": "Powers the weapon (spinner motor, arm motor, flipper ram / valves, lifter or hydraulic pump). Destroyed = weapon can't be powered." },
+  { "id": "wm_light",   "name": "Light Weapon Motor",    "type": "weapon_motor", "stats": { "hp": 8 },              "description": "Same power, easier to kill." },
+  { "id": "wm_armored", "name": "Armored Weapon Motor",  "type": "weapon_motor", "stats": { "hp": 16, "armor": 4 }, "description": "Same power, shielded housing. Heavy." }
+]

@@ -15,7 +15,8 @@ export type BodyId =
   | 'full_body_spinner';
 
 /** Socket types. Each body declares which sockets it has. */
-export type SocketType = 'weapon' | 'front' | 'armor' | 'wheels' | 'motor' | 'secondary';
+/** weapon_motor: the weapon's own drive (spinner motor v0.8/v0.9, overhead arm motor v0.10, flipper ram + valves / lifter / hydraulic pump / shell motor v0.12). At 0 HP the weapon can't be powered. */
+export type SocketType = 'weapon' | 'weapon_motor' | 'front' | 'armor' | 'wheels' | 'motor' | 'secondary';
 
 export interface SocketDef {
   /** Unique within the body, e.g. "armor_1", "armor_2", "wheels_left". */
@@ -64,7 +65,7 @@ export interface PartStats {
   hp: number;
   armor?: number;
   damage?: number;
-  /** Motors only. */
+  /** Drive motors only. */
   speed?: number;
 }
 
@@ -75,7 +76,6 @@ export interface PartStats {
 export type Trait =
   | 'hinged'            // wedgelet: resists vertical spinners
   | 'fixed'             // wedge: beats horizontals
-  | 'recoil_on_hit'     // horizontal spinners
   | 'weapon_is_armor'   // full-body shell/cage: weapon doubles as armor
   | 'instant'           // pneumatic flipper
   | 'torque'            // electric flipper

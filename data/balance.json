@@ -1,6 +1,7 @@
 {
   "baseWeight": {
     "weapon": 20,
+    "weapon_motor": 8,
     "front": 5,
     "armor": 5,
     "wheels": 10,
