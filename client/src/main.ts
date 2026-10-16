@@ -17,7 +17,6 @@ import { Builder } from './builder.js';
 import { aiDrive, type Difficulty } from './ai.js';
 
 const MATCH_SECONDS = 180;
-const SPIN_VISUAL = { x: 25, y: 20 };     // rad/s at full spin
 /** Drive feel. Push strength = mass x (baseAccel + accelPerSpeed x speed).
  *  v0.7: the drive only acts while the wheels are actually on the floor (grounded + upright) --
  *  a bot lifted on a wedge, launched, or tipped has no grip, which is what makes lifts work. */
@@ -239,20 +238,6 @@ async function main() {
         b.body.setAngularVelocity(new Vector3(av.x, av.y + (d.turn * DRIVE.turnRate - av.y) * k, av.z));
       }
 
-      // Weapon visuals
-      if (b.weaponMesh && !b.spinner && !b.arm && !b.hinges) {   // real weapons are moved by physics
-        const w = b.weapon;
-        if (w.mode === 'spinner') {
-          if (b.spinAxis === 'x') b.weaponMesh.rotation.x += SPIN_VISUAL.x * w.spinLevel * dt;
-          if (b.spinAxis === 'y') b.weaponMesh.rotation.y += SPIN_VISUAL.y * w.spinLevel * dt;
-        } else if (w.mode === 'strike') {
-          b.weaponMesh.rotation.x = b.weaponRestRotX + w.pose() * 1.15;     // arm swings down over the front
-        } else if (w.mode === 'flipper') {
-          b.weaponMesh.rotation.x = b.weaponRestRotX - w.pose() * 1.2;      // plate kicks up
-        } else if (w.mode === 'hold') {
-          b.weaponMesh.rotation.x = b.weaponRestRotX - w.pose() * 0.7;      // arm lifts while gripping
-        }
-      }
       // Grey out dead parts
       for (const [sid, m] of Object.entries(b.partMeshes)) {
         const ps = b.state.parts[sid];

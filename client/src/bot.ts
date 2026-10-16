@@ -71,7 +71,6 @@ export interface Bot {
   partMeshes: Record<string, Mesh>;   // socketId -> mesh
   totalWeight: number;
   weapon: Weapon;                     // activation state (spin level, swing phase, grip)
-  weaponRestRotX: number;             // weaponMesh.rotation.x at rest, for swing/flip animation
   lastHit?: { socket: string; t: number };   // most recent damage taken (HUD flash)
   /** Set when the bot is knocked out of the arena (main.ts OUT block): the moment, where it was
    *  and how fast it was going. This is the hook for the elimination animation (fx.explode). */
@@ -308,7 +307,6 @@ export interface BotMesh {
   spinAxis: Bot['spinAxis'];
   partMeshes: Record<string, Mesh>;
   totalWeight: number;
-  weaponRestRotX: number;
   partKinds: Record<string, PartDef>;   // socketId -> part (for the collider pass)
 }
 
@@ -352,7 +350,7 @@ export function assembleBotMesh(id: string, build: BotBuild, catalog: Catalog, s
 
   addDetails(scene, root, build.bodyId, partMeshes, partKinds, mats);   // v0.16 visual-only detail
 
-  return { root, weaponMesh, weaponKind, spinAxis, partMeshes, partKinds, totalWeight: v.totalWeight, weaponRestRotX: weaponMesh?.rotation.x ?? 0 };
+  return { root, weaponMesh, weaponKind, spinAxis, partMeshes, partKinds, totalWeight: v.totalWeight };
 }
 
 export function buildBot(id: 'A' | 'B', build: BotBuild, catalog: Catalog, scene: Scene, pos: Vector3, facing: number, opts: StateOptions = {}): Bot {

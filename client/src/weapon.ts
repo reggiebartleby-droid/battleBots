@@ -1,16 +1,17 @@
 /**
  * Weapon activation model. One instance per bot.
  *
+ *  Every weapon is a real physics body (bot.ts); this class only holds the key state and mirrors what
+ *  the physics is doing, for the HUD and the AI. (v0.20: the old timer-driven spin-up / swing / flip
+ *  windows and the spin reset were removed -- they only served the stand-in weapons.)
+ *
  *  spinner  (disc/bar/drum, h_bar/h_disc/undercutter, shell/cage)
- *           fire key TOGGLES the motor; spin level ramps up over ~2 s and coasts
- *           down when switched off. Damage scales with spin level (stored energy).
- *  strike   (hammer/saw/hammer_saw)  fire = one swing: short active window, then cooldown.
- *           v0.10 real arm: tap = swing (the arm returns on its own), hold = pin after the swing;
- *           the swing itself is physics (bot.ts driveArm), this class only reports it.
- *  flipper  (pneumatic/electric)     fire = one flip: short active window, then cooldown.
+ *           fire key TOGGLES the motor; spinLevel is measured from the real body every frame (main.ts).
+ *  strike   (hammer/saw/hammer_saw)  tap = swing (the arm returns on its own), hold = pin after the swing.
+ *  flipper  (pneumatic/electric)     fire = one flip.
  *  hold     (lifter/grappler/crusher) weapon is live while the key is HELD.
  *
- * Contacts while power() == 0 are just bumps (no damage).
+ * power() > 0 = the weapon is live right now (the AI uses it to keep clear).
  */
 import type { WeaponKind } from '../../src/core/types.js';
 
@@ -18,14 +19,7 @@ export type WeaponMode = 'spinner' | 'strike' | 'flipper' | 'hold' | 'none';
 export type WeaponPhase = 'ready' | 'active' | 'recover';
 
 export const TUNING = {
-  spinUp: 2.2,                     // seconds from 0 → full spin
-  spinDown: 1.4,                   // seconds from full → 0 when switched off
-  minSpinToHit: 0.15,              // below this a spinner contact is only a bump
-  strike:            { window: 0.30, cooldown: 1.10 },
-  pneumatic_flipper: { window: 0.25, cooldown: 1.60 },
-  electric_flipper:  { window: 0.45, cooldown: 0.90 },
-  holdHitCooldownMs: 600,          // lifter/grappler/crusher re-hit interval
-  hitCooldownMs: 350,              // everything else
+  minSpinToHit: 0.15,              // below this spin level a spinner counts as not live (AI)
 };
 
 export function modeFor(kind?: WeaponKind): WeaponMode {
@@ -36,24 +30,19 @@ export function modeFor(kind?: WeaponKind): WeaponMode {
   return 'hold';
 }
 
-const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
-
 export class Weapon {
   mode: WeaponMode;
   // spinner
   spinning = false;
   spinLevel = 0;
-  // strike / flipper
+  // strike / flipper (mirrored from the real arm / hinge)
   phase: WeaponPhase = 'ready';
-  t = 0;                            // seconds spent in the current phase
   // hold
   held = false;
-  holdPose = 0;                     // smoothed 0..1 for the arm animation
   /** v0.6: true while the bot is upside down — spinner coasts down (stays switched ON),
    *  swings/flips/grips can't start. Cleared when the bot is back on its wheels. */
   suppressed = false;
-  /** v0.8: the weapon is a real body (vertical spinners). spinLevel is then measured from physics
-   *  every frame (main.ts) instead of ramped by a timer; damage comes from the energy it loses on a hit. */
+  /** v0.8: the weapon is a real spinner body; spinLevel is measured from physics every frame (main.ts). */
   realSpin = false;
   /** v0.8: weapon motor destroyed -- the switch does nothing, the weapon only coasts. */
   motorDead = false;
@@ -79,12 +68,6 @@ export class Weapon {
 
   constructor(public kind?: WeaponKind) { this.mode = modeFor(kind); }
 
-  cfg() {
-    if (this.kind === 'pneumatic_flipper') return TUNING.pneumatic_flipper;
-    if (this.kind === 'electric_flipper') return TUNING.electric_flipper;
-    return TUNING.strike;
-  }
-
   /** Call once per frame. `fire` is the raw key/AI state; `alive` = weapon part still has HP. */
   update(dt: number, fire: boolean, alive: boolean) {
     const pressed = fire && !this.prevFire;
@@ -95,35 +78,19 @@ export class Weapon {
 
     switch (this.mode) {
       case 'spinner':
-        if (pressed && alive) this.spinning = !this.spinning;
-        if (this.realSpin) break;                                   // measured from the real body instead
-        this.spinLevel = clamp01(this.spinLevel + dt / (this.spinning && !this.suppressed ? TUNING.spinUp : -TUNING.spinDown));
+        if (pressed && alive) this.spinning = !this.spinning;      // spinLevel is measured from the real body
         break;
       case 'strike':
-      case 'flipper': {
-        if (this.realArm || this.realHinge) {                       // physics runs the swing / flip; mirror it
-          this.phase = this.armState === 'ready' ? 'ready' : this.armState === 'retract' ? 'recover' : 'active';
-          break;
-        }
-        const c = this.cfg();
-        this.t += dt;
-        if (this.phase === 'ready' && pressed && alive && !this.suppressed) { this.phase = 'active'; this.t = 0; }
-        else if (this.phase === 'active' && this.t >= c.window) { this.phase = 'recover'; this.t = 0; }
-        else if (this.phase === 'recover' && this.t >= c.cooldown) { this.phase = 'ready'; this.t = 0; }
+      case 'flipper':                                               // physics runs the swing / flip; mirror it
+        this.phase = this.armState === 'ready' ? 'ready' : this.armState === 'retract' ? 'recover' : 'active';
         break;
-      }
       case 'hold':
         this.held = fire && alive && !this.suppressed;
-        this.holdPose += ((this.held ? 1 : 0) - this.holdPose) * Math.min(1, dt * 10);
         break;
     }
   }
 
-  /** v0.6: a spinner that lands a hit dumps its stored energy — spin restarts from 0.
-   *  The motor stays ON, so it ramps straight back up (no key press needed). */
-  spinReset() { if (this.mode === 'spinner' && !this.realSpin) this.spinLevel = 0; }
-
-  /** 0 = this contact is only a bump; otherwise a multiplier on the weapon's damage stat. */
+  /** 0 = the weapon isn't live right now (used by the AI). */
   power(): number {
     switch (this.mode) {
       case 'spinner': return this.spinLevel < TUNING.minSpinToHit ? 0 : Math.pow(this.spinLevel, 1.3);
@@ -133,18 +100,6 @@ export class Weapon {
       default: return 0;
     }
   }
-
-  /** Animation pose 0..1 (0 = rest, 1 = fully swung / lifted). */
-  pose(): number {
-    if (this.mode === 'hold') return this.holdPose;
-    if (this.mode !== 'strike' && this.mode !== 'flipper') return 0;
-    const c = this.cfg();
-    if (this.phase === 'active') return Math.min(1, this.t / c.window);
-    if (this.phase === 'recover') return 1 - Math.min(1, this.t / (c.cooldown * 0.6));
-    return 0;
-  }
-
-  hitCooldownMs() { return this.mode === 'hold' ? TUNING.holdHitCooldownMs : TUNING.hitCooldownMs; }
 
   /** For the HUD. */
   status(alive: boolean): { label: string; pct: number; cls: string } {
@@ -175,9 +130,7 @@ export class Weapon {
           if (this.armState === 'retract') return { label: 'RETRACT', pct: 50, cls: 'off' };
           return { label: 'READY', pct: 100, cls: 'on' };
         }
-        if (this.phase === 'ready') return { label: 'READY', pct: 100, cls: 'on' };
-        if (this.phase === 'active') return { label: this.mode === 'strike' ? 'SWING!' : 'FIRE!', pct: 100, cls: 'hit' };
-        return { label: 'RELOAD', pct: Math.round((this.t / this.cfg().cooldown) * 100), cls: 'off' };
+        return { label: 'READY', pct: 100, cls: 'on' };
       }
       case 'hold': {
         if (this.motorDead) return { label: 'ACTUATOR DEAD', pct: 0, cls: 'dead' };
@@ -190,15 +143,9 @@ export class Weapon {
   /** One-line control hint for the player. */
   hint(key: string): string {
     switch (this.mode) {
-      case 'spinner': return this.realSpin
-        ? `${key}: spinner ON/OFF (≈ 3 s to top speed; damage = energy the weapon dumps into the hit)`
-        : `${key}: spinner ON/OFF (spin-up ≈ 2 s; hits do more damage at full spin)`;
-      case 'strike': return this.realArm
-        ? `${key}: tap = swing (returns on its own) · hold = pin them down · damage = energy the arm dumps into the hit${this.kind !== 'hammer' ? ' · saw spins on its own' : ''}`
-        : `${key}: swing (face the target, get close)`;
-      case 'flipper': return this.realHinge
-        ? `${key}: fire the flipper when they're on it${Number.isFinite(this.gas) ? ` · ${this.gas} shots of gas` : ' · electric: unlimited, weaker'} · upside down: ${key} flips you back over`
-        : `${key}: fire flipper (face the target, get under them)`;
+      case 'spinner': return `${key}: spinner ON/OFF (≈ 3 s to top speed; damage = energy the weapon dumps into the hit)`;
+      case 'strike': return `${key}: tap = swing (returns on its own) · hold = pin them down · damage = energy the arm dumps into the hit${this.kind !== 'hammer' ? ' · saw spins on its own' : ''}`;
+      case 'flipper': return `${key}: fire the flipper when they're on it${Number.isFinite(this.gas) ? ` · ${this.gas} shots of gas` : ' · electric: unlimited, weaker'} · upside down: ${key} flips you back over`;
       case 'hold': return this.kind === 'crusher'
         ? `hold ${key}: beak crushes down (pierces armor while it presses) · drive them onto the lower jaw`
         : this.kind === 'grappler'

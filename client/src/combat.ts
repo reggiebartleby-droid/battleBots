@@ -12,10 +12,8 @@
  *    and tumbles come from the compound collision shapes (bot.ts) and mass.
  *  - Damage scales with the contact impulse Havok actually resolved (ev.impulse), so a hard
  *    hit hurts more than a graze; falls back to closing speed if the solver gives no impulse.
- *  - Weapon hits still apply a stand-in impulse (the weapon colliders don't move yet -- Phase 2
- *    turns spinners / arms / plates into real driven bodies). It is applied AT THE CONTACT POINT,
- *    so an off-centre hit spins the victim for real, and the attacker takes a share of the
- *    reaction (Newton's third law, scaled: the rest of the energy came from the spinning mass).
+ *  - (v0.20: the old stand-in weapon impulse, aim cone and spin reset were removed -- every weapon is a
+ *    real body now, so none of it ever ran.)
  *
  * v0.8 real vertical spinners (bot.spinner): no stand-in impulse, no spin reset, no aim cone.
  *  The weapon body's own collisions decide everything. Damage = rotational energy the weapon
@@ -44,14 +42,7 @@ import type { Fx } from './fx.js';
 
 /** Tuning knobs. */
 export const FEEL = {
-  weaponCone: Math.cos(Math.PI / 4),   // attacker must face the defender within 45° for a weapon hit
-  refSpeed: 4,                         // m/s equivalent at which a hit does full weapon damage
   continuedMs: 220,                    // how often a persistent contact is re-evaluated
-  spinnerStored: 2.5,                  // m/s-equivalent a fully spun spinner adds to the contact
-  // Stand-in weapon impulse (per kg of defender, m/s) until Phase 2 makes weapons real bodies
-  hit: { base: 3.5, perDmg: 0.22, max: 11, upKick: 0.4 },
-  vertical: { up: 4.5, upPerDmg: 0.12 },   // vertical spinners launch (the only real upward kick)
-  reaction: 0.35,                      // attacker gets this fraction of the hit impulse back (recoil)
 };
 
 /** v0.8 real spinner damage. */
@@ -94,7 +85,6 @@ export const SCORE = {
 export interface ScoreBonus { text: string; pts: number; t: number }
 
 export class Combat {
-  private lastHit = new Map<string, number>();
   private lastContinued = 0;
   log: HitLog[] = [];
   stats: Record<'A' | 'B', Stats> = { A: { hits: 0, dmg: 0, bumps: 0, maxImpulse: 0 }, B: { hits: 0, dmg: 0, bumps: 0, maxImpulse: 0 } };
@@ -306,64 +296,14 @@ export class Combat {
     return Math.max(0, Vector3.Dot(rel, toDef));
   }
 
+  /** Chassis-to-chassis (or chassis-to-weapon) contact. Every weapon is a real body, so its damage is measured
+   *  from its own collisions (afterPhysics); a chassis contact is a bump. Only the hit-speed stat is kept here. */
   private resolve(attacker: Bot, defender: Bot, ev: IPhysicsCollisionEvent, started: boolean) {
     const point = this.contactPoint(attacker, defender, ev);
-    const now = performance.now();
-
-    // Attacker must be pointing its weapon at the defender
     const toDef = defender.root.position.subtract(attacker.root.position); toDef.y = 0; toDef.normalize();
-    const fwd = forward(attacker); fwd.y = 0; fwd.normalize();
-    const isFbs = attacker.build.bodyId === 'full_body_spinner';
-    const facing = Vector3.Dot(fwd, toDef);
-    const aimed = isFbs || facing >= FEEL.weaponCone;
-
     const speed = this.contactSpeed(attacker, defender, ev, toDef);
     this.stats[attacker.id].maxImpulse = Math.max(this.stats[attacker.id].maxImpulse, Math.round(speed * 10) / 10);
-
-    // v0.8/v0.10: real spinners / arms only damage through their weapon bodies (see afterPhysics); chassis contact = bump
-    if (attacker.spinner || attacker.arm || attacker.hinges) { if (started) this.bump(attacker, point); return; }
-
-    const power = canAttack(attacker.state) ? attacker.weapon.power() : 0;
-    if (!aimed || power <= 0) { if (started) this.bump(attacker, point); return; }
-
-    if (now - (this.lastHit.get(attacker.id) ?? -1e9) < attacker.weapon.hitCooldownMs()) return;
-
-    // Contact hardness scales damage; spinners add stored energy proportional to spin
-    let scale: number;
-    if (attacker.weapon.mode === 'spinner') {
-      const stored = FEEL.spinnerStored * attacker.weapon.spinLevel;
-      scale = Math.min(1.5, Math.max(0.25, (speed + stored) / FEEL.refSpeed));
-    } else {
-      // swings / flips / grips don't need run-up speed
-      scale = Math.min(1.3, Math.max(0.8, speed / FEEL.refSpeed + 0.8));
-    }
-
-    const weapon = attacker.state.parts['weapon'];
-    const raw = Math.round((weapon?.part.stats.damage ?? 0) * scale * power);
-    if (raw <= 0) { if (started) this.bump(attacker, point); return; }
-
-    const socket = pickSocket(defender, attacker);
-    const dealt = applyDamage(defender.state, socket, raw);
-    this.lastHit.set(attacker.id, now);
-    this.log.push({ t: now, attacker: attacker.id, socket, dmg: dealt });
-    this.stats[attacker.id].hits++;
-    this.stats[attacker.id].dmg += dealt;
-    this.credit(attacker, defender, dealt);
-    defender.lastHit = { socket, t: now };
-    this.fx.hit(point, dealt, defender, attacker.build.cosmetics.paint ?? '#fff');
-
-    // Stand-in weapon impulse at the contact point (off-centre hits spin the victim for real)
-    const mag = Math.min(FEEL.hit.max, FEEL.hit.base + raw * FEEL.hit.perDmg);
-    const kick = toDef.scale(mag);
-    kick.y = FEEL.hit.upKick;
-    if (attacker.spinAxis === 'x') kick.y = FEEL.vertical.up + raw * FEEL.vertical.upPerDmg;   // vertical spinners launch
-    const mass = defender.body.getMassProperties().mass ?? 50;
-    const impulse = kick.scale(mass);
-    defender.body.applyImpulse(impulse, point);
-    // Reaction on the attacker (recoil), at the same point: a hard vertical hit can tip the attacker too
-    attacker.body.applyImpulse(impulse.scale(-FEEL.reaction), point);
-
-    attacker.weapon.spinReset();      // any spinner hit dumps the spin; motor stays ON and ramps back
+    if (started) this.bump(attacker, point);
   }
 
   private bump(attacker: Bot, point: Vector3) {
