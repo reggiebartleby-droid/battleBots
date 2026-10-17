@@ -54,7 +54,7 @@
 import {
   Color3, Matrix, Mesh, TransformNode, MeshBuilder, type Material, type Node, PhysicsBody, PhysicsMotionType, PhysicsShape, PhysicsShapeBox, PhysicsShapeContainer,
   PhysicsShapeConvexHull, PhysicsShapeCylinder, PhysicsShapeSphere, PhysicsMaterialCombineMode, Scene, Vector3, VertexData, Quaternion,
-  Physics6DoFConstraint, PhysicsConstraintAxis, PhysicsConstraintMotorType, type AbstractMesh,
+  Physics6DoFConstraint, PhysicsConstraintAxis, PhysicsConstraintMotorType, type AbstractMesh, StandardMaterial,
 } from '@babylonjs/core';
 import type { BotBuild, Catalog, PartDef, WeaponKind } from '../../src/core/types.js';
 import { createBotState, currentSpeed, type BotState, type StateOptions } from '../../src/core/state.js';
@@ -136,8 +136,11 @@ function setTread(w: RealWheel, on: boolean) {
  *  gives less force at the wheels (stall force = power / top speed), shared over the driven wheels.
  *  Neutral stick = the speed controllers brake (velocity motor holding 0), so friction does the stopping. */
 export const DRIVE = {
-  speedScale: 0.6,               // motor speed stat -> top speed, m/s
-  power: 6000,                   // W, total drive power (same for every motor part; gearing decides the split)
+  /** v0.25 realistic re-gear (user: A). Real heavyweights run ~15-25 mph with ~10-15 kW of brushless drive, and are
+   *  geared for ~2x the weight on each wheel in thrust (Ask Aaron). Was 0.6 / 6000 (tank 7 mph, standard 11, fast 16).
+   *  Now tank 4.5 m/s (10 mph), standard 7.2 (16 mph), fast 10.8 (24 mph). */
+  speedScale: 0.9,               // motor speed stat -> top speed, m/s
+  power: 12000,                  // W, total drive power (same for every motor part; gearing decides the split)
   gearDrag: 0.1,                 // drive dead (motor or wheels destroyed): gearbox drag, fraction of stall torque
   tyre: { friction: 1.0, restitution: 0.05 },   // vs the 0.8 floor (geometric mean) = 0.9, rubber on steel
   skid: { friction: 0.1, restitution: 0.05, gap: 0.01, width: 0.3, depth: 0.12, z: 0.68 },   // 2WD: UHMW skids front + back, 1 cm off the floor
@@ -150,6 +153,13 @@ export const DRIVE = {
   arc: 1.5,
   /** v0.22 temporary test boost (lab slider): multiplies the drive power of both bots. */
   boost: 1,
+  /** v0.25 heading-hold gyro (real RC gyro in the drive mix). With no steering input, the drive pushes back
+   *  against any yaw (heading lock: it holds the heading you let go of the stick at). Shell spinners only: spinning the shell up
+   *  twisted the base ~400 deg (reaction torque) because neutral only brakes lightly. */
+  gyroGain: 1.5,                 // turn command per rad/s of yaw
+  gyroSettleS: 0.3,              // s after the stick centres before the heading locks (no spring-back after a turn)
+  gyroHeading: 3,                // heading lock: turn command per rad off the heading held when the stick was let go
+  gyroBodies: ['full_body_spinner'] as string[],
   /** v0.22 drop centre (real 6WD trick): the centre axle sits this much lower, so the bot rocks onto 4 wheels
    *  and scrubs less when it turns. Bodies listed in dropCentreBodies only. */
   dropCentre: 0.01,
@@ -459,8 +469,51 @@ export function assembleBotMesh(id: string, build: BotBuild, catalog: Catalog, s
   }
 
   addDetails(scene, root, build.bodyId, partMeshes, partKinds, mats);   // v0.16 visual-only detail
+  if (build.bodyId === 'full_body_spinner') addShellAids(scene, root, id);   // v0.25 where the nose is
 
   return { root, weaponMesh, weaponKind, spinAxis, partMeshes, partKinds, totalWeight: v.totalWeight };
+}
+
+/** v0.25 shell spinners hide their nose under the spinning shell. Two aids, each switched in the lab (remembered):
+ *  cap   (D) = a still cap on a post bolted to the inner base, through the shell's bearing, with an arrow on it
+ *  arrow (E) = a glowing arrow on the floor ahead of the nose (game aid, not a real part)
+ *  Visual only ("_deco": no colliders, no mass). */
+export const SHELL_AIDS = { cap: true, arrow: false };
+const AIDS_KEY = 'bb.shellAids.v1';
+try { Object.assign(SHELL_AIDS, JSON.parse(localStorage.getItem(AIDS_KEY) ?? '{}')); } catch { /* defaults */ }
+export function saveShellAids() { try { localStorage.setItem(AIDS_KEY, JSON.stringify(SHELL_AIDS)); } catch { /* no storage */ } }
+
+function addShellAids(scene: Scene, root: Mesh, id: string) {
+  const glow = new StandardMaterial(`bot${id}_aid_deco_mat`, scene);
+  glow.diffuseColor = Color3.FromHexString('#ffd23f');
+  glow.emissiveColor = Color3.FromHexString('#ffb000');
+  glow.specularColor = Color3.Black();
+  /** Flat arrow pointing +z (chassis forward): a shaft + a triangular head, centred on `at`. */
+  const arrow = (name: string, at: Vector3, len: number, w: number, head: number, thick: number) => {
+    const shaft = MeshBuilder.CreateBox(`${name}_s`, { width: w, height: thick, depth: len - head * 0.75 }, scene);
+    shaft.position.set(0, 0, -head * 0.375);
+    const tip = MeshBuilder.CreateCylinder(`${name}_h`, { diameter: head * 2, height: thick, tessellation: 3 }, scene);
+    tip.rotation.y = -Math.PI / 2;                      // one corner of the triangle points forward
+    tip.position.set(0, 0, len / 2 - head);
+    const m = Mesh.MergeMeshes([shaft, tip], true)!;
+    m.name = name; m.parent = root; m.position.copyFrom(at); m.material = glow; m.isPickable = false;
+    return m;
+  };
+  const top = FBS.shell.y + FBS.shell.h / 2;
+  if (SHELL_AIDS.cap) {
+    const cap = MeshBuilder.CreateCylinder(`bot${id}_cap${DECO}`, { diameter: 0.5, height: 0.05, tessellation: 24 }, scene);
+    cap.parent = root; cap.position.set(0, top + 0.06, 0); cap.isPickable = false;
+    const capMat = new StandardMaterial(`bot${id}_capmat${DECO}`, scene);
+    capMat.diffuseColor = Color3.FromHexString('#1a1d21'); capMat.specularColor = new Color3(0.2, 0.2, 0.2);
+    cap.material = capMat;
+    const post = MeshBuilder.CreateCylinder(`bot${id}_post${DECO}`, { diameter: 0.12, height: 0.08 }, scene);
+    post.parent = root; post.position.set(0, top + 0.01, 0); post.material = capMat; post.isPickable = false;
+    arrow(`bot${id}_caparrow${DECO}`, new Vector3(0, top + 0.095, 0), 0.42, 0.1, 0.13, 0.02);
+  }
+  if (SHELL_AIDS.arrow) {
+    const len = 0.9;
+    arrow(`bot${id}_floorarrow${DECO}`, new Vector3(0, -REST_Y + 0.035, FBS.shell.r + 0.1 + len / 2), len, 0.26, 0.34, 0.005);
+  }
 }
 
 export function buildBot(id: 'A' | 'B', build: BotBuild, catalog: Catalog, scene: Scene, pos: Vector3, facing: number, opts: StateOptions = {}): Bot {
@@ -647,6 +700,20 @@ function buildWheels(scene: Scene, root: Mesh, chassis: PhysicsBody, tyres: Mesh
  *  `on` false = neutral (the controllers brake). Drive dead (motor / wheels destroyed) = only gearbox drag. */
 export function driveWheels(bot: Bot, throttle: number, turn: number, on: boolean) {
   const vTop = currentSpeed(bot.state) * DRIVE.speedScale;
+  // v0.25 heading hold: not steering -> the gyro steers against yaw, updated every physics sub-step (wheelsBefore)
+  const holding = on && vTop > 0 && Math.abs(turn) < 0.05 && DRIVE.gyroBodies.includes(bot.build.bodyId);
+  // heading lock: remember the heading when the stick is let go, then hold it
+  const was = gyroHold.get(bot);
+  gyroHold.set(bot, holding ? { throttle, heading: was?.heading ?? headingOf(bot), age: was?.age ?? 0 } : null);
+  mixWheels(bot, throttle, turn, on, vTop);
+}
+/** v0.25: throttle held while the heading-hold gyro is steering (null = gyro off this frame). */
+const gyroHold = new WeakMap<Bot, { throttle: number; heading: number; age: number } | null>();
+function headingOf(bot: Bot): number {
+  const f = Vector3.Forward().applyRotationQuaternion(bot.root.rotationQuaternion ?? Quaternion.Identity());
+  return Math.atan2(f.x, f.z);                          // + = turned clockwise from above (right)
+}
+function mixWheels(bot: Bot, throttle: number, turn: number, on: boolean, vTop: number) {
   // v0.22 arcade mix: the turn shrinks toward DRIVE.arc as throttle rises (full turn when standing still)
   const a = Math.min(1, Math.abs(throttle));
   const tm = turn * (1 - a + a * DRIVE.arc);
@@ -669,6 +736,18 @@ export function wheelsBefore(bot: Bot, dt: number) {
   const X = new Vector3(1, 0, 0);
   const axis = X.applyRotationQuaternion(bot.root.rotationQuaternion ?? Quaternion.Identity());
   const wc = Vector3.Dot(bot.body.getAngularVelocity(), axis);
+  const hold = gyroHold.get(bot);
+  if (hold != null) {                                   // v0.25 heading hold: yaw rate about the bot's own up axis
+    const up = new Vector3(0, 1, 0).applyRotationQuaternion(bot.root.rotationQuaternion ?? Quaternion.Identity());
+    // + yaw = clockwise from above = a right turn, so steer the other way
+    // first moments after the stick centres: rate damping only (stops the turn where it is), then lock that heading
+    hold.age += dt;
+    if (hold.age < DRIVE.gyroSettleS) hold.heading = headingOf(bot);
+    let err = headingOf(bot) - hold.heading;
+    err = Math.atan2(Math.sin(err), Math.cos(err));
+    const steer = -(Vector3.Dot(bot.body.getAngularVelocity(), up) * DRIVE.gyroGain + err * DRIVE.gyroHeading);
+    if (up.y > 0.5) mixWheels(bot, hold.throttle, Math.max(-1, Math.min(1, steer)), true, bot.wheels[0].omegaMax * WHEEL.r);
+  }
   for (const w of bot.wheels) {
     const tipped = Math.abs(X.applyRotationQuaternion(w.hub.rotationQuaternion ?? Quaternion.Identity()).y) > TREAD_TILT;
     if (tipped === w.onTread) setTread(w, !tipped);

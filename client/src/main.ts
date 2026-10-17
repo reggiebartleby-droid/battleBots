@@ -13,7 +13,9 @@ import { Combat } from './combat.js';
 import { Hud } from './hud.js';
 import { Fx } from './fx.js';
 import { Lab } from './lab.js';
-import { Builder } from './builder.js';
+import { CamControl } from './cam.js';
+import { Builder, PRESETS } from './builder.js';
+import { Course, STATIONS, COURSE_ORIGIN, type StationId, type RunResult } from './course.js';
 import { aiDrive, type Difficulty } from './ai.js';
 
 const MATCH_SECONDS = 180;
@@ -77,11 +79,19 @@ async function main() {
   havokPlugin.setVelocityLimits(200, 400);
   scene.getPhysicsEngine()!.setSubTimeStep(SUB_STEP_MS);
   const hud = new Hud();
+  const course = new Course(scene);                  // v0.23 test course (own floor, far from the arena)
+  const SUN_OFFSET = sun.position.clone();
   const fx = new Fx(scene, document.getElementById('fxlayer')!);
 
   // ---- Lab scene (builder preview, no physics) ----
   const lab = new Lab(engine, catalog);
   const builder = new Builder(catalog);
+  // v0.24 camera views: Q cycles, remembered in this browser (all modes)
+  const camCtl = new CamControl(cam, lab.camera, canvas, () => builder.visible || bots.length === 0);
+  // v0.24 lab weapon test button (SPACE works too)
+  const wtBtn = document.getElementById('bb-wtest') as HTMLButtonElement;
+  wtBtn.addEventListener('pointerdown', () => { lab.buttonHeld = true; });
+  for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) wtBtn.addEventListener(ev, () => { lab.buttonHeld = false; });
 
   let bots: Bot[] = [];
   let combat: Combat;
@@ -93,18 +103,25 @@ async function main() {
   let difficulty: Difficulty = 'normal';
   let breakableWeapons = false;      // v0.17 deploy-bar setting (applies to both bots)
   let camFocus: { pos: Vector3; until: number } | null = null;   // bot flying over the cage / exploding
+  // v0.23 test course
+  let mode: 'match' | 'course' = 'match';
+  let courseBuild: BotBuild | null = null;          // the lab build that opened the course
+  let courseStation: StationId | null = null;
+  let courseReported = false;
+  let courseCombat: Combat | undefined;
   const helpEl = document.getElementById('help')!;
 
   const controlLines = () => {
     const lines = [`<b>P1</b> ${KEYS.A.label} — ${bots[0].weapon.hint('SPACE')}`];
     if (p2Human) lines.push(`<b>P2</b> ${KEYS.B.label} — ${bots[1].weapon.hint('Right SHIFT')}`);
     lines.push(`Damage = real energy: spinners dump stored spin · hammers the swing · flippers / lifters what they throw or lift (plus the landing) · crushers pierce while pressing. Anything else is a <i>bump</i>.`);
-    lines.push(`R restart · B lab · T toggle P2 human/AI · V HUD view · H details`);
+    lines.push(`R restart · B lab · T toggle P2 human/AI · V HUD view · H details · Q camera view`);
     return lines;
   };
 
   const start = () => {
     if (!buildA || !buildB) return;
+    leaveCourse();
     for (const b of bots) disposeBot(b);
     fx.clear();
     bots = [
@@ -123,20 +140,144 @@ async function main() {
     builder.show(
       b => lab.setBuild(b),
       ({ player, opponent, difficulty: d, breakableWeapons: bw, driveBoost }) => { buildA = player; buildB = opponent; difficulty = d; breakableWeapons = bw; DRIVE.boost = driveBoost; start(); },   // v0.22 test boost (both bots)
+      ({ player, driveBoost }) => { courseBuild = player; DRIVE.boost = driveBoost; showCourseMenu(); },   // v0.23 test course
     );
   };
+
+  // ---------------- v0.23 TEST COURSE ----------------
+  const cm = {
+    menu: document.getElementById('cmenu')!, bot: document.getElementById('cm-bot') as HTMLSelectElement,
+    stations: document.getElementById('cm-stations')!, rec: document.getElementById('cm-rec') as HTMLInputElement,
+    lab: document.getElementById('cm-lab') as HTMLButtonElement, hud: document.getElementById('chud')!,
+    results: document.getElementById('cresults')!, rTitle: document.getElementById('cr-title')!,
+    rTable: document.getElementById('cr-table')!, rSaved: document.getElementById('cr-saved')!,
+  };
+  for (const st of STATIONS) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.innerHTML = `<b>${st.name}</b><span>${st.blurb}</span>`;
+    b.onclick = () => startStation(st.id);
+    cm.stations.appendChild(b);
+  }
+  cm.lab.onclick = () => { leaveCourse(); openLab(); };
+
+  const isArenaMesh = (name: string) => name === 'floor' || name.startsWith('wall') || name.startsWith('arena');
+  const setArenaVisible = (on: boolean) => { for (const m of scene.meshes) if (isArenaMesh(m.name)) m.setEnabled(on); };
+  const clearBots = () => { for (const b of bots) disposeBot(b); bots = []; fx.clear(); courseCombat = undefined; };
+
+  /** Course menu: pick the bot + station. */
+  function showCourseMenu() {
+    clearBots();
+    mode = 'course';
+    document.body.classList.add('incourse', 'inmenu');
+    cm.results.classList.remove('on');
+    cm.bot.innerHTML = '';
+    cm.bot.add(new Option(`Lab build — ${courseBuild?.cosmetics.name ?? '?'}`, ''));
+    for (const name of Object.keys(PRESETS)) cm.bot.add(new Option(name, name));
+    cm.bot.value = '';
+    cm.menu.classList.add('on');
+  }
+  let courseBotChoice = '';
+  function startStation(id: StationId) {
+    courseBotChoice = cm.bot.value;
+    const build = courseBotChoice ? JSON.parse(JSON.stringify(PRESETS[courseBotChoice])) as BotBuild : courseBuild;
+    if (!build) return;
+    clearBots();
+    mode = 'course';
+    courseStation = id; courseReported = false;
+    cm.menu.classList.remove('on'); cm.results.classList.remove('on');
+    document.body.classList.add('incourse'); document.body.classList.remove('inmenu');
+    setArenaVisible(false); course.setVisible(true);
+    sun.position = COURSE_ORIGIN.add(SUN_OFFSET);
+    const at = course.build(id);
+    const player = buildBot('A', build, catalog, scene, at.spawn, at.facing, { breakableWeapons: false });
+    bots = [player];
+    if (at.dummy) {
+      const dummy = buildBot('B', JSON.parse(JSON.stringify(PRESETS['Blue Lift'])), catalog, scene, at.dummy.pos, at.dummy.facing, { breakableWeapons: false });
+      bots.push(dummy);
+      courseCombat = new Combat(bots, fx);
+    }
+    for (const b of bots) castShadows(shadows, botMeshes(b));
+    course.begin(player, bots[1], courseCombat);
+    cam.target = player.root.position.clone(); cam.radius = camCtl.radius(11);   // v0.24: angle is the player's (Q / drag)
+    hud.showControls([`<b>${STATIONS.find(s => s.id === id)!.name}</b> — ${KEYS.A.label} — ${player.weapon.hint('SPACE')}`, `R restart · C stations · B lab · Q camera view`], 4000);
+    canvas.focus();
+  }
+  function leaveCourse() {
+    if (mode !== 'course') return;
+    clearBots();
+    mode = 'match';
+    document.body.classList.remove('incourse', 'inmenu');
+    cm.menu.classList.remove('on'); cm.results.classList.remove('on');
+    course.setVisible(false); setArenaVisible(true);
+    sun.position = SUN_OFFSET.clone();
+    cam.target = new Vector3(0, 0.5, 0); cam.radius = camCtl.radius(16);   // back to the arena (v0.24: angle kept)
+  }
+
+  const RUN_HEADER = ['date', 'station', 'bot', 'chassis', 'build', 'drive_boost', 'time_s', 'penalty_s', 'final_s', 'splits',
+    'top_speed_mps', 'max_tilt_deg', 'flipped', 'cones_hit', 'wrong_side', 'crate_kg', 'push_dist_m', 'block_dmg', 'dummy_dmg', 'total_dmg', 'hits', 'biggest_hit'];
+  function runRow(r: RunResult, b: Bot): (string | number)[] {
+    const d = new Date(), z = (n: number) => String(n).padStart(2, '0');
+    const date = `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())} ${z(d.getHours())}:${z(d.getMinutes())}:${z(d.getSeconds())}`;
+    const build = Object.entries(b.build.sockets).filter(([, v]) => v).map(([k, v]) => `${k}=${catalog.parts[v!]?.name ?? v}`).join('; ');
+    const f = (n: number, k = 2) => Number(n.toFixed(k));
+    const weapon = r.station === 'weapon';
+    return [date, STATIONS.find(s => s.id === r.station)!.name, b.build.cosmetics.name, catalog.bodies[b.build.bodyId]?.name ?? b.build.bodyId, build, DRIVE.boost,
+      f(r.time), r.penalty, f(r.final), r.splits.map(s => `${s.label} ${s.t.toFixed(2)}`).join(' | '),
+      f(r.topSpeed), Math.round(r.maxTilt), r.flipped ? 'yes' : 'no',
+      r.station === 'slalom' ? r.coneHits : '', r.station === 'slalom' ? r.wrongSide : '',
+      r.station === 'push' ? r.crateKg : '', r.station === 'push' ? f(r.pushDist) : '',
+      weapon ? (r.blockDmg ?? 'n/a') : '', weapon ? r.dummyDmg : '', weapon ? (r.blockDmg ?? 0) + r.dummyDmg : '', weapon ? r.hits : '', weapon ? r.biggest : ''];
+  }
+  /** Recorded run finished: results screen + append to runs\runs.csv through the dev server. */
+  function reportRun(r: RunResult, b: Bot) {
+    const row = runRow(r, b);
+    cm.rTitle.textContent = `RESULTS — ${STATIONS.find(s => s.id === r.station)!.name} — ${b.build.cosmetics.name}`;
+    cm.rTable.innerHTML = RUN_HEADER.map((h, i) => [h, row[i]] as const).filter(([h, v]) => v !== '' && h !== 'date' && h !== 'build')
+      .map(([h, v]) => `<tr><td>${h.replace(/_/g, ' ')}</td><td>${v}</td></tr>`).join('');
+    cm.rSaved.className = 'saved'; cm.rSaved.textContent = 'Saving…';
+    cm.results.classList.add('on');
+    fetch('/__runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ header: RUN_HEADER, row }) })
+      .then(res => res.json())
+      .then(j => { if (j.ok) cm.rSaved.textContent = `✓ Saved to ${j.file} (run #${j.row})`; else throw new Error(j.error); })
+      .catch(e => { cm.rSaved.className = 'saved bad'; cm.rSaved.textContent = `✗ Not saved: ${e?.message ?? e}`; });
+  }
+
+  /** One frame of the test course. */
+  function courseFrame(dt: number, now: number) {
+    const p = bots[0];
+    const stopped = course.done;
+    for (const b of bots) {
+      if (b === p) runBot(b, stopped ? { throttle: 0, turn: 0, fire: false } : readDrive('A'), dt, now, stopped, false);
+      else runBot(b, { throttle: 0, turn: 0, fire: false }, dt, now, true, true);    // the dummy: switched off, brakes on
+    }
+    if (course.done && !courseReported) {
+      courseReported = true;
+      if (cm.rec.checked) reportRun(course.result(), p);
+      else hud.sign('FINISH', 900, '#39ff14');
+    }
+    const rec = cm.rec.checked;
+    cm.hud.innerHTML = `<h4>${STATIONS.find(s => s.id === courseStation)!.name}<span class="tag ${rec ? 'rec' : 'prac'}">${rec ? 'RECORDED' : 'PRACTICE'}</span></h4>`
+      + course.hudLines().map(l => `<div>${l}</div>`).join('') + (course.done ? `<div><b style="color:#39ff14">FINISHED</b></div>` : '');
+    helpEl.innerHTML = `${p.build.cosmetics.name} &nbsp;|&nbsp; ${KEYS.A.label} &nbsp;|&nbsp; R: restart &nbsp;|&nbsp; C: stations &nbsp;|&nbsp; B: lab &nbsp;|&nbsp; ${camCtl.label()}`;
+    cam.target = Vector3.Lerp(cam.target, p.root.position, 0.1).add(fx.shakeOffset());
+    cam.radius += (camCtl.radius(11) - cam.radius) * 0.05;
+    camCtl.chase(p.root.rotationQuaternion, dt);
+    fx.update(dt, cam);
+  }
   openLab();
 
   // v0.8 real spinner damage: weapon energy measured around every physics step
   scene.onBeforePhysicsObservable.add(() => {
-    combat?.beforePhysics();
+    if (mode === 'course') { courseCombat?.beforePhysics(); course.beforePhysics(); } else combat?.beforePhysics();
     const stepDt = SUB_STEP_MS / 1000;   // v0.21: observers run once per physics sub-step
     for (const b of bots) if (!b.eliminated) { applyGyro(b, stepDt); armBefore(b); applyMagnets(b, stepDt); hingesBefore(b); wheelsBefore(b, stepDt); }   // v0.8 gyro; v0.11 arm + magnets; v0.12 hinges; v0.21 drive motors
   });
   scene.onAfterPhysicsObservable.add(() => {
     const stepDt = SUB_STEP_MS / 1000;
-    combat?.afterPhysics(stepDt);
+    if (mode === 'course') courseCombat?.afterPhysics(stepDt); else combat?.afterPhysics(stepDt);
     for (const b of bots) if (!b.eliminated) armAfter(b, stepDt);   // v0.11 reactionless hammer
+    if (mode === 'course' && bots.length) course.afterPhysics();     // v0.23: timing lines + readouts, every sub-step
   });
 
   let lastToggle = 0;
@@ -145,15 +286,26 @@ async function main() {
   window.addEventListener('keydown', e => {
     if (e.repeat || builder.visible) return;
     if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
+    if (mode === 'course') {                       // v0.23: C = back to the station picker
+      if (e.code === 'KeyC' && !cm.menu.classList.contains('on')) showCourseMenu();
+      return;
+    }
     if (e.code === 'KeyV') hud.cycleView();
     else if (e.code === 'KeyH') hud.toggleDetails();
   });
   scene.onBeforeRenderObservable.add(() => {
     const dt = engine.getDeltaTime() / 1000;
+    if (mode === 'course') {
+      if (!bots.length) return;
+      if (isDown('KeyR') && courseStation) { startStation(courseStation); return; }
+      if (isDown('KeyB')) { leaveCourse(); openLab(); return; }
+      courseFrame(dt, performance.now());
+      return;
+    }
     if (isDown('KeyR')) { start(); return; }
     if (isDown('KeyB')) { openLab(); return; }
     if (isDown('KeyT') && performance.now() - lastToggle > 400) { p2Human = !p2Human; lastToggle = performance.now(); hud.showControls(controlLines(), 4000); }
-    helpEl.innerHTML = `P1: ${KEYS.A.label} &nbsp;|&nbsp; P2: ${p2Human ? KEYS.B.label + ' (human)' : 'AI ' + difficulty.toUpperCase()} (T toggles) &nbsp;|&nbsp; R: restart &nbsp;|&nbsp; B: lab &nbsp;|&nbsp; V: view &nbsp;|&nbsp; H: details`;
+    helpEl.innerHTML = `P1: ${KEYS.A.label} &nbsp;|&nbsp; P2: ${p2Human ? KEYS.B.label + ' (human)' : 'AI ' + difficulty.toUpperCase()} (T toggles) &nbsp;|&nbsp; R: restart &nbsp;|&nbsp; B: lab &nbsp;|&nbsp; V: view &nbsp;|&nbsp; H: details &nbsp;|&nbsp; ${camCtl.label()}`;
 
     const now = performance.now();
     scene.getPhysicsEngine()?.setTimeStep(PHYS_STEP);
@@ -164,56 +316,7 @@ async function main() {
       const d: Drive = b.id === 'A' || p2Human
         ? readDrive(b.id)
         : (over ? { throttle: 0, turn: 0, fire: false } : aiDrive(b, bots[0], arena.half, dt, difficulty));
-
-      // Upside down? -- helpless until the self-right fires
-      updateInverted(b, now);
-      // v0.12: a flipper can still fire upside down -- that's how it self-rights
-      const flipper = b.hinges?.some(h => h.role === 'flipper') ?? false;
-      b.weapon.suppressed = (!!b.inverted && !flipper) || !!b.rightingUntil;
-      b.weapon.update(dt, d.fire && !over, canAttack(b.state));
-      const helpless = !!b.inverted || !!b.rightingUntil;
-
-      // v0.8 real spinner: the weapon motor drives a real body; spin level is measured, not timed
-      if (b.spinner) {
-        const motorAlive = (b.state.parts['weapon_motor']?.hp ?? 0) > 0;
-        b.weapon.motorDead = !motorAlive;
-        driveSpinner(b, b.weapon.spinning && !b.weapon.suppressed && canAttack(b.state), motorAlive);
-        b.weapon.spinLevel = Math.min(1, Math.max(0, spinOmega(b) / b.spinner.omegaMax));
-      }
-      // v0.10 real overhead arm: tap = swing, hold = pin; the saw on the arm spins whenever it can
-      if (b.arm) {
-        const motorAlive = (b.state.parts['weapon_motor']?.hp ?? 0) > 0;
-        const usable = !b.weapon.suppressed && canAttack(b.state);
-        b.weapon.motorDead = !motorAlive;
-        driveArm(b, b.weapon.fireHeld, b.weapon.pressed, usable, motorAlive, dt);
-        b.weapon.armState = b.arm.state;
-        if (b.saw) driveSpinner(b, usable && !over, motorAlive, b.saw);
-      }
-
-      // v0.12 real flipper: tap = fire (upside down = self-right shot into the floor)
-      if (flipper) {
-        const motorAlive = (b.state.parts['weapon_motor']?.hp ?? 0) > 0;
-        b.weapon.motorDead = !motorAlive;
-        const press = b.weapon.pressed || (!!b.inverted && b.id !== 'A' && !p2Human);   // the AI self-rights at once
-        driveFlipper(b, press, !b.rightingUntil && canAttack(b.state) && !over, motorAlive, !!b.inverted, dt);
-      } else if (b.hinges) {
-        // v0.12 real control weapon: hold = lift / clamp / crush
-        const motorAlive = (b.state.parts['weapon_motor']?.hp ?? 0) > 0;
-        b.weapon.motorDead = !motorAlive;
-        driveControl(b, b.weapon.held, !b.weapon.suppressed && canAttack(b.state) && !over, motorAlive, dt);
-      }
-
-      // v0.21 real wheels: tank-mixed stick into each wheel's drive motor (wheelsBefore); tyre friction does the rest
-      driveWheels(b, d.throttle, d.turn, !over && !helpless);
-
-      // Grey out dead parts
-      for (const [sid, m] of Object.entries(b.partMeshes)) {
-        const ps = b.state.parts[sid];
-        if (ps && ps.hp <= 0) {
-          m.visibility = 0.25; for (const c of m.getChildMeshes()) c.visibility = 0.25;
-          if (sid === 'wheels') for (const w of b.wheels ?? []) for (const c of [w.tyre, ...w.tyre.getChildMeshes()]) c.visibility = 0.25;   // v0.21 tyres live on their own bodies
-        }
-      }
+      runBot(b, d, dt, now, over, false);
     }
 
     // Camera follows the midpoint of the bots still in play (+ hit shake) — unless a bot has gone
@@ -224,9 +327,11 @@ async function main() {
     const flyer = live.find(b => b.root.position.y > WALL_H && (Math.abs(b.root.position.x) > arena.half || Math.abs(b.root.position.z) > arena.half));
     if (flyer) camFocus = { pos: flyer.root.position.clone(), until: now + OUT.camHoldMs };
     const focusing = camFocus && now < camFocus.until;
-    cam.target = Vector3.Lerp(cam.target, focusing ? camFocus!.pos : mid, focusing ? OUT.camLerp : 0.08).add(fx.shakeOffset());
+    const chaseBot = camCtl.view === 'chase' && !bots[0].eliminated ? bots[0] : null;   // v0.24 CHASE: behind P1
+    cam.target = Vector3.Lerp(cam.target, focusing ? camFocus!.pos : chaseBot ? chaseBot.root.position : mid, focusing ? OUT.camLerp : chaseBot ? 0.1 : 0.08).add(fx.shakeOffset());
     const dist = live.length === 2 ? Vector3.Distance(live[0].root.position, live[1].root.position) : 0;
-    cam.radius += ((10 + dist * 0.9) - cam.radius) * 0.05;
+    cam.radius += (camCtl.radius(chaseBot ? 11 : 10 + dist * 0.9) - cam.radius) * 0.05;
+    if (!focusing) camCtl.chase(chaseBot?.root.rotationQuaternion, dt);
 
     // OUT of the arena: past a wall plane and under the floor -> eliminated (explodes).
     const justOut = bots.filter(b => !b.eliminated && isOut(b));
@@ -254,6 +359,62 @@ async function main() {
     }
     hud.update(bots, timeLeft, combat.stats, combat);
   });
+
+  /** Drive + weapons for one bot this frame (match and test course). stopped = match over / run finished;
+   *  inert = the course dummy (no self-right). */
+  function runBot(b: Bot, d: Drive, dt: number, now: number, stopped: boolean, inert: boolean) {
+    const over = stopped;
+
+    // Upside down? -- helpless until the self-right fires (the course dummy just lies there)
+    if (!inert) updateInverted(b, now);
+    // v0.12: a flipper can still fire upside down -- that's how it self-rights
+    const flipper = b.hinges?.some(h => h.role === 'flipper') ?? false;
+    b.weapon.suppressed = (!!b.inverted && !flipper) || !!b.rightingUntil;
+    b.weapon.update(dt, d.fire && !over, canAttack(b.state));
+    const helpless = !!b.inverted || !!b.rightingUntil;
+
+    // v0.8 real spinner: the weapon motor drives a real body; spin level is measured, not timed
+    if (b.spinner) {
+      const motorAlive = (b.state.parts['weapon_motor']?.hp ?? 0) > 0;
+      b.weapon.motorDead = !motorAlive;
+      driveSpinner(b, b.weapon.spinning && !b.weapon.suppressed && canAttack(b.state), motorAlive);
+      b.weapon.spinLevel = Math.min(1, Math.max(0, spinOmega(b) / b.spinner.omegaMax));
+    }
+    // v0.10 real overhead arm: tap = swing, hold = pin; the saw on the arm spins whenever it can
+    if (b.arm) {
+      const motorAlive = (b.state.parts['weapon_motor']?.hp ?? 0) > 0;
+      const usable = !b.weapon.suppressed && canAttack(b.state);
+      b.weapon.motorDead = !motorAlive;
+      driveArm(b, b.weapon.fireHeld, b.weapon.pressed, usable, motorAlive, dt);
+      b.weapon.armState = b.arm.state;
+      if (b.saw) driveSpinner(b, usable && !over, motorAlive, b.saw);
+    }
+
+    // v0.12 real flipper: tap = fire (upside down = self-right shot into the floor)
+    if (flipper) {
+      const motorAlive = (b.state.parts['weapon_motor']?.hp ?? 0) > 0;
+      b.weapon.motorDead = !motorAlive;
+      const press = b.weapon.pressed || (!!b.inverted && b.id !== 'A' && !p2Human && mode === 'match');   // the AI self-rights at once
+      driveFlipper(b, press, !b.rightingUntil && canAttack(b.state) && !over, motorAlive, !!b.inverted, dt);
+    } else if (b.hinges) {
+      // v0.12 real control weapon: hold = lift / clamp / crush
+      const motorAlive = (b.state.parts['weapon_motor']?.hp ?? 0) > 0;
+      b.weapon.motorDead = !motorAlive;
+      driveControl(b, b.weapon.held, !b.weapon.suppressed && canAttack(b.state) && !over, motorAlive, dt);
+    }
+
+    // v0.21 real wheels: tank-mixed stick into each wheel's drive motor (wheelsBefore); tyre friction does the rest
+    driveWheels(b, d.throttle, d.turn, !over && !helpless);
+
+    // Grey out dead parts
+    for (const [sid, m] of Object.entries(b.partMeshes)) {
+      const ps = b.state.parts[sid];
+      if (ps && ps.hp <= 0) {
+        m.visibility = 0.25; for (const c of m.getChildMeshes()) c.visibility = 0.25;
+        if (sid === 'wheels') for (const w of b.wheels ?? []) for (const c of [w.tyre, ...w.tyre.getChildMeshes()]) c.visibility = 0.25;   // v0.21 tyres live on their own bodies
+      }
+    }
+  }
 
   function end(text: string, color: string) { over = true; hud.showWinner(text + '  (R restart · B lab)', color); }
 
@@ -285,7 +446,8 @@ async function main() {
     if (!b.inverted) {
       if (upsideDown) {
         b.inverted = { since: now };
-        if (!over) combat.onFlipped(b);                // v0.19 arcade score: FLIP bonus to whoever put it there
+        if (mode === 'course') courseCombat?.onFlipped(b);
+        else if (!over) combat.onFlipped(b);           // v0.19 arcade score: FLIP bonus to whoever put it there
         const flip = b.hinges?.some(h => h.role === 'flipper');
         hud.sign(flip ? 'UPSIDE DOWN — FIRE THE FLIPPER!' : 'UPSIDE DOWN', flip ? 1200 : 700, '#ff9f43');
       }

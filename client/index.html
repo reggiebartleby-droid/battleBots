@@ -106,6 +106,37 @@
     #bb-errors { margin: 0; padding-left: 16px; font-size: 11px; color: #ff8a8a; }
     #bb-deploy { font: 700 18px/1 system-ui, sans-serif; letter-spacing: .14em; background: #f2b134; color: #141b20; border: 0; border-radius: 4px; padding: 14px 28px; cursor: pointer; margin-left: auto; }
     #bb-deploy:disabled { background: #333; color: #777; cursor: not-allowed; }
+
+    /* ---- v0.23 test course ---- */
+    #bb-course { font: 700 14px/1 system-ui, sans-serif; letter-spacing: .12em; background: #0b1013; color: #3ee6c4; border: 2px solid #3ee6c4; border-radius: 4px; padding: 12px 18px; cursor: pointer; }
+    #bb-course:disabled { color: #555; border-color: #333; cursor: not-allowed; }
+    #bb-deploy { margin-left: 0; }
+    #cmenu, #cresults { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); background: #141b20; border: 2px solid #2a363f; border-radius: 6px; box-shadow: 0 0 0 1px #0a0e11, 0 20px 50px rgba(0,0,0,.6); font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; color: #d7e3e6; display: none; width: min(620px, calc(100% - 32px)); }
+    #cmenu.on, #cresults.on { display: block; }
+    #cmenu h3, #cresults h3 { margin: 0; padding: 10px 14px; border-bottom: 2px solid #2a363f; background: #1a2228; font: 700 13px/1 system-ui, sans-serif; letter-spacing: .14em; color: #8fa3ad; }
+    #cmenu .pad, #cresults .pad { padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+    #cmenu .fld { display: flex; flex-direction: column; gap: 4px; font-size: 11px; letter-spacing: .1em; color: #8fa3ad; }
+    #cmenu select { font: inherit; font-size: 13px; background: #0b1013; color: #d7e3e6; border: 1px solid #33424c; border-radius: 3px; padding: 8px 10px; }
+    #cm-stations { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    #cm-stations button { font: inherit; text-align: left; cursor: pointer; background: #0b1013; color: #d7e3e6; border: 1px solid #33424c; border-radius: 3px; padding: 10px; display: flex; flex-direction: column; gap: 4px; }
+    #cm-stations button:hover { border-color: #f2b134; }
+    #cm-stations b { font-size: 13px; color: #f2b134; letter-spacing: .08em; }
+    #cm-stations span { font-size: 11px; color: #8fa3ad; }
+    #cmenu .rec { display: flex; align-items: center; gap: 8px; font-size: 13px; letter-spacing: .08em; color: #ff6b6b; }
+    #cmenu .row { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+    #cmenu .back, #cresults button { font: inherit; font-size: 12px; background: #0b1013; color: #8fa3ad; border: 1px solid #33424c; border-radius: 3px; padding: 8px 12px; cursor: pointer; }
+    #cresults table { border-collapse: collapse; font-size: 13px; width: 100%; }
+    #cresults td { padding: 4px 6px; border-bottom: 1px solid #222c33; }
+    #cresults td:last-child { text-align: right; color: #3ee6c4; font-variant-numeric: tabular-nums; }
+    #cresults .saved { font-size: 12px; color: #3ee6c4; } #cresults .saved.bad { color: #ff8a8a; }
+    #cresults .keys { font-size: 11px; color: #8fa3ad; }
+    #chud { position: absolute; top: 40px; left: 12px; background: rgba(14,16,20,.7); border: 1px solid rgba(120,130,145,.35); border-radius: 6px; padding: 8px 12px; font-size: 13px; line-height: 1.6; display: none; pointer-events: none; min-width: 240px; }
+    #chud h4 { margin: 0 0 2px; font-size: 12px; letter-spacing: .12em; color: #f2b134; }
+    #chud .tag { font-size: 10px; letter-spacing: .1em; padding: 1px 6px; border-radius: 3px; margin-left: 6px; }
+    #chud .tag.rec { background: #c0392b; color: #fff; } #chud .tag.prac { background: #33424c; color: #cfd8dc; }
+    body.incourse #chud { display: block; }
+    body.incourse #hud, body.incourse #arenaui, body.incourse #controls, body.incourse #finish, body.incourse #winner { display: none; }
+    body.incourse.inmenu #chud, body.incourse.inmenu #help { display: none; }
   </style>
 </head>
 <body>
@@ -156,8 +187,32 @@
       <label class="fld">OPPONENT (AI) <select id="bb-opponent"></select></label>
       <label class="fld">AI LEVEL <select id="bb-difficulty"><option value="easy">Easy</option><option value="normal" selected>Normal</option><option value="hard">Hard</option></select></label>
       <label class="fld" title="Off: weapon and weapon motor stop at 1 HP and keep working">BREAKABLE WEAPONS <input id="bb-breakable" type="checkbox"></label>
+      <span id="bb-shellaids" style="display:none;gap:12px"><label class="fld" title="Shell spinners: still cap on a post through the shell bearing, with an arrow pointing at the nose">NOSE CAP <input id="bb-cap" type="checkbox"></label>
+      <label class="fld" title="Shell spinners: glowing arrow on the floor ahead of the nose (game aid)">FLOOR ARROW <input id="bb-arrow" type="checkbox"></label></span>
       <label class="fld" title="TEMPORARY test: multiplies both bots' drive power (pushing force, acceleration, turning). x1 = normal.">DRIVE BOOST (TEST) <span><input id="bb-boost" type="range" min="1" max="3" step="0.25" value="1"> <b id="bb-boost-val">x1</b></span></label>
-      <button id="bb-deploy" type="button">DEPLOY ▶</button>
+      <span style="margin-left:auto;display:flex;gap:10px"><button id="bb-wtest" type="button" title="See the weapon move on the turntable. Spinners: press = ON/OFF. Hammer: tap = swing, hold = stay down. Flipper: press = fire. Lifter / grappler / crusher: hold.">TEST WEAPON (SPACE)</button>
+      <button id="bb-course" type="button" title="Test course: drive one station at a time, timed">TEST COURSE ▶</button>
+      <button id="bb-deploy" type="button">DEPLOY ▶</button></span>
+    </div>
+  </div>
+  <div id="chud"></div>
+  <div id="cmenu">
+    <h3>TEST COURSE</h3>
+    <div class="pad">
+      <label class="fld">BOT <select id="cm-bot"></select></label>
+      <div id="cm-stations"></div>
+      <div class="row">
+        <label class="rec"><input id="cm-rec" type="checkbox"> RECORDED RUN <span style="color:#8fa3ad;font-size:11px">(saved to runs\runs.csv + results screen)</span></label>
+        <button class="back" id="cm-lab" type="button">◀ LAB</button>
+      </div>
+    </div>
+  </div>
+  <div id="cresults">
+    <h3 id="cr-title">RESULTS</h3>
+    <div class="pad">
+      <table id="cr-table"></table>
+      <div class="saved" id="cr-saved"></div>
+      <div class="keys">R run again · C stations · B lab</div>
     </div>
   </div>
   <div id="finish">FINISH HIM!</div>

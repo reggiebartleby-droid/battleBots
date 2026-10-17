@@ -7,6 +7,7 @@ import type { BodyDef, BodyId, BotBuild, Catalog, PartDef, SocketDef, WeaponKind
 import { validateBuild } from '../../src/core/validate.js';
 import { partWeight } from '../../src/core/weight.js';
 import { DIFFICULTY, type Difficulty } from './ai.js';
+import { SHELL_AIDS, saveShellAids } from './bot.js';
 
 const STORAGE_KEY = 'battlebots.builder.v1';
 
@@ -110,9 +111,14 @@ export class Builder {
     boost: document.getElementById('bb-boost') as HTMLInputElement,          // v0.22 temporary test slider
     boostVal: document.getElementById('bb-boost-val')!,
     deploy: document.getElementById('bb-deploy') as HTMLButtonElement,
+    course: document.getElementById('bb-course') as HTMLButtonElement,   // v0.23 test course
+    shellAids: document.getElementById('bb-shellaids')!,                // v0.25 shell spinner nose aids
+    cap: document.getElementById('bb-cap') as HTMLInputElement,
+    arrow: document.getElementById('bb-arrow') as HTMLInputElement,
   };
   private onChange: (b: BotBuild) => void = () => {};
   private onDeploy: (a: DeployArgs) => void = () => {};
+  private onCourse: (a: { player: BotBuild; driveBoost: number }) => void = () => {};
 
   constructor(private catalog: Catalog) {
     const saved = this.load();
@@ -136,10 +142,16 @@ export class Builder {
     this.el.opponent.value = saved?.opponent && PRESETS[saved.opponent] ? saved.opponent : 'Blue Lift';
     this.el.difficulty.value = saved?.difficulty && DIFFICULTY[saved.difficulty] ? saved.difficulty : 'normal';
     this.el.breakable.checked = saved?.breakableWeapons ?? false;   // v0.17: off by default
-    this.el.boost.value = String(saved?.driveBoost ?? 1);
+    // v0.25 re-gear doubled the real drive power: a boost saved before it starts back at x1
+    this.el.boost.value = String(saved?.gear === 'v0.25' ? saved.driveBoost ?? 1 : 1);
     const showBoost = () => { this.el.boostVal.textContent = `x${Number(this.el.boost.value)}`; };
     showBoost();
     this.el.boost.oninput = () => { showBoost(); this.save(); };
+
+    // v0.25 shell spinner nose aids (remembered in this browser)
+    this.el.cap.checked = SHELL_AIDS.cap; this.el.arrow.checked = SHELL_AIDS.arrow;
+    this.el.cap.onchange = () => { SHELL_AIDS.cap = this.el.cap.checked; saveShellAids(); this.changed(); };
+    this.el.arrow.onchange = () => { SHELL_AIDS.arrow = this.el.arrow.checked; saveShellAids(); this.changed(); };
 
     this.el.name.oninput = () => { this.build.cosmetics.name = this.el.name.value.toUpperCase(); this.changed(); };
     this.el.paint.oninput = () => { this.build.cosmetics.paint = this.el.paint.value; this.changed(); };
@@ -151,14 +163,23 @@ export class Builder {
       this.onDeploy({ player: clone(this.build), opponent: clone(PRESETS[this.el.opponent.value]), opponentName: this.el.opponent.value, difficulty: this.el.difficulty.value as Difficulty, breakableWeapons: this.el.breakable.checked, driveBoost: Number(this.el.boost.value) });
     };
 
+    // v0.23 test course: same build + drive boost, no opponent
+    this.el.course.onclick = () => {
+      if (!this.validation.ok) return;
+      this.save();
+      this.hide();
+      this.onCourse({ player: clone(this.build), driveBoost: Number(this.el.boost.value) });
+    };
+
     this.render();
   }
 
   get validation() { return validateBuild(this.build, this.catalog); }
   get visible() { return this.el.overlay.classList.contains('on'); }
 
-  show(onChange: (b: BotBuild) => void, onDeploy: (a: DeployArgs) => void) {
+  show(onChange: (b: BotBuild) => void, onDeploy: (a: DeployArgs) => void, onCourse?: (a: { player: BotBuild; driveBoost: number }) => void) {
     this.onChange = onChange; this.onDeploy = onDeploy;
+    if (onCourse) this.onCourse = onCourse;
     this.el.overlay.classList.add('on');
     document.body.classList.add('inlab');
     this.changed();
@@ -171,6 +192,7 @@ export class Builder {
     const body = this.catalog.bodies[this.build.bodyId];
     this.el.body.value = this.build.bodyId;
     this.el.desc.textContent = body.description;
+    this.el.shellAids.style.display = this.build.bodyId === 'full_body_spinner' ? 'flex' : 'none';
     this.el.name.value = this.build.cosmetics.name;
     this.el.paint.value = this.build.cosmetics.paint ?? '#ffffff';
     this.renderRack();
@@ -232,12 +254,13 @@ export class Builder {
     this.el.status.className = v.ok ? 'ok' : 'bad';
     this.el.errors.innerHTML = v.errors.map(e => `<li>${e}</li>`).join('');
     this.el.deploy.disabled = !v.ok;
+    this.el.course.disabled = !v.ok;
   }
 
   private save() {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ build: this.build, opponent: this.el.opponent.value, difficulty: this.el.difficulty.value, breakableWeapons: this.el.breakable.checked, driveBoost: Number(this.el.boost.value) })); } catch { /* ignore */ }
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ build: this.build, opponent: this.el.opponent.value, difficulty: this.el.difficulty.value, breakableWeapons: this.el.breakable.checked, driveBoost: Number(this.el.boost.value), gear: 'v0.25' })); } catch { /* ignore */ }
   }
-  private load(): { build: BotBuild; opponent?: string; difficulty?: Difficulty; breakableWeapons?: boolean; driveBoost?: number } | null {
+  private load(): { build: BotBuild; opponent?: string; difficulty?: Difficulty; breakableWeapons?: boolean; driveBoost?: number; gear?: string } | null {
     try { const s = localStorage.getItem(STORAGE_KEY); return s ? JSON.parse(s) : null; } catch { return null; }
   }
 }
