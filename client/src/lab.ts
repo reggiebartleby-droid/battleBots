@@ -17,7 +17,7 @@ import { CUBES, skinPreview } from './cubes.js';
 
 /** Stand-in Meshy models shown instead of the primitive assembly for matching presets. */
 const PROTOTYPE_MODELS: Record<string, { url: string; scale: number }> = {
-  vertical_spinner: { url: '/models/red_disc.glb', scale: 1.6 },
+  vertical_spinner: { url: import.meta.env.BASE_URL + 'models/red_disc.glb', scale: 1.6 },
 };
 
 const TURNTABLE_RPM = 4;

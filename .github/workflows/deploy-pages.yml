@@ -1,0 +1,49 @@
+# Builds the browser game (client/) and publishes it to GitHub Pages on every push to master.
+# Testers play at https://<your-user>.github.io/<repo-name>/
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/configure-pages@v5
+      - name: Install
+        working-directory: client
+        run: npm ci
+      - name: Build
+        working-directory: client
+        env:
+          BASE_PATH: /${{ github.event.repository.name }}/
+        # vite build only (skips the tsc check, which trips on vite.config.ts Node types)
+        run: npx vite build
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: client/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

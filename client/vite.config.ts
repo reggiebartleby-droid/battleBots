@@ -43,6 +43,8 @@ function runsPlugin(): Plugin {
 }
 
 export default defineConfig({
+  // GitHub Pages serves the site at /<repo-name>/. The deploy workflow sets BASE_PATH; local dev stays at '/'.
+  base: process.env.BASE_PATH ?? '/',
   plugins: [runsPlugin()],
   server: {
     // allow importing ../src/core and ../data from the repo root
