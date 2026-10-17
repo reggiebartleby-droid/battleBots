@@ -143,8 +143,8 @@ export class Weapon {
   /** One-line control hint for the player. */
   hint(key: string): string {
     switch (this.mode) {
-      case 'spinner': return `${key}: spinner ON/OFF (≈ 3 s to top speed; damage = energy the weapon dumps into the hit)`;
-      case 'strike': return `${key}: tap = swing (returns on its own) · hold = pin them down · damage = energy the arm dumps into the hit${this.kind !== 'hammer' ? ' · saw spins on its own' : ''}`;
+      case 'spinner': return `${key}: spinner ON / OFF (about 3 s to full speed)`;
+      case 'strike': return `${key}: tap = swing · hold = pin them down${this.kind !== 'hammer' ? ' · the saw spins on its own' : ''}`;
       case 'flipper': return `${key}: fire the flipper when they're on it${Number.isFinite(this.gas) ? ` · ${this.gas} shots of gas` : ' · electric: unlimited, weaker'} · upside down: ${key} flips you back over`;
       case 'hold': return this.kind === 'crusher'
         ? `hold ${key}: beak crushes down (pierces armor while it presses) · drive them onto the lower jaw`

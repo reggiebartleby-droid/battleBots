@@ -11,6 +11,8 @@ import { SHELL_AIDS, saveShellAids } from './bot.js';
 import { CUBES, saveCubes, type CubeSize, type CubeStyle } from './cubes.js';
 
 const STORAGE_KEY = 'battlebots.builder.v1';
+/** v0.30 shared tester defaults (settings.ts): the lab starts with these when nothing is saved. */
+const DEFAULT = { preset: 'Noisy Cricket', opponent: 'Hammer Time', boost: 3 };
 
 export const PRESETS: Record<string, BotBuild> = {
   'Red Disc': {
@@ -127,7 +129,7 @@ export class Builder {
 
   constructor(private catalog: Catalog) {
     const saved = this.load();
-    this.build = refitToBody(catalog, saved?.build ?? clone(PRESETS['Red Disc']), (saved?.build ?? PRESETS['Red Disc']).bodyId);
+    this.build = refitToBody(catalog, saved?.build ?? clone(PRESETS[DEFAULT.preset]), (saved?.build ?? PRESETS[DEFAULT.preset]).bodyId);
     this.selectedSocket = 'weapon';
 
     for (const body of Object.values(catalog.bodies)) this.el.body.add(new Option(body.name, body.id));
@@ -144,11 +146,11 @@ export class Builder {
       if (p) { this.build = clone(p); this.selectedSocket = 'weapon'; this.render(); this.changed(); }
       this.el.presets.value = '';
     };
-    this.el.opponent.value = saved?.opponent && PRESETS[saved.opponent] ? saved.opponent : 'Blue Lift';
+    this.el.opponent.value = saved?.opponent && PRESETS[saved.opponent] ? saved.opponent : DEFAULT.opponent;
     this.el.difficulty.value = saved?.difficulty && DIFFICULTY[saved.difficulty] ? saved.difficulty : 'normal';
     this.el.breakable.checked = saved?.breakableWeapons ?? false;   // v0.17: off by default
-    // v0.25 re-gear doubled the real drive power: a boost saved before it starts back at x1
-    this.el.boost.value = String(saved?.gear === 'v0.25' ? saved.driveBoost ?? 1 : 1);
+    // v0.25 re-gear doubled the real drive power: a boost saved before it starts at the default; v0.30 default x3
+    this.el.boost.value = String(saved?.gear === 'v0.25' ? saved.driveBoost ?? DEFAULT.boost : DEFAULT.boost);
     const showBoost = () => { this.el.boostVal.textContent = `x${Number(this.el.boost.value)}`; };
     showBoost();
     this.el.boost.oninput = () => { showBoost(); this.save(); };

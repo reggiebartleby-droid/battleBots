@@ -41,7 +41,7 @@ import { partWeight } from '../../src/core/weight.js';
 // ---------------- settings (lab deploy bar, remembered in this browser) ----------------
 export type CubeStyle = 'glow' | 'block' | 'energy';
 export type CubeSize = 'big' | 'mid' | 'small';
-export const CUBES = { on: false, style: 'glow' as CubeStyle, size: 'mid' as CubeSize };
+export const CUBES = { on: true, style: 'glow' as CubeStyle, size: 'big' as CubeSize };   // v0.30 defaults: Cube Bots, Pixel Glow, 8-bit
 const SETTINGS_KEY = 'bb.cubes.v1';
 try { Object.assign(CUBES, JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? '{}')); } catch { /* defaults */ }
 export function saveCubes() { try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(CUBES)); } catch { /* no storage */ } }

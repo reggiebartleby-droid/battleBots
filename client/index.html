@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>BattleBots — prototype</title>
+  <title>Robot Revolution</title>
   <style>
     html, body { margin: 0; height: 100%; background: #0b0d10; overflow: hidden; font-family: system-ui, sans-serif; color: #eee; }
     #c { width: 100%; height: 100%; display: block; outline: none; }
@@ -62,11 +62,32 @@
     #controls { position: absolute; top: 64px; left: 50%; transform: translateX(-50%); background: rgba(20,22,26,.9); border: 2px solid #4a4f58; border-radius: 8px; padding: 10px 16px; font-size: 13px; line-height: 1.6; display: none; max-width: 720px; text-align: center; pointer-events: none; }
     #controls.on { display: block; }
     #controls b { color: #f2b134; }
-    body.inlab #hud, body.inlab #help, body.inlab #finish, body.inlab #winner, body.inlab #controls, body.inlab #fxlayer, body.inlab #arenaui { display: none; }
-    /* v0.18 in-match arena picker */
-    #arenaui { position: absolute; top: 10px; right: 12px; display: flex; gap: 10px; font-size: 11px; letter-spacing: .1em; color: #8fa3ad; }
-    #arenaui label { display: flex; flex-direction: column; gap: 3px; }
-    #arenaui select { font: inherit; font-size: 12px; letter-spacing: 0; background: rgba(11,16,19,.85); color: #d7e3e6; border: 1px solid #33424c; border-radius: 3px; padding: 4px 6px; }
+    body.inlab #hud, body.inlab #help, body.inlab #finish, body.inlab #winner, body.inlab #controls, body.inlab #fxlayer { display: none; }
+    /* v0.30 start screen (before every arena battle) */
+    #ready { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; pointer-events: none; }
+    #ready.on { display: flex; }
+    #ready .card { pointer-events: auto; background: rgba(20,22,26,.94); border: 2px solid #4a4f58; border-radius: 10px; padding: 18px 24px 20px; width: min(560px, calc(100% - 32px)); box-sizing: border-box; box-shadow: 0 20px 60px rgba(0,0,0,.6); }
+    #ready h2 { margin: 0 0 12px; font-size: 20px; letter-spacing: .08em; text-align: center; }
+    #ready h2 .vs { color: #8fa3ad; font-size: 14px; margin: 0 10px; }
+    #ready table { border-collapse: collapse; width: 100%; font-size: 14px; line-height: 1.45; }
+    #ready td { padding: 5px 6px; vertical-align: top; border-bottom: 1px solid #2a2f36; }
+    #ready td:first-child { color: #f2b134; font-weight: 700; white-space: nowrap; width: 1%; padding-right: 14px; }
+    #ready .go { display: block; margin: 16px auto 8px; font: 800 22px/1 system-ui, sans-serif; letter-spacing: .16em; background: #f2b134; color: #141b20; border: 0; border-radius: 6px; padding: 14px 40px; cursor: pointer; }
+    #ready .go:hover { background: #ffc451; }
+    #ready .small { text-align: center; font-size: 11px; color: #8fa3ad; letter-spacing: .04em; }
+    body.inlab #ready, body.incourse #ready { display: none; }
+    #countdown { position: absolute; top: 30%; left: 0; right: 0; text-align: center; font-size: 110px; font-weight: 900; color: #fff; text-shadow: 0 0 24px #000, 0 0 40px rgba(242,177,52,.6); display: none; pointer-events: none; }
+    #countdown.on { display: block; }
+    #countdown.fight { color: #ff3b3b; letter-spacing: .08em; }
+    body.inlab #countdown, body.incourse #countdown { display: none; }
+    /* v0.30 lab SETTINGS drawer (test knobs, set to the shared defaults) */
+    #bb-settings { position: relative; }
+    #bb-settings summary { list-style: none; cursor: pointer; font: 700 12px/1 system-ui, sans-serif; letter-spacing: .12em; color: #8fa3ad; background: #0b1013; border: 1px solid #33424c; border-radius: 4px; padding: 12px 14px; user-select: none; }
+    #bb-settings summary::-webkit-details-marker { display: none; }
+    #bb-settings[open] summary { color: #f2b134; border-color: #f2b134; }
+    #bb-settings .drawer { position: absolute; bottom: calc(100% + 8px); left: 0; width: 280px; background: #141b20; border: 2px solid #2a363f; border-radius: 6px; box-shadow: 0 20px 50px rgba(0,0,0,.6); padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; z-index: 5; }
+    #bb-settings .drawer .note { font-size: 10px; color: #6f8089; letter-spacing: .04em; }
+    #bb-settings .drawer select { width: 100%; }
 
     /* ---- Lab / bot builder (Option A: 3D lab scene + HTML instrument panels) ---- */
     #lab { position: absolute; inset: 0; display: none; pointer-events: none; font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; color: #d7e3e6; }
@@ -135,20 +156,23 @@
     #chud .tag { font-size: 10px; letter-spacing: .1em; padding: 1px 6px; border-radius: 3px; margin-left: 6px; }
     #chud .tag.rec { background: #c0392b; color: #fff; } #chud .tag.prac { background: #33424c; color: #cfd8dc; }
     body.incourse #chud { display: block; }
-    body.incourse #hud, body.incourse #arenaui, body.incourse #controls, body.incourse #finish, body.incourse #winner { display: none; }
+    body.incourse #hud, body.incourse #controls, body.incourse #finish, body.incourse #winner { display: none; }
     body.incourse.inmenu #chud, body.incourse.inmenu #help { display: none; }
   </style>
 </head>
 <body>
   <canvas id="c" tabindex="0"></canvas>
   <div id="fxlayer"></div>
-  <div id="help">P1: WASD + SPACE | P2: AI (T toggles) | R: restart | B: lab</div>
+  <div id="help"></div>
   <div id="controls"></div>
-  <div id="arenaui">
-    <label>ARENA COLOUR <select id="ar-colour"></select></label>
-    <label>FLOOR GRID <select id="ar-grid"></select></label>
-  </div>
   <div id="sign"></div>
+  <div id="ready"><div class="card">
+    <h2 id="rd-title"></h2>
+    <table id="rd-table"></table>
+    <button class="go" id="rd-start" type="button">START ▶</button>
+    <div class="small">Enter or click START · B: back to the lab</div>
+  </div></div>
+  <div id="countdown"></div>
 
   <div id="lab">
     <div class="inst" id="rack">
@@ -186,13 +210,18 @@
       <label class="fld">PAINT <input id="bb-paint" type="color"></label>
       <label class="fld">OPPONENT (AI) <select id="bb-opponent"></select></label>
       <label class="fld">AI LEVEL <select id="bb-difficulty"><option value="easy">Easy</option><option value="normal" selected>Normal</option><option value="hard">Hard</option></select></label>
-      <label class="fld" title="Off: weapon and weapon motor stop at 1 HP and keep working">BREAKABLE WEAPONS <input id="bb-breakable" type="checkbox"></label>
-      <span id="bb-shellaids" style="display:none;gap:12px"><label class="fld" title="Shell spinners: still cap on a post through the shell bearing, with an arrow pointing at the nose">NOSE CAP <input id="bb-cap" type="checkbox"></label>
-      <label class="fld" title="Shell spinners: glowing arrow on the floor ahead of the nose (game aid)">FLOOR ARROW <input id="bb-arrow" type="checkbox"></label></span>
-      <label class="fld" title="v0.27 art theme. Cube Bots: every part is built from cubes and hits knock them loose (looks only: physics and HP unchanged). Both bots.">LOOK <select id="bb-look"><option value="worn">Battle-worn</option><option value="cubes">Cube Bots</option></select></label>
-      <span id="bb-cubeopts" style="display:none;gap:12px"><label class="fld">CUBE STYLE <select id="bb-cubestyle"><option value="glow">Pixel Glow</option><option value="block">Toy Block</option><option value="energy">Energy Cube</option></select></label>
-      <label class="fld" title="Smaller cubes = more detail, but more cubes to draw (frame rate)">CUBE SIZE <select id="bb-cubesize"><option value="big">8-bit (big)</option><option value="mid">16-bit</option><option value="small">Hi-res (small)</option></select></label></span>
-      <label class="fld" title="TEMPORARY test: multiplies both bots' drive power (pushing force, acceleration, turning). x1 = normal.">DRIVE BOOST (TEST) <span><input id="bb-boost" type="range" min="1" max="3" step="0.25" value="1"> <b id="bb-boost-val">x1</b></span></label>
+      <label class="fld">LOOK <select id="bb-look"><option value="worn">Battle-worn</option><option value="cubes">Cube Bots</option></select></label>
+      <details id="bb-settings"><summary>SETTINGS ▸</summary><div class="drawer">
+        <div class="note">Everyone starts with these same settings.</div>
+        <label class="fld" title="Multiplies both bots' drive power (pushing force, acceleration, turning)">DRIVE BOOST <span><input id="bb-boost" type="range" min="1" max="3" step="0.25" value="3"> <b id="bb-boost-val">x3</b></span></label>
+        <label class="fld" title="Off: weapon and weapon motor stop at 1 HP and keep working">BREAKABLE WEAPONS <input id="bb-breakable" type="checkbox"></label>
+        <span id="bb-cubeopts" style="display:none;flex-direction:column;gap:10px"><label class="fld">CUBE STYLE <select id="bb-cubestyle"><option value="glow">Pixel Glow</option><option value="block">Toy Block</option><option value="energy">Energy Cube</option></select></label>
+        <label class="fld" title="Smaller cubes = more detail, but more cubes to draw (frame rate)">CUBE SIZE <select id="bb-cubesize"><option value="big">8-bit (big)</option><option value="mid">16-bit</option><option value="small">Hi-res (small)</option></select></label></span>
+        <span id="bb-shellaids" style="display:none;flex-direction:column;gap:10px"><label class="fld" title="Shell spinners: still cap on a post through the shell bearing, with an arrow pointing at the nose">NOSE CAP <input id="bb-cap" type="checkbox"></label>
+        <label class="fld" title="Shell spinners: glowing arrow on the floor ahead of the nose">FLOOR ARROW <input id="bb-arrow" type="checkbox"></label></span>
+        <label class="fld">ARENA COLOUR <select id="ar-colour"></select></label>
+        <label class="fld">FLOOR GRID <select id="ar-grid"></select></label>
+      </div></details>
       <span style="margin-left:auto;display:flex;gap:10px"><button id="bb-wtest" type="button" title="See the weapon move on the turntable. Spinners: press = ON/OFF. Hammer: tap = swing, hold = stay down. Flipper: press = fire. Lifter / grappler / crusher: hold.">TEST WEAPON (SPACE)</button>
       <button id="bb-course" type="button" title="Test course: drive one station at a time, timed">TEST COURSE ▶</button>
       <button id="bb-deploy" type="button">DEPLOY ▶</button></span>
@@ -205,7 +234,7 @@
       <label class="fld">BOT <select id="cm-bot"></select></label>
       <div id="cm-stations"></div>
       <div class="row">
-        <label class="rec"><input id="cm-rec" type="checkbox"> RECORDED RUN <span style="color:#8fa3ad;font-size:11px">(saved to runs\runs.csv + results screen)</span></label>
+        <label class="rec" id="cm-recrow"><input id="cm-rec" type="checkbox"> RECORDED RUN <span style="color:#8fa3ad;font-size:11px">(saved to runs\runs.csv + results screen)</span></label>
         <button class="back" id="cm-lab" type="button">◀ LAB</button>
       </div>
     </div>

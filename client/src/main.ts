@@ -1,3 +1,5 @@
+/// <reference types="vite/client" />
+import './settings.js';   // v0.30: FIRST -- clears old saved settings once, before any module reads them
 import {
   ArcRotateCamera, Color4, DirectionalLight, Engine, HavokPlugin, HemisphericLight, Quaternion, Scene, Vector3,
 } from '@babylonjs/core';
@@ -114,12 +116,48 @@ async function main() {
   let courseCombat: Combat | undefined;
   const helpEl = document.getElementById('help')!;
 
-  const controlLines = () => {
-    const lines = [`<b>P1</b> ${KEYS.A.label} — ${bots[0].weapon.hint('SPACE')}`];
-    if (p2Human) lines.push(`<b>P2</b> ${KEYS.B.label} — ${bots[1].weapon.hint('Right SHIFT')}`);
-    lines.push(`Damage = real energy: spinners dump stored spin · hammers the swing · flippers / lifters what they throw or lift (plus the landing) · crushers pierce while pressing. Anything else is a <i>bump</i>.`);
-    lines.push(`R restart · B lab · T toggle P2 human/AI · V HUD view · H details · Q camera view`);
-    return lines;
+  // v0.30 start screen: DEPLOY puts both bots in the arena, frozen, with the controls card; START (or Enter)
+  // runs a 3-2-1-FIGHT! countdown, then the match. R comes back here. Nothing drives and the clock waits until FIGHT.
+  let phase: 'ready' | 'countdown' | 'fight' = 'ready';
+  let countdownAt = 0;                                       // performance.now() when the countdown began
+  const COUNT_MS = 900;                                      // per number (3, 2, 1), then FIGHT!
+  const rd = {
+    box: document.getElementById('ready')!, title: document.getElementById('rd-title')!,
+    table: document.getElementById('rd-table')!, start: document.getElementById('rd-start') as HTMLButtonElement,
+    count: document.getElementById('countdown')!,
+  };
+  const showReady = () => {
+    const [a, b] = bots;
+    rd.title.innerHTML = `<span style="color:${a.build.cosmetics.paint}">${a.build.cosmetics.name}</span><span class="vs">VS</span>`
+      + `<span style="color:${b.build.cosmetics.paint}">${b.build.cosmetics.name}</span>`;
+    const rows: [string, string][] = [
+      ['DRIVE', 'W A S D (or gamepad left stick)'],
+      ['WEAPON', a.weapon.hint('SPACE')],
+      ['CAMERA', 'Q changes the view · drag to look around · mouse wheel zooms'],
+      ['TO WIN', 'Destroy the other bot, or knock it out of the arena. At 3:00, whoever took less damage wins.'],
+      ['KEYS', 'R: restart · B: lab · V: move the scoreboards · H: part details'],
+    ];
+    if (p2Human) rows.splice(2, 0, ['PLAYER 2', `Arrows + Right SHIFT — ${b.weapon.hint('Right SHIFT')}`]);
+    rd.table.innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+    rd.box.classList.add('on');
+  };
+  const beginCountdown = () => {
+    if (phase !== 'ready' || !bots.length || builder.visible || mode !== 'match') return;
+    phase = 'countdown'; countdownAt = performance.now();
+    rd.box.classList.remove('on');
+    canvas.focus();
+  };
+  rd.start.addEventListener('click', beginCountdown);
+  window.addEventListener('keydown', e => {
+    if ((e.code === 'Enter' || e.code === 'NumpadEnter') && !e.repeat && phase === 'ready' && !builder.visible && mode === 'match') { e.preventDefault(); beginCountdown(); }
+  });
+  /** Countdown display; returns true once FIGHT! is reached. */
+  const tickCountdown = (now: number): boolean => {
+    const t = now - countdownAt, n = 3 - Math.floor(t / COUNT_MS);
+    if (n > 0) { rd.count.textContent = String(n); rd.count.className = 'on'; return false; }
+    rd.count.textContent = 'FIGHT!'; rd.count.className = 'on fight';
+    setTimeout(() => { if (phase === 'fight') rd.count.className = ''; }, 800);
+    return true;
   };
 
   const start = () => {
@@ -135,11 +173,13 @@ async function main() {
     combat = new Combat(bots, fx);
     timeLeft = MATCH_SECONDS; over = false; camFocus = null;
     hud.hideWinner();
-    hud.showControls(controlLines());
+    phase = 'ready'; rd.count.className = '';
+    showReady();                                       // v0.30 start screen (was a 6 s controls popup)
     canvas.focus();
   };
 
   const openLab = () => {
+    rd.box.classList.remove('on'); rd.count.className = '';
     builder.show(
       b => lab.setBuild(b),
       ({ player, opponent, difficulty: d, breakableWeapons: bw, driveBoost }) => { buildA = player; buildB = opponent; difficulty = d; breakableWeapons = bw; DRIVE.boost = driveBoost; start(); },   // v0.22 test boost (both bots)
@@ -163,6 +203,8 @@ async function main() {
     cm.stations.appendChild(b);
   }
   cm.lab.onclick = () => { leaveCourse(); openLab(); };
+  // v0.30 RECORDED RUN saves through the dev server (vite.config.ts) -- only offered there (npm run dev)
+  if (!import.meta.env.DEV) { cm.rec.checked = false; document.getElementById('cm-recrow')!.style.display = 'none'; }
 
   const isArenaMesh = (name: string) => name === 'floor' || name.startsWith('wall') || name.startsWith('arena');
   const setArenaVisible = (on: boolean) => { for (const m of scene.meshes) if (isArenaMesh(m.name)) m.setEnabled(on); };
@@ -203,7 +245,7 @@ async function main() {
     for (const b of bots) { castShadows(shadows, botMeshes(b)); skinBot(b, shadows); }   // v0.27 Cube Bots look (if on)
     course.begin(player, bots[1], courseCombat);
     cam.target = player.root.position.clone(); cam.radius = camCtl.radius(11);   // v0.24: angle is the player's (Q / drag)
-    hud.showControls([`<b>${STATIONS.find(s => s.id === id)!.name}</b> — ${KEYS.A.label} — ${player.weapon.hint('SPACE')}`, `R restart · C stations · B lab · Q camera view`], 4000);
+    hud.showControls([`<b>${STATIONS.find(s => s.id === id)!.name}</b>`, `WASD drive · ${player.weapon.hint('SPACE')}`, `R restart · C stations · B lab · Q camera`], 4000);
     canvas.focus();
   }
   function leaveCourse() {
@@ -262,7 +304,7 @@ async function main() {
     const rec = cm.rec.checked;
     cm.hud.innerHTML = `<h4>${STATIONS.find(s => s.id === courseStation)!.name}<span class="tag ${rec ? 'rec' : 'prac'}">${rec ? 'RECORDED' : 'PRACTICE'}</span></h4>`
       + course.hudLines().map(l => `<div>${l}</div>`).join('') + (course.done ? `<div><b style="color:#39ff14">FINISHED</b></div>` : '');
-    helpEl.innerHTML = `${p.build.cosmetics.name} &nbsp;|&nbsp; ${KEYS.A.label} &nbsp;|&nbsp; R: restart &nbsp;|&nbsp; C: stations &nbsp;|&nbsp; B: lab &nbsp;|&nbsp; ${camCtl.label()}`;
+    helpEl.innerHTML = `WASD drive &nbsp;·&nbsp; SPACE weapon &nbsp;·&nbsp; Q camera &nbsp;·&nbsp; R restart &nbsp;·&nbsp; C stations &nbsp;·&nbsp; B lab`;
     cam.target = Vector3.Lerp(cam.target, p.root.position, 0.1).add(fx.shakeOffset());
     cam.radius += (camCtl.radius(11) - cam.radius) * 0.05;
     camCtl.chase(p.root.rotationQuaternion, dt);
@@ -305,21 +347,30 @@ async function main() {
       courseFrame(dt, performance.now());
       return;
     }
-    if (isDown('KeyR')) { start(); return; }
+    if (isDown('KeyR')) { if (phase !== 'ready') start(); return; }   // v0.30: back to the start screen
     if (isDown('KeyB')) { openLab(); return; }
-    if (isDown('KeyT') && performance.now() - lastToggle > 400) { p2Human = !p2Human; lastToggle = performance.now(); hud.showControls(controlLines(), 4000); }
-    helpEl.innerHTML = `P1: ${KEYS.A.label} &nbsp;|&nbsp; P2: ${p2Human ? KEYS.B.label + ' (human)' : 'AI ' + difficulty.toUpperCase()} (T toggles) &nbsp;|&nbsp; R: restart &nbsp;|&nbsp; B: lab &nbsp;|&nbsp; V: view &nbsp;|&nbsp; H: details &nbsp;|&nbsp; ${camCtl.label()}`;
+    // T: player 2 on the arrows instead of the AI (test aid, not advertised)
+    if (isDown('KeyT') && performance.now() - lastToggle > 400) {
+      p2Human = !p2Human; lastToggle = performance.now();
+      hud.sign(p2Human ? 'PLAYER 2: ARROWS + RIGHT SHIFT' : 'PLAYER 2: AI', 1200);
+      if (phase === 'ready') showReady();
+    }
+    helpEl.innerHTML = `WASD drive &nbsp;·&nbsp; SPACE weapon &nbsp;·&nbsp; Q camera &nbsp;·&nbsp; R restart &nbsp;·&nbsp; B lab`;
 
     const now = performance.now();
+    // v0.30 start screen + countdown: bots sit still, weapons off, clock waits
+    if (phase === 'countdown' && tickCountdown(now)) phase = 'fight';
+    const waiting = phase !== 'fight';
     scene.getPhysicsEngine()?.setTimeStep(PHYS_STEP);
 
     // Drive + weapons
     for (const b of bots) {
       if (b.eliminated) continue;                                 // frozen + hidden, nothing to drive
-      const d: Drive = b.id === 'A' || p2Human
+      const d: Drive = waiting ? { throttle: 0, turn: 0, fire: false }
+        : b.id === 'A' || p2Human
         ? readDrive(b.id)
         : (over ? { throttle: 0, turn: 0, fire: false } : aiDrive(b, bots[0], arena.half, dt, difficulty));
-      runBot(b, d, dt, now, over, false);
+      runBot(b, d, dt, now, over || waiting, false);
     }
 
     // Camera follows the midpoint of the bots still in play (+ hit shake) — unless a bot has gone
@@ -347,7 +398,7 @@ async function main() {
     fx.update(dt, cam);
 
     // Clock + end conditions
-    if (!over) {
+    if (!over && !waiting) {
       timeLeft = Math.max(0, timeLeft - dt);
       const dead = bots.filter(b => isDestroyed(b.state) && !b.eliminated);
       if (dead.length) {
@@ -425,7 +476,7 @@ async function main() {
     }
   }
 
-  function end(text: string, color: string) { over = true; hud.showWinner(text + '  (R restart · B lab)', color); }
+  function end(text: string, color: string) { over = true; hud.showWinner(text + '  —  R: play again · B: lab', color); }
 
   /** Track upside-down / self-righting for one bot. */
   function updateInverted(b: Bot, now: number) {

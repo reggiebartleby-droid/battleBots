@@ -34,7 +34,8 @@ export class CamControl {
   private chaseRate = 0;                                          // rad/s the chase camera is panning at
 
   constructor(private main: ArcRotateCamera, private lab: ArcRotateCamera, canvas: HTMLCanvasElement, private inLab: () => boolean) {
-    this.s = { view: 'broadcast', alpha: -Math.PI / 2, beta: MAIN.broadcast.beta, zoom: 1, labBeta: LAB.broadcast, labRadius: lab.radius };
+    // v0.30 default: CHASE (behind you), zoom 0.65
+    this.s = { view: 'chase', alpha: -Math.PI / 2, beta: MAIN.chase.beta, zoom: MAIN.chase.zoom, labBeta: LAB.chase, labRadius: lab.radius };
     try {
       const raw = localStorage.getItem(KEY);
       if (raw) { const j = JSON.parse(raw); if (ORDER.includes(j.view)) this.s = { ...this.s, ...j }; }
