@@ -100,6 +100,8 @@ export interface Bot {
   wheels?: RealWheel[];
   /** v0.28 chassis collider pieces per part (front, side armour, skids, fixed jaw) -- so a part that falls off can lose its collider. */
   partShapes: Record<string, PhysicsShape[]>;
+  /** v0.29 Cube Bots: a part just fell off and flies as its own body for a moment (combat.ts hooks its hits). */
+  onPartOff?: (body: PhysicsBody, socketId: string) => void;
 }
 
 /** v0.21 one tyre on its powered axle. */
@@ -120,6 +122,7 @@ export interface RealWheel {
   onTread: boolean;              // upright: the tread rolls on the floor; tipped: the cylinder does
   own: { chassis: number; weapon: number };   // this bot's filter bits
   gone?: boolean;                // v0.28 Cube Bots: the wheel fell off -- collides with nothing
+  released?: boolean;            // v0.29: ... and its axle joint is gone too (body parked, mass moved onto the chassis)
 }
 
 /** v0.21 wheel tilt (axle's world-up component) past which the tyre cylinder, not the tread, meets the floor. */
@@ -759,6 +762,7 @@ export function wheelsBefore(bot: Bot, dt: number) {
     if (up.y > 0.5) mixWheels(bot, hold.throttle, Math.max(-1, Math.min(1, steer)), true, bot.wheels[0].omegaMax * WHEEL.r);
   }
   for (const w of bot.wheels) {
+    if (w.released) continue;                           // v0.29 fell off: nothing to drive
     const tipped = Math.abs(X.applyRotationQuaternion(w.hub.rotationQuaternion ?? Quaternion.Identity()).y) > TREAD_TILT;
     if (tipped === w.onTread) setTread(w, !tipped);
     if (w.omegaMax <= 0) continue;
@@ -777,6 +781,7 @@ export function wheelsBefore(bot: Bot, dt: number) {
 export function carryWheels(bot: Bot) {
   const v = bot.body.getLinearVelocity(), w = bot.body.getAngularVelocity();
   for (const wh of bot.wheels ?? []) {
+    if (wh.released) continue;
     wh.body.setLinearVelocity(v.add(Vector3.Cross(w, wh.hub.position.subtract(bot.root.position))));
     wh.body.setAngularVelocity(w.clone());
   }
@@ -963,6 +968,16 @@ const kids = new WeakMap<PhysicsShape, PhysicsShape[]>();
 function track(container: PhysicsShape, child: PhysicsShape) { const k = kids.get(container) ?? []; k.push(child); kids.set(container, k); }
 function setFilter(shape: PhysicsShape, member: number, collide: number) {
   for (const s of [shape, ...(kids.get(shape) ?? [])]) { s.filterMembershipMask = member; s.filterCollideMask = collide; }
+}
+
+/** v0.29 Cube Bots: a part that fell off flies as its own body for a moment. It always hits the arena and other
+ *  loose parts; bots listed in `exclude` it passes through (cubes.ts switches each bot on once the part is clear of
+ *  it -- spawning inside a bot made Havok fling that bot 3.6 m up, headless). */
+export const LOOSE_BIT = 1 << 9;
+export function loosePartFilter(exclude: ('A' | 'B')[]): { member: number; collide: number } {
+  let ex = TREAD_BIT;
+  for (const id of exclude) ex |= FILTER[id].chassis | FILTER[id].weapon;
+  return { member: LOOSE_BIT, collide: ~ex };
 }
 
 /** Overhead weapon kinds whose arm is a real body. */
@@ -1324,7 +1339,7 @@ export function disposeBot(bot: Bot) {
     w.body.dispose();
     w.hub.dispose(false, true);
   }
-  for (const w of bot.wheels ?? []) { w.joint.dispose(); w.body.dispose(); w.hub.dispose(false, true); }   // v0.21
+  for (const w of bot.wheels ?? []) { if (!w.released) w.joint.dispose(); w.body.dispose(); w.hub.dispose(false, true); }   // v0.21 (v0.29: a released wheel's joint is already gone)
   bot.body.dispose();
   bot.root.dispose(false, true);
 }
@@ -1333,8 +1348,32 @@ export function disposeBot(bot: Bot) {
  *  wheels = every tyre (the part is all four) + 2WD skids; weapon = its real body/bodies (breakable weapons only). */
 export function dropPart(bot: Bot, socketId: string) {
   for (const s of bot.partShapes[socketId] ?? []) { s.filterMembershipMask = 0; s.filterCollideMask = 0; }
-  if (bot.state.parts[socketId]?.socketType === 'wheels') for (const w of bot.wheels ?? []) { w.gone = true; setTread(w, false); }
+  if (bot.state.parts[socketId]?.socketType === 'wheels') releaseWheels(bot);
   if (socketId === 'weapon') for (const w of weaponBodies(bot)) setFilter(w.body.shape!, 0, 0);
+}
+
+/** v0.29: wheels that fell off leave for real -- axle joints removed, tyre bodies parked (static, hidden, colliding
+ *  with nothing), drive stops. Headless: tyres left hanging on their joints with no collisions could blow the solver
+ *  up on a hard hit (a bellied Flip Side shot 230 m into the air). Their mass moves onto the chassis, so the bot's
+ *  weight is unchanged (v0.28 rule). */
+function releaseWheels(bot: Bot) {
+  let extra = 0;
+  for (const w of bot.wheels ?? []) {
+    if (w.released) continue;
+    w.gone = true; setTread(w, false);
+    w.released = true;
+    w.cmd = 0;
+    w.joint.dispose();
+    w.body.setLinearVelocity(Vector3.Zero());
+    w.body.setAngularVelocity(Vector3.Zero());
+    w.body.setMotionType(PhysicsMotionType.STATIC);
+    w.hub.setEnabled(false);
+    extra += w.mass;
+  }
+  if (extra <= 0) return;
+  const mp = bot.body.getMassProperties();
+  const m0 = mp.mass ?? 50, m1 = m0 + extra;
+  bot.body.setMassProperties({ mass: m1, centerOfMass: mp.centerOfMass, inertia: mp.inertia?.scale(m1 / m0), inertiaOrientation: mp.inertiaOrientation });
 }
 
 /** v0.28 Cube Bots KO: the bot is blown apart -- freeze + hide it and switch every collider off (nothing left to hit). */

@@ -497,7 +497,7 @@ function blank(station: StationId): RunResult {
 export function botMass(b: Bot): number {
   const m = (body: PhysicsBody) => body.getMassProperties().mass ?? 0;
   let kg = m(b.body);
-  for (const w of b.wheels ?? []) kg += m(w.body);
+  for (const w of b.wheels ?? []) if (!w.released) kg += m(w.body);   // v0.29: a released wheel's mass is on the chassis
   for (const x of [b.spinner, b.arm, b.saw, ...(b.hinges ?? [])]) if (x) kg += m(x.body);
   return kg;
 }

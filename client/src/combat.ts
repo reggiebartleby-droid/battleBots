@@ -33,9 +33,17 @@
  * v0.12 slam damage (real: being thrown is what hurts): a bot that lands hard on the floor within
  *  SLAM.windowMs of touching the opponent's weapon takes impact-energy damage, credited to that opponent.
  *  (Floor landings only for now; walls / hazards are their own topic.)
+ *
+ * v0.29 Cube Bots look only (user: fun over strict physics there):
+ *  - HP = cubes: the part hit is the one whose cubes are nearest where the hit really landed (cubes.ts target),
+ *    for weapon hits and slams alike; the crusher keeps its pierce-the-top rule. Plain look: unchanged.
+ *  - option 5: a big hit (KNOCK.minDmg+) gives the victim an extra shove away from the attacker, bigger with damage
+ *  - option 4: a part that fell off flies for a moment (cubes.ts); what it hits gets shoved by the real body and
+ *    takes a little damage (PART_HIT), credited to whoever knocked the part off
  */
 import { Vector3, type IPhysicsCollisionEvent, PhysicsEventType } from '@babylonjs/core';
-import { applyDamage, canAttack } from '../../src/core/state.js';
+import { applyDamage, canAttack, isProtected } from '../../src/core/state.js';
+import { cubeSkinOf, isLooseBody } from './cubes.js';
 import { forward, spinEnergy, armEnergy, energyOf, weaponBodies, chassisBodies, isChassis, CONTROL, type Bot } from './bot.js';
 import type { PhysicsBody } from '@babylonjs/core';
 import type { Fx } from './fx.js';
@@ -84,6 +92,22 @@ export const SCORE = {
 };
 export interface ScoreBonus { text: string; pts: number; t: number }
 
+/** v0.29 option 5 (Cube Bots look): big hits knock the victim further than the physics alone would. */
+export const KNOCK = {
+  minDmg: 10,          // a hit dealing at least this much ...
+  dvPerDmg: 0.12,      // ... adds this much speed (m/s) per point from minDmg up ...
+  maxDv: 3.0,          // ... up to this
+  up: 0.45,            // share of it that goes upward
+  atPoint: 0.5,        // 0 = through the centre (pure shove), 1 = at the contact point (more tumble)
+};
+
+/** v0.29 option 4 (Cube Bots look): a part that fell off hitting a bot. */
+export const PART_HIT = {
+  minSpeed: 1.5,       // m/s closing speed before it hurts
+  joulesPerDmg: 30,    // impact energy per point
+  maxDmg: 8,           // small: one flying part never does more than this
+};
+
 export class Combat {
   private lastContinued = 0;
   log: HitLog[] = [];
@@ -118,6 +142,10 @@ export class Combat {
   constructor(private bots: Bot[], private fx: Fx) {
     for (const b of bots) {
       b.body.getCollisionObservable().add(ev => this.onCollision(b, ev));
+      b.onPartOff = body => {                                             // v0.29 option 4
+        let done = false;
+        body.getCollisionObservable().add(ev => { if (!done) done = this.onLoosePart(b, body, ev); });
+      };
       const add = (body: PhysicsBody, mass: number, energy: () => number) => {
         const c: SpinContact = { bot: b, body, mass, energy, eBefore: 0, lost: 0, touching: false, idle: 0, start: 0, point: Vector3.Zero(), vsWeapon: false, active: false };
         this.spin.push(c);
@@ -151,6 +179,7 @@ export class Combat {
     const other = this.other(self);
     if (isChassis(other, ev.collidedAgainst) || weaponBodies(other).some(w => w.body === ev.collidedAgainst)) return;
     if (isChassis(self, ev.collidedAgainst) || weaponBodies(self).some(w => w.body === ev.collidedAgainst)) return;
+    if (isLooseBody(ev.collidedAgainst)) return;                         // v0.29 landing on a flying part isn't a slam
     const touch = this.lastWeaponTouch.get(self.id);
     const now = performance.now();
     if (!touch || now - touch.t > SLAM.windowMs) return;
@@ -170,7 +199,7 @@ export class Combat {
     const alive = (id: string) => (self.state.parts[id]?.hp ?? 0) > 0;
     // landed on its back -> top armor takes it; on its wheels / side -> wheels, then side armor
     const order = up < 0 ? ['armor', 'armor_1', 'armor_2', 'weapon', 'motor'] : ['wheels', 'armor_1', 'armor_2', 'armor', 'motor'];
-    const socket = order.find(alive) ?? Object.keys(self.state.parts).find(alive);
+    const socket = this.cubeSocket(self, ev.point ?? undefined) ?? order.find(alive) ?? Object.keys(self.state.parts).find(alive);   // v0.29 HP = cubes
     if (!socket) return;
     const dealt = applyDamage(self.state, socket, raw);
     const by = touch.by;
@@ -252,7 +281,7 @@ export class Combat {
     // crusher pierces the top: top armor, then the insides (weapon motor, drive motor)
     const crushSocket = c.crush ? ['armor', 'armor_1', 'armor_2', 'weapon_motor', 'motor', 'weapon'].find(alive) : undefined;
     // a flip / lift gets under them: socket from the hit direction even if the plate touched their weapon
-    const socket = crushSocket ?? (c.vsWeapon && alive('weapon') && !c.gain ? 'weapon' : pickSocket(defender, attacker));
+    const socket = crushSocket ?? this.cubeSocket(defender, c.point) ?? (c.vsWeapon && alive('weapon') && !c.gain ? 'weapon' : pickSocket(defender, attacker));   // v0.29 HP = cubes
     const dealt = applyDamage(defender.state, socket, raw);
     const now = performance.now();
     this.log.push({ t: now, attacker: attacker.id, socket, dmg: dealt });
@@ -261,7 +290,67 @@ export class Combat {
     this.credit(attacker, defender, dealt);
     defender.lastHit = { socket, t: now };
     this.fx.hit(c.point, dealt, defender, attacker.build.cosmetics.paint ?? '#fff');
+    this.bigKnock(attacker, defender, c.point, dealt);
   }
+
+  /** v0.29 HP = cubes (Cube Bots look only): the part nearest where the hit landed that can still take damage
+   *  (alive, and not an unbreakable weapon already at its 1-HP floor). undefined = plain look / nothing left. */
+  private cubeSocket(defender: Bot, point: Vector3 | null | undefined): string | undefined {
+    const sk = cubeSkinOf(defender.root);
+    if (!sk?.bot || !point) return undefined;
+    const st = defender.state;
+    return sk.target(point, sid => {
+      const ps = st.parts[sid];
+      return !!ps && ps.hp > 0 && !(isProtected(st, ps) && ps.hp <= 1);
+    });
+  }
+
+  /** v0.29 option 5 (Cube Bots look only): a big hit shoves the victim away from the attacker (and up). */
+  private bigKnock(attacker: Bot, defender: Bot, point: Vector3, dealt: number) {
+    if (dealt < KNOCK.minDmg || !cubeSkinOf(defender.root) || defender.eliminated) return;
+    const dv = Math.min(KNOCK.maxDv, KNOCK.dvPerDmg * (dealt - KNOCK.minDmg + 1));
+    const dir = defender.root.position.subtract(attacker.root.position); dir.y = 0;
+    if (dir.lengthSquared() < 1e-4) dir.set(0, 0, 1);
+    dir.normalize().scaleInPlace(1 - KNOCK.up).addInPlaceFromFloats(0, KNOCK.up, 0).normalize();
+    const m = defender.body.getMassProperties().mass ?? 50;
+    const at = Vector3.Lerp(defender.body.getObjectCenterWorld(), point, KNOCK.atPoint);
+    defender.body.applyImpulse(dir.scale(m * dv), at);
+    this.knocks++;
+  }
+  knocks = 0;
+
+  /** v0.29 option 4: a part that fell off `owner` hit something. Bots take a little damage (once per part),
+   *  credited to whoever knocked it off (owner's opponent) -- unless that's who it hit. true = done. */
+  private onLoosePart(owner: Bot, body: PhysicsBody, ev: IPhysicsCollisionEvent): boolean {
+    if (ev.type !== PhysicsEventType.COLLISION_STARTED) return false;
+    const victim = this.bots.find(b => isChassis(b, ev.collidedAgainst) || weaponBodies(b).some(w => w.body === ev.collidedAgainst));
+    if (!victim || victim.eliminated) return false;
+    const m = body.getMassProperties().mass ?? 5, M = victim.body.getMassProperties().mass ?? 50;
+    const mu = (m * M) / (m + M);
+    let v = Number.isFinite(ev.impulse) && ev.impulse > 0 ? ev.impulse / mu : 0;
+    if (!v) v = body.getLinearVelocity().subtract(victim.body.getLinearVelocity()).length();
+    if (v < PART_HIT.minSpeed) return false;
+    const raw = Math.min(PART_HIT.maxDmg, Math.round(0.5 * mu * v * v / PART_HIT.joulesPerDmg));
+    if (raw < 1) return false;
+    const point = ev.point ?? body.transformNode.getAbsolutePosition();
+    const alive = (id: string) => (victim.state.parts[id]?.hp ?? 0) > 0;
+    const socket = this.cubeSocket(victim, point) ?? Object.keys(victim.state.parts).find(alive);
+    if (!socket) return true;
+    const dealt = applyDamage(victim.state, socket, raw);
+    const knocker = this.bots.find(b => b !== owner);
+    const now = performance.now();
+    victim.lastHit = { socket, t: now };
+    this.partHits++;
+    if (knocker && knocker !== victim) {
+      this.log.push({ t: now, attacker: knocker.id, socket, dmg: dealt });
+      this.stats[knocker.id].hits++;
+      this.stats[knocker.id].dmg += dealt;
+      this.credit(knocker, victim, dealt);
+    }
+    this.fx.hit(point, dealt, victim, (knocker ?? owner).build.cosmetics.paint ?? '#fff');
+    return true;
+  }
+  partHits = 0;
 
   private other(b: Bot) { return this.bots.find(x => x !== b)!; }
 

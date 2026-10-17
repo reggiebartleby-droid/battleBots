@@ -15,16 +15,28 @@
  * Loose cubes are debris (no colliders): they tumble, bounce on the floor / walls and stay for the match.
  * v0.28 bots shove debris out of their path and fast spinners fling it (still visual only).
  *
+ * v0.29 HP = cubes (user: the cubes decide the damage):
+ *  - a hit damages the part whose nearest intact cube is closest to where it REALLY landed (combat.ts asks
+ *    target()); a part that's gone, or an unbreakable weapon already at its 1-HP floor, lets hits through to
+ *    the next nearest part
+ *  - each part keeps exactly its share of cubes: cubes left = cubes at the start x HP left / max HP (at least
+ *    one while it's alive), knocked off nearest the hit first, so hits dig in. Shares, not counts, so the
+ *    cube size never changes the balance. Chassis cubes (no HP of their own) still chip for feedback.
+ *  - a part that falls off flies as a real body for PART_FLY.lifeS (option 4): it shoves whatever it hits and
+ *    does a little damage (combat.ts), then breaks up into ordinary debris
+ *
  * Cubes buried inside a part (2+ cubes deep) carry a contrasting "glow core" colour: they show once hits
  * dig down to them. Only cubes up to KEEP_DEPTH deep exist at all (nobody sees deeper ones).
  */
 import {
-  type AbstractMesh, Color3, DynamicTexture, Matrix, Mesh, MeshBuilder, type Node, Quaternion, type Scene,
-  type ShadowGenerator, StandardMaterial, Vector3, VertexBuffer,
+  type AbstractMesh, Color3, DynamicTexture, Matrix, Mesh, MeshBuilder, type Node, PhysicsBody, PhysicsMotionType,
+  PhysicsShapeBox, Quaternion, type Scene, type ShadowGenerator, StandardMaterial, TransformNode, Vector3, VertexBuffer,
 } from '@babylonjs/core';
-import { botMeshes, chassisFor, dropPart, spinOmega, weaponBodies, type Bot } from './bot.js';
+import { botMeshes, chassisFor, dropPart, loosePartFilter, spinOmega, weaponBodies, type Bot } from './bot.js';
 import { castShadows } from './look.js';
+import { catalog } from './catalog.js';
 import { isProtected, type BotState } from '../../src/core/state.js';
+import { partWeight } from '../../src/core/weight.js';
 
 // ---------------- settings (lab deploy bar, remembered in this browser) ----------------
 export type CubeStyle = 'glow' | 'block' | 'energy';
@@ -54,6 +66,18 @@ const CHIP = {
 };
 /** v0.28 a part at 0 HP flies off as one piece (shared push + spin), breaking up as it goes. */
 const PART_OFF = { speed: [2.5, 4.5], up: [2.5, 4.5], spin: [4, 9], noise: 0.5 };
+/** v0.29 option 4: the part that fell off is a real body this long, then breaks up into debris.
+ *  Pieces of one part further apart than `cluster` fly separately (each tyre, front + rear skid). */
+const PART_FLY = {
+  lifeS: 1.5,
+  graceS: 0.35,        // never hits its own bot sooner than this
+  // and it only starts hitting a bot (its own or the opponent) once it's clear of it: outside the chassis box +
+  // KICK margins and away from its weapon hubs (spawning inside a bot launched that bot, headless)
+  kgPerWeight: 0.4,    // part weight stat -> kg (same as BODY.massScale)
+  minKg: 2, maxKg: 20,
+  friction: 0.5, restitution: 0.3,
+  cluster: 0.5,        // m
+};
 /** v0.28 debris gets kicked out of the way by bots (visual only -- the cubes still have no colliders). */
 const KICK = {
   minSpeed: 0.4,       // m/s: slower bots push nothing
@@ -187,12 +211,19 @@ interface Holder {
   src: AbstractMesh;        // the hidden mesh it follows
   pre: Matrix;              // rootWorld0 * inverse(srcWorld0)
   socket: string | null;    // the part it belongs to (null = chassis / unknown)
+  idx: number;              // position in Skin.holders
   cubes: number[];          // global cube index per slot
   mats: Float32Array;
   cols: Float32Array;
   dirtyM: boolean;
   dirtyC: boolean;
 }
+
+/** v0.29 a part that fell off, flying as its own body; its cubes ride it (st 4) until it breaks up. */
+interface Ride { node: TransformNode; body: PhysicsBody; cubes: number[]; off: Float32Array; q0: Float32Array; age: number; blocked: Set<'A' | 'B'>; rad: number }
+const LOOSE = new WeakSet<PhysicsBody>();
+/** v0.29: is this one of the flying parts? (combat.ts: landing on one isn't a slam) */
+export function isLooseBody(b: PhysicsBody | undefined): boolean { return !!b && LOOSE.has(b); }
 
 const skins = new Map<Node, Skin>();
 const sceneHooked = new WeakSet<Scene>();
@@ -212,7 +243,13 @@ export class Skin {
   private yaw!: Float32Array; private calm!: Float32Array; private walled!: Uint8Array;
   private active: number[] = [];
   private dDirtyM = false; private dDirtyC = false;
-  private removed = 0;
+  // v0.29 HP = cubes: per part, its holders, cubes at the start, cubes still on
+  private sockHolders = new Map<string, Holder[]>();
+  private sockInit = new Map<string, number>();
+  private sockAlive = new Map<string, number>();
+  private chassisN = 0; private chassisOff = 0;
+  private lastPoint?: Vector3;
+  private rides: Ride[] = [];
   private deadSockets = new Set<string>();
   private ko = false;
   private flash = 0;
@@ -285,7 +322,7 @@ export class Skin {
       mesh.material = this.mat; mesh.isPickable = false; mesh.alwaysSelectAsActiveMesh = true;
       mesh.rotationQuaternion = new Quaternion();
       const mats = new Float32Array(keys.length * 16), cols = new Float32Array(keys.length * 4);
-      const h: Holder = { mesh, src: src.m, pre: rootW.multiply(Matrix.Invert(src.m.getWorldMatrix())), socket: socketOf(src.m), cubes: [], mats, cols, dirtyM: false, dirtyC: false };
+      const h: Holder = { mesh, src: src.m, pre: rootW.multiply(Matrix.Invert(src.m.getWorldMatrix())), socket: socketOf(src.m), idx: this.holders.length, cubes: [], mats, cols, dirtyM: false, dirtyC: false };
       let gr = 0, gg = 0, gb = 0;
       keys.forEach((key, slot) => {
         const x = KI(key) * v, y = KJ(key) * v, z = KK(key) * v;
@@ -308,7 +345,13 @@ export class Skin {
       const nOut = Math.max(1, keys.filter(k => depth.get(k) === 1).length);
       mesh.metadata = { cubeGlow: glowOf(new Color3(gr / nOut, gg / nOut, gb / nOut), st.glow) };
       this.holders.push(h);
+      if (h.socket) {
+        let hs = this.sockHolders.get(h.socket); if (!hs) this.sockHolders.set(h.socket, hs = []);
+        hs.push(h);
+        this.sockInit.set(h.socket, (this.sockInit.get(h.socket) ?? 0) + h.cubes.length);
+      } else this.chassisN += h.cubes.length;
     }
+    for (const [sid, n] of this.sockInit) this.sockAlive.set(sid, n);
     // debris: one slot per cube, empty until the cube comes loose
     this.debris = MeshBuilder.CreateBox(`${root.name}_cubeDebris`, { size: 1 }, scene);
     this.debris.material = this.mat; this.debris.isPickable = false; this.debris.alwaysSelectAsActiveMesh = true;
@@ -339,6 +382,8 @@ export class Skin {
   meshes(): Mesh[] { return [...this.holders.map(h => h.mesh), this.debris]; }
 
   dispose() {
+    for (const r of this.rides) disposeRide(r);
+    this.rides = [];
     for (const h of this.holders) h.mesh.dispose();
     this.debris.dispose();
     this.mat.dispose();
@@ -368,6 +413,7 @@ export class Skin {
       for (const [sid, ps] of Object.entries(bot.state.parts)) {
         if (ps.hp <= 0 && !this.deadSockets.has(sid)) { this.deadSockets.add(sid); this.killPart(sid); }
       }
+      this.sync(this.lastPoint ?? this.root.getAbsolutePosition());   // v0.29 HP = cubes (any HP change, any source)
     }
     // hit flash
     const e = STYLE[this.style].emissive + 0.5 * Math.max(0, this.flash) / 0.15;
@@ -390,6 +436,7 @@ export class Skin {
         this.dDirtyC = true;
       }
     }
+    this.ride(dt);
     this.kick();
     this.simDebris(dt);
     for (const h of this.holders) {
@@ -407,20 +454,85 @@ export class Skin {
   }
 
   // ---------------- damage ----------------
+  /** v0.29 HP = cubes: the part whose nearest intact cube is closest to `point` (world), among the parts
+   *  `ok` allows (combat.ts: alive, and not an unbreakable weapon already at its floor). */
+  target(point: Vector3, ok: (sid: string) => boolean): string | undefined {
+    if (this.ko) return undefined;
+    let best: string | undefined, bd = Infinity;
+    const inv = new Matrix(), q = new Vector3();
+    for (const [sid, hs] of this.sockHolders) {
+      if (!ok(sid)) continue;
+      for (const h of hs) {
+        if (!h.mesh.isEnabled()) continue;
+        h.mesh.computeWorldMatrix(true);
+        h.mesh.getWorldMatrix().invertToRef(inv);
+        Vector3.TransformCoordinatesToRef(point, inv, q);
+        for (const g of h.cubes) {
+          if (this.st[g] !== 0) continue;
+          const dx = this.lp[g * 3] - q.x, dy = this.lp[g * 3 + 1] - q.y, dz = this.lp[g * 3 + 2] - q.z;
+          const d = dx * dx + dy * dy + dz * dz;
+          if (d < bd) { bd = d; best = sid; }
+        }
+      }
+    }
+    // a part too thin to get any cubes of its own at this cube size (8-bit Flip Side's top armor, flush under the
+    // plate) is hit by where its mesh is -- otherwise it could never be damaged and the bot never KO'd
+    if (this.bot) for (const [sid, m] of Object.entries(this.bot.partMeshes)) {
+      if ((this.sockInit.get(sid) ?? 0) > 0 || !ok(sid)) continue;
+      m.computeWorldMatrix(true);
+      const d = Vector3.DistanceSquared(m.getBoundingInfo().boundingBox.centerWorld, point);
+      if (d < bd) { bd = d; best = sid; }
+    }
+    return best;
+  }
+
+  /** v0.29 HP = cubes: every living part keeps its share of cubes (start x HP / max HP, at least 1);
+   *  extra cubes come off nearest `point` first. */
+  private sync(point: Vector3) {
+    const bot = this.bot;
+    if (!bot) return;
+    const inv = new Matrix(), q = new Vector3();
+    for (const [sid, hs] of this.sockHolders) {
+      const ps = bot.state.parts[sid];
+      if (!ps || ps.hp <= 0 || this.deadSockets.has(sid)) continue;
+      const init = this.sockInit.get(sid) ?? 0;
+      const want = Math.max(1, Math.ceil(init * ps.hp / Math.max(1, ps.maxHp)));
+      const extra = (this.sockAlive.get(sid) ?? 0) - want;
+      if (extra <= 0) continue;
+      const near: { g: number; d: number }[] = [];
+      for (const h of hs) {
+        h.mesh.computeWorldMatrix(true);
+        h.mesh.getWorldMatrix().invertToRef(inv);
+        Vector3.TransformCoordinatesToRef(point, inv, q);
+        for (const g of h.cubes) {
+          if (this.st[g] !== 0) continue;
+          const dx = this.lp[g * 3] - q.x, dy = this.lp[g * 3 + 1] - q.y, dz = this.lp[g * 3 + 2] - q.z;
+          near.push({ g, d: dx * dx + dy * dy + dz * dz });
+        }
+      }
+      near.sort((a, b) => a.d - b.d);
+      for (const { g } of near.slice(0, extra)) this.loosen(g, 1);
+    }
+  }
+
   /** A hit at `point` (world) that did `dmg` (already applied to the bot's state). */
   hit(point: Vector3, dmg: number) {
     if (this.ko || !this.n) return;
     this.flash = 0.15;
+    this.lastPoint = point.clone();
+    this.sync(point);                       // v0.29 the part that took it loses its share of cubes
+    // chassis cubes (no HP of their own): a few chip off near the hit, capped by the bot's overall damage
+    if (!this.chassisN) return;
     const frac = this.bot ? damageFraction(this.bot.state) : 0;
-    const cap = Math.floor(this.n * CHIP.maxRemoved) - this.removed;
+    const cap = Math.floor(this.chassisN * CHIP.maxRemoved) - this.chassisOff;
     if (cap <= 0) return;
-    const allowed = Math.floor(this.n * (CHIP.base + CHIP.perDamage * frac)) - this.removed;
+    const allowed = Math.floor(this.chassisN * (CHIP.base + CHIP.perDamage * frac)) - this.chassisOff;
     const take = Math.min(cap, Math.max(CHIP.minPerHit, allowed));
     const r = this.v * (CHIP.radius + Math.min(CHIP.radiusMax, dmg * CHIP.radiusPerDmg));
     const near: { g: number; d: number }[] = [];
     const inv = new Matrix(), q = new Vector3();
     for (const h of this.holders) {
-      if (!h.mesh.isEnabled()) continue;
+      if (h.socket || !h.mesh.isEnabled()) continue;
       h.mesh.computeWorldMatrix(true);
       h.mesh.getWorldMatrix().invertToRef(inv);
       Vector3.TransformCoordinatesToRef(point, inv, q);
@@ -436,26 +548,140 @@ export class Skin {
   }
 
   /** v0.28 A part reached 0 HP: it falls off for real -- its collider goes (bot.ts dropPart) and its cubes
-   *  fly off together (one push + one spin), breaking up as they tumble. */
+   *  fly off together (one push + one spin). v0.29: each piece of it (a tyre, a skid) flies as a real body for
+   *  PART_FLY.lifeS, carrying its cubes, then breaks up into debris. */
   private killPart(sid: string) {
     if (this.bot) dropPart(this.bot, sid);
     const hs = this.holders.filter(h => h.socket === sid);
-    const list: number[] = [];
-    for (const h of hs) { h.mesh.computeWorldMatrix(); for (const g of h.cubes) if (this.st[g] === 0) list.push(g); }
-    if (!list.length) return;
-    const pts = list.map(g => this.worldOf(g));
-    const C = pts.reduce((a, p) => a.addInPlace(p), new Vector3()).scaleInPlace(1 / pts.length);
-    const out = C.subtract(this.root.getAbsolutePosition()); out.y = 0;
-    if (out.lengthSquared() < 1e-4) out.set(Math.random() - 0.5, 0, Math.random() - 0.5);
-    out.normalize();
-    const v0 = out.scale(rnd(PART_OFF.speed[0], PART_OFF.speed[1])).addInPlace(new Vector3(0, rnd(PART_OFF.up[0], PART_OFF.up[1]), 0));
-    const w = new Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize().scaleInPlace(rnd(PART_OFF.spin[0], PART_OFF.spin[1]));
-    list.forEach((g, i) => {
-      const r = pts[i].subtract(C);
-      const v = v0.add(Vector3.Cross(w, r)).addInPlace(new Vector3(rnd(-1, 1), rnd(-1, 1), rnd(-1, 1)).scaleInPlace(PART_OFF.noise));
-      this.loosen(g, 1, v, w);
+    // pieces: holders whose cubes sit within PART_FLY.cluster of each other fly together
+    const items: { h: Holder; list: number[]; pts: Vector3[]; c: Vector3 }[] = [];
+    for (const h of hs) {
+      h.mesh.computeWorldMatrix(true);
+      const list = h.cubes.filter(g => this.st[g] === 0);
+      if (!list.length) continue;
+      const pts = list.map(g => this.worldOf(g));
+      items.push({ h, list, pts, c: pts.reduce((a, p) => a.addInPlace(p), new Vector3()).scaleInPlace(1 / pts.length) });
+    }
+    if (!items.length) return;
+    const grp = items.map((_, i) => i);
+    const find = (i: number): number => grp[i] === i ? i : (grp[i] = find(grp[i]));
+    for (let i = 0; i < items.length; i++) for (let j = i + 1; j < items.length; j++)
+      if (Vector3.Distance(items[i].c, items[j].c) < PART_FLY.cluster) grp[find(i)] = find(j);
+    const pieces = new Map<number, { list: number[]; pts: Vector3[] }>();
+    items.forEach((it, i) => {
+      const k = find(i);
+      let p = pieces.get(k); if (!p) pieces.set(k, p = { list: [], pts: [] });
+      p.list.push(...it.list); p.pts.push(...it.pts);
     });
+    const vb = this.bot ? this.bot.body.getLinearVelocity().clone() : Vector3.Zero();
+    for (const { list, pts } of pieces.values()) {
+      const C = pts.reduce((a, p) => a.add(p), new Vector3()).scaleInPlace(1 / pts.length);
+      const out = C.subtract(this.root.getAbsolutePosition()); out.y = 0;
+      if (out.lengthSquared() < 1e-4) out.set(Math.random() - 0.5, 0, Math.random() - 0.5);
+      out.normalize();
+      const v0 = out.scale(rnd(PART_OFF.speed[0], PART_OFF.speed[1])).addInPlace(new Vector3(0, rnd(PART_OFF.up[0], PART_OFF.up[1]), 0)).addInPlace(vb);
+      const w = new Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize().scaleInPlace(rnd(PART_OFF.spin[0], PART_OFF.spin[1]));
+      if (this.launch(sid, list, pts, v0, w, pieces.size)) continue;
+      list.forEach((g, i) => {
+        const r = pts[i].subtract(C);
+        const v = v0.add(Vector3.Cross(w, r)).addInPlace(new Vector3(rnd(-1, 1), rnd(-1, 1), rnd(-1, 1)).scaleInPlace(PART_OFF.noise));
+        this.loosen(g, 1, v, w);
+      });
+    }
     this.flash = 0.2;
+  }
+
+  /** v0.29 option 4: one piece of a dead part becomes a real body (a box round its cubes) for PART_FLY.lifeS.
+   *  Its cubes ride it. Returns false when there's no physics (lab) -- the cubes just fly as debris then. */
+  private launch(sid: string, list: number[], pts: Vector3[], v0: Vector3, w: Vector3, pieces: number): boolean {
+    const bot = this.bot;
+    if (!bot || !this.scene.getPhysicsEngine()) return false;
+    const mn = new Vector3(Infinity, Infinity, Infinity), mx = new Vector3(-Infinity, -Infinity, -Infinity);
+    for (const p of pts) { mn.minimizeInPlace(p); mx.maximizeInPlace(p); }
+    const C = mn.add(mx).scaleInPlace(0.5);
+    const ext = mx.subtract(mn).addInPlaceFromFloats(this.v, this.v, this.v);
+    ext.set(Math.max(0.12, ext.x), Math.max(0.12, ext.y), Math.max(0.12, ext.z));
+    const node = new TransformNode(`${this.root.name}_off_${sid}`, this.scene);
+    node.position.copyFrom(C);
+    node.rotationQuaternion = Quaternion.Identity();
+    const shape = new PhysicsShapeBox(Vector3.Zero(), Quaternion.Identity(), ext, this.scene);
+    shape.material = { friction: PART_FLY.friction, restitution: PART_FLY.restitution };
+    const blocked = new Set<'A' | 'B'>(['A', 'B']);                 // passes through both bots until clear of them
+    const f = loosePartFilter([...blocked]);
+    shape.filterMembershipMask = f.member; shape.filterCollideMask = f.collide;
+    const body = new PhysicsBody(node, PhysicsMotionType.DYNAMIC, false, this.scene);
+    body.shape = shape;
+    const ps = bot.state.parts[sid];
+    const kg = ps ? partWeight(ps.part, catalog.balance) * PART_FLY.kgPerWeight / pieces : PART_FLY.minKg;
+    body.setMassProperties({ mass: Math.min(PART_FLY.maxKg, Math.max(PART_FLY.minKg, kg)) });
+    body.setLinearVelocity(v0);
+    body.setAngularVelocity(w);
+    body.setCollisionCallbackEnabled(true);
+    LOOSE.add(body);
+    const off = new Float32Array(list.length * 3), q0 = new Float32Array(list.length * 4);
+    list.forEach((g, i) => {
+      const r = this.holders[this.hOf[g]].mesh.rotationQuaternion!;
+      off[i * 3] = pts[i].x - C.x; off[i * 3 + 1] = pts[i].y - C.y; off[i * 3 + 2] = pts[i].z - C.z;
+      q0[i * 4] = r.x; q0[i * 4 + 1] = r.y; q0[i * 4 + 2] = r.z; q0[i * 4 + 3] = r.w;
+      this.detach(g);
+      this.st[g] = 4;
+    });
+    this.rides.push({ node, body, cubes: list, off, q0, age: 0, blocked, rad: ext.length() / 2 });
+    bot.onPartOff?.(body, sid);
+    return true;
+  }
+
+  /** v0.29 move riding cubes with their flying part; when its time is up they break up into debris. */
+  private ride(dt: number) {
+    if (!this.rides.length) return;
+    const s = this.v * STYLE[this.style].gap, scl = new Vector3(s, s, s);
+    const M = new Matrix(), P = new Vector3(), R = new Quaternion(), o = new Vector3(), w = new Vector3(), q = new Quaternion(), tq = new Quaternion();
+    const keep: Ride[] = [];
+    for (const r of this.rides) {
+      r.age += dt;
+      P.copyFrom(r.node.position);
+      if (r.blocked.size && r.body.shape) {
+        const peers = [...skins.values()].filter(sk => sk.scene === this.scene && sk.bot).map(sk => sk.bot!);
+        let changed = false;
+        for (const id of [...r.blocked]) {
+          if (id === this.bot?.id && r.age < PART_FLY.graceS) continue;
+          const b = peers.find(p => p.id === id);
+          if (b && !b.eliminated && insideReach(b, P, r.rad)) continue;
+          r.blocked.delete(id); changed = true;
+        }
+        if (changed) r.body.shape.filterCollideMask = loosePartFilter([...r.blocked]).collide;
+      }
+      R.copyFrom(r.node.rotationQuaternion ?? Quaternion.Identity());
+      const done = r.age >= PART_FLY.lifeS || P.y < -30;
+      const lin = done ? r.body.getLinearVelocity().clone() : undefined;
+      const ang = done ? r.body.getAngularVelocity().clone() : undefined;
+      r.cubes.forEach((g, i) => {
+        if (this.st[g] !== 4) return;
+        w.set(r.off[i * 3], r.off[i * 3 + 1], r.off[i * 3 + 2]);
+        w.rotateByQuaternionToRef(R, o);
+        o.addInPlace(P);
+        tq.set(r.q0[i * 4], r.q0[i * 4 + 1], r.q0[i * 4 + 2], r.q0[i * 4 + 3]);
+        R.multiplyToRef(tq, q);
+        if (done) {
+          const o3 = g * 3;
+          const v = lin!.add(Vector3.Cross(ang!, o.subtract(P)));
+          this.dp[o3] = o.x; this.dp[o3 + 1] = o.y; this.dp[o3 + 2] = o.z;
+          this.dv[o3] = v.x; this.dv[o3 + 1] = v.y; this.dv[o3 + 2] = v.z;
+          this.dw[o3] = ang!.x; this.dw[o3 + 1] = ang!.y; this.dw[o3 + 2] = ang!.z;
+          this.dq[g * 4] = q.x; this.dq[g * 4 + 1] = q.y; this.dq[g * 4 + 2] = q.z; this.dq[g * 4 + 3] = q.w;
+          this.yaw[g] = Math.random() * Math.PI * 2; this.calm[g] = 0;
+          this.walled[g] = FLOORS.some(f => f.wallH > 0 && Math.abs(o.x - f.cx) < f.half && Math.abs(o.z - f.cz) < f.half) ? 1 : 0;
+          this.st[g] = 1;
+          this.active.push(g);
+        } else {
+          Matrix.ComposeToRef(scl, q, o, M);
+          M.copyToArray(this.dMats, g * 16);
+        }
+      });
+      this.dDirtyM = true;
+      if (done) disposeRide(r); else keep.push(r);
+    }
+    this.rides = keep;
   }
 
   /** KO (v0.28: the whole bot, its collider goes too -- main.ts dropBot) or knocked out of the arena: every cube flies. */
@@ -470,6 +696,18 @@ export class Skin {
   private worldOf(g: number): Vector3 {
     const W = this.holders[this.hOf[g]].mesh.getWorldMatrix();
     return Vector3.TransformCoordinatesFromFloatsToRef(this.lp[g * 3], this.lp[g * 3 + 1], this.lp[g * 3 + 2], W, new Vector3());
+  }
+
+  /** Take one cube off its holder (bookkeeping shared by loosen and launch). */
+  private detach(g: number) {
+    const h = this.holders[this.hOf[g]];
+    const slot = this.slot[g] * 16;
+    for (let k = 0; k < 16; k++) h.mats[slot + k] = 0;
+    h.dirtyM = true;
+    for (let k = 0; k < 3; k++) this.dCols[g * 4 + k] = h.cols[this.slot[g] * 4 + k];
+    this.dDirtyC = true;
+    if (h.socket) this.sockAlive.set(h.socket, (this.sockAlive.get(h.socket) ?? 1) - 1);
+    else this.chassisOff++;
   }
 
   /** Detach one cube: it becomes debris, flying out from the bot (or with the given velocity / spin). */
@@ -490,14 +728,9 @@ export class Skin {
     else { this.dw[g * 3] = rnd(-12, 12); this.dw[g * 3 + 1] = rnd(-12, 12); this.dw[g * 3 + 2] = rnd(-12, 12); }
     this.yaw[g] = Math.random() * Math.PI * 2; this.calm[g] = 0;
     this.walled[g] = FLOORS.some(f => f.wallH > 0 && Math.abs(p.x - f.cx) < f.half && Math.abs(p.z - f.cz) < f.half) ? 1 : 0;
-    const slot = this.slot[g] * 16;
-    for (let k = 0; k < 16; k++) h.mats[slot + k] = 0;
-    h.dirtyM = true;
-    for (let k = 0; k < 3; k++) this.dCols[g * 4 + k] = h.cols[this.slot[g] * 4 + k];
-    this.dDirtyC = true;
+    this.detach(g);
     this.st[g] = 1;
     this.active.push(g);
-    this.removed++;
   }
 
   /** v0.28 bots shove loose cubes (this skin's debris) out of their way; a fast spinner flings what it touches. */
@@ -615,6 +848,24 @@ export class Skin {
   }
 }
 
+/** v0.29 is a ball (centre P, radius rad) within this bot's chassis box (+ KICK margins) or its weapons' reach? */
+function insideReach(b: Bot, P: Vector3, rad: number): boolean {
+  const ch = chassisFor(b.build.bodyId);
+  b.root.computeWorldMatrix(true);
+  const l = Vector3.TransformCoordinates(P, Matrix.Invert(b.root.getWorldMatrix()));
+  if (Math.abs(l.x) < ch.w / 2 + KICK.marginX + rad && Math.abs(l.z) < ch.d / 2 + KICK.marginZ + rad && Math.abs(l.y) < ch.h / 2 + KICK.marginY + rad) return true;
+  const reach = KICK.spinR[b.spinAxis] ?? 0.8;
+  return weaponBodies(b).some(w => Vector3.Distance(w.hub.getAbsolutePosition(), P) < rad + reach);
+}
+
+function disposeRide(r: Ride) {
+  LOOSE.delete(r.body);
+  const shape = r.body.shape;
+  r.body.dispose();
+  shape?.dispose();
+  r.node.dispose();
+}
+
 /** Glow-layer colour: the cubes' colour, brightest channel capped so pale parts don't bloom into a white blob. */
 function glowOf(c: Color3, k: number): Color3 { const m = Math.max(c.r, c.g, c.b, 1e-3); return c.scale(Math.min(k, 0.4 / m)); }
 
@@ -637,9 +888,13 @@ export function skinBot(bot: Bot, shadows?: ShadowGenerator): Skin | null {
   if (!CUBES.on) return null;
   const scene = bot.root.getScene();
   const tyres = new Set<Node>((bot.wheels ?? []).map(w => w.tyre));
+  const weaponHubs = new Set<Node>(weaponBodies(bot).map(w => w.hub));   // v0.29: moving weapon pieces (spinner, arm, saw, plates, forks) live on their own bodies
   const socketOf = (m: AbstractMesh) => {
     for (let n: Node | null = m; n; n = n.parent) if (tyres.has(n)) return 'wheels';
-    return socketByAncestry(m, bot.partMeshes);
+    const s = socketByAncestry(m, bot.partMeshes);
+    if (s) return s;
+    for (let n: Node | null = m; n; n = n.parent) if (weaponHubs.has(n)) return 'weapon';
+    return null;
   };
   const sk = new Skin(scene, bot.root, botMeshes(bot), bot.build.cosmetics.paint ?? (bot.id === 'A' ? '#e63946' : '#1d7cf2'), socketOf, shadows);
   sk.bot = bot;
