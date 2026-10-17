@@ -50,6 +50,11 @@ export function isProtected(state: BotState, ps: PartState): boolean {
   return !state.breakableWeapons && PROTECTED.includes(ps.socketType);
 }
 
+/** v0.31 per-hit rules: one hit can't take more than maxDealt, and a bot that is already immobilized takes
+ *  immobilizedMult x damage (immobilization still decides nothing by itself). Core default: off (no cap, x1);
+ *  the game client sets its values (client/src/combat.ts). */
+export const HIT = { maxDealt: Infinity, immobilizedMult: 1 };
+
 /**
  * Apply raw damage to a part. Armor on that part reduces the hit (min 1 if any
  * damage was dealt). Returns actual HP lost. Engines decide WHICH socket is hit.
@@ -57,7 +62,9 @@ export function isProtected(state: BotState, ps: PartState): boolean {
 export function applyDamage(state: BotState, socketId: string, rawDamage: number): number {
   const ps = state.parts[socketId];
   if (!ps || ps.hp <= 0 || rawDamage <= 0) return 0;
-  const dealt = Math.max(1, rawDamage - socketArmor(ps));
+  let dealt = Math.max(1, rawDamage - socketArmor(ps));
+  if (isImmobilized(state)) dealt = Math.round(dealt * HIT.immobilizedMult);   // v0.31
+  dealt = Math.min(dealt, HIT.maxDealt);                                         // v0.31
   if (isProtected(state, ps)) {
     // v0.17 unbreakable: HP stops at 1 (part keeps working); the full hit still counts as damage taken
     ps.hp -= Math.min(ps.hp - 1, dealt);

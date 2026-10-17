@@ -39,7 +39,7 @@ import { isProtected, type BotState } from '../../src/core/state.js';
 import { partWeight } from '../../src/core/weight.js';
 
 // ---------------- settings (lab deploy bar, remembered in this browser) ----------------
-export type CubeStyle = 'glow' | 'block' | 'energy';
+export type CubeStyle = 'glow' | 'block' | 'energy' | 'neonEnergy';
 export type CubeSize = 'big' | 'mid' | 'small';
 export const CUBES = { on: true, style: 'glow' as CubeStyle, size: 'big' as CubeSize };   // v0.30 defaults: Cube Bots, Pixel Glow, 8-bit
 const SETTINGS_KEY = 'bb.cubes.v1';
@@ -48,11 +48,24 @@ export function saveCubes() { try { localStorage.setItem(SETTINGS_KEY, JSON.stri
 
 /** Cube edge, m. Bots are ~1.4 m wide: mid = ~18 cubes across. */
 export const CUBE_SIZE: Record<CubeSize, number> = { big: 0.12, mid: 0.08, small: 0.055 };
-/** emissive = self-lit amount (Pixel Glow), spec = shine, gap = cube size / cell (seams), glow = glow-layer halo. */
-const STYLE: Record<CubeStyle, { emissive: number; spec: number; gap: number; glow: number }> = {
-  glow:   { emissive: 0.5,  spec: 0.15, gap: 0.9,  glow: 0.5 },
-  block:  { emissive: 0.07, spec: 0.35, gap: 0.97, glow: 0 },
-  energy: { emissive: 0.18, spec: 0.6,  gap: 0.93, glow: 0.4 },
+/** emissive = self-lit amount (Pixel Glow), spec = shine, gap = cube size / cell (seams), glow = glow-layer halo,
+ *  neon = full-saturation neon palette instead of the armoured one (v0.31). */
+const STYLE: Record<CubeStyle, { emissive: number; spec: number; gap: number; glow: number; neon: boolean }> = {
+  glow:       { emissive: 0.5,  spec: 0.6,  gap: 0.9,  glow: 0.5,  neon: true },    // v0.31 Energy-style shine, no animation
+  block:      { emissive: 0.07, spec: 0.35, gap: 0.97, glow: 0,    neon: false },
+  energy:     { emissive: 0.18, spec: 0.6,  gap: 0.93, glow: 0.4,  neon: false },
+  neonEnergy: { emissive: 0.45, spec: 0.6,  gap: 0.92, glow: 0.45, neon: true },    // v0.31 combo: neon colours + gentle Energy bands
+};
+/** v0.31 cube palettes per part role. Armoured = weathered industrial; neon = same roles, lit up. */
+type Pal = { paint: (h: number, s: number, v: number) => Color3; dark: Color3; darkMix: number; steel: string; rubber: string; chrome: string;
+  can: string; core: string; wear: number; rust: number; scorch: number; scratch: number; scratchCol: string };
+const PAL: Record<'armor' | 'neon', Pal> = {
+  armor: { paint: (h, s, v) => hsv(h, s * 0.72, Math.min(1, v) * 0.62), dark: Color3.FromHexString('#2b2e33'), darkMix: 0.85,
+    steel: '#8c9198', rubber: '#1d1d1f', chrome: '#9ba3aa', can: '#a8683a', core: '#ff6a1a',
+    wear: 0.32, rust: 0.045, scorch: 0.035, scratch: 0.04, scratchCol: '#c8ccd1' },
+  neon:  { paint: (h, s) => hsv(h, Math.max(s, 0.88), 1), dark: Color3.FromHexString('#141826'), darkMix: 0.6,
+    steel: '#9ec2f2', rubber: '#24202e', chrome: '#b6c6da', can: '#ff8a2e', core: '#ff4a10',
+    wear: 0.2, rust: 0, scorch: 0.05, scratch: 0.05, scratchCol: '#e2eeff' },
 };
 const KEEP_DEPTH = 3;
 const CHIP = {
@@ -127,14 +140,14 @@ function seamTexture(scene: Scene): DynamicTexture {
 }
 
 /** Colour a source mesh's cubes from its material (v0.16 material set names, see look.ts botMaterials). */
-function roleColor(m: AbstractMesh, paint: Color3, accent: Color3): Color3 {
+function roleColor(m: AbstractMesh, paint: Color3, accent: Color3, P: Pal): Color3 {
   const mat = m.material as (StandardMaterial & { albedoColor?: Color3 }) | null;
   const n = mat?.name ?? '';
   if (n.startsWith('paint')) return paint.clone();
-  if (n.startsWith('dark')) return Color3.Lerp(paint, Color3.FromHexString('#2c3348'), 0.75);
-  if (n.startsWith('steel')) return Color3.FromHexString('#ffc23a');   // weapons, wedges, forks: arcade gold (white blew out under the glow)
-  if (n.startsWith('rubber')) return Color3.FromHexString('#2b2836');
-  if (n.startsWith('chrome')) return Color3.FromHexString('#c9d6e6');
+  if (n.startsWith('dark')) return Color3.Lerp(paint, P.dark, P.darkMix);   // v0.31 frame: gunmetal / dark neon
+  if (n.startsWith('steel')) return Color3.FromHexString(P.steel);         // weapons, wedges, forks: steel
+  if (n.startsWith('rubber')) return Color3.FromHexString(P.rubber);
+  if (n.startsWith('chrome')) return Color3.FromHexString(P.chrome);
   if (n.startsWith('can')) return accent.clone();
   if (mat?.albedoColor) return mat.albedoColor.clone();
   if (mat?.diffuseColor) return mat.diffuseColor.clone();
@@ -260,24 +273,27 @@ export class Skin {
     this.v = CUBE_SIZE[CUBES.size] ?? 0.08;
     this.style = CUBES.style in STYLE ? CUBES.style : 'glow';
     const st = STYLE[this.style], v = this.v;
-    const paint = Color3.FromHexString(paintHex);
-    const hsvP = paint.toHSV();
-    const accent = hsv(hsvP.r + 180, 0.8, 0.95);
-    const coreCol = hsv(hsvP.r + 140, 0.85, 1).scale(1.25);
+    // v0.31 armoured / weathered palette: team hue kept, paint darker and less saturated (industrial paint)
+    const hsvP = Color3.FromHexString(paintHex).toHSV();
+    const P = PAL[st.neon ? 'neon' : 'armor'];
+    const paint = P.paint(hsvP.r, hsvP.g, hsvP.b);
+    const accent = Color3.FromHexString(P.can);                       // motor cans: copper / brass
+    const coreCol = Color3.FromHexString(P.core).scale(1.15);         // inner core: hot molten metal under the armour
+    const RUST = Color3.FromHexString('#5e3a24'), SCORCH = Color3.FromHexString('#232120'), SCRATCH = Color3.FromHexString(P.scratchCol);
 
     root.computeWorldMatrix(true);
     const rootW = root.getWorldMatrix().clone();
     const toLocal = Matrix.Invert(rootW);
 
     // 1. cells per source mesh
-    const srcs: { m: AbstractMesh; keys: number[]; vol: number; col: Color3 }[] = [];
+    const srcs: { m: AbstractMesh; keys: number[]; vol: number; col: Color3; role: string }[] = [];
     for (const m of meshes) {
       if (!(m instanceof Mesh) || !m.isEnabled() || !m.isVisible || m.visibility < 0.01 || m.getTotalVertices() === 0) continue;
       if (SKIP_NAMES.some(s => m.name.includes(s))) continue;
       m.isVisible = false;                                            // the cubes take over
       if ((m.material?.name ?? '').startsWith('bolt')) continue;       // fasteners: far smaller than a cube
       const vx = voxelize(m, toLocal, v);
-      if (vx.keys.length) srcs.push({ m, keys: vx.keys, vol: vx.vol, col: roleColor(m, paint, accent) });
+      if (vx.keys.length) srcs.push({ m, keys: vx.keys, vol: vx.vol, col: roleColor(m, paint, accent, P), role: m.material?.name ?? '' });
     }
     // 2. each cell belongs to one mesh: smaller meshes first (armour over chassis, tyre over wheel well, rails over edges)
     const owner = new Map<number, number>();
@@ -327,7 +343,14 @@ export class Skin {
       keys.forEach((key, slot) => {
         const x = KI(key) * v, y = KJ(key) * v, z = KK(key) * v;
         const isCore = depth.get(key)! >= 2;
-        const c = isCore ? coreCol : src.col, j = isCore ? 1 : 0.86 + Math.random() * 0.28;
+        // v0.31 wear: brightness mostly drops (grime); some paint cubes rust / scorch, some steel cubes scratched bright
+        let c = isCore ? coreCol : src.col;
+        const j = isCore ? 1 : 1.02 - Math.pow(Math.random(), 1.5) * P.wear;
+        if (!isCore) {
+          const r = Math.random();
+          if (src.role.startsWith('paint') && r < P.rust + P.scorch) c = r < P.rust ? RUST : SCORCH;
+          else if (src.role.startsWith('steel') && r < P.scratch) c = SCRATCH;
+        }
         this.hOf[g] = this.holders.length; this.slot[g] = slot;
         this.lp[g * 3] = x; this.lp[g * 3 + 1] = y; this.lp[g * 3 + 2] = z;
         this.base[g * 3] = c.r * j; this.base[g * 3 + 1] = c.g * j; this.base[g * 3 + 2] = c.b * j;
@@ -420,7 +443,7 @@ export class Skin {
     this.flash -= dt;
     this.mat.emissiveColor.set(e, e, e);
     // energy style: bright bands sweep through the cubes; cores pulse
-    if (this.style === 'energy') {
+    if (this.style === 'energy' || this.style === 'neonEnergy') {
       for (const h of this.holders) {
         for (let slot = 0; slot < h.cubes.length; slot++) {
           const g = h.cubes[slot];
@@ -448,9 +471,10 @@ export class Skin {
   }
 
   private shimmer(g: number): number {
-    if (this.core[g]) return 0.85 + 0.3 * Math.sin(this.t * 6 + this.phase[g]);
+    const soft = this.style === 'neonEnergy';                          // v0.31 combo: full neon base, gentler bands
+    if (this.core[g]) return soft ? 0.9 + 0.2 * Math.sin(this.t * 6 + this.phase[g]) : 0.85 + 0.3 * Math.sin(this.t * 6 + this.phase[g]);
     const b = Math.pow(0.5 + 0.5 * Math.sin(this.t * 5 - this.phase[g]), 10);
-    return 0.25 + 2.2 * b;
+    return soft ? 0.85 + 0.9 * b : 0.25 + 2.2 * b;
   }
 
   // ---------------- damage ----------------

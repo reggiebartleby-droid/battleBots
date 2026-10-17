@@ -4,7 +4,7 @@
     "weapon_motor": 8,
     "front": 5,
     "armor": 5,
-    "wheels": 10,
+    "wheels": 0,
     "motor": 10,
     "secondary": 8
   },

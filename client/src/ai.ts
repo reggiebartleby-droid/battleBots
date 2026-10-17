@@ -71,7 +71,9 @@ export function aiDrive(self: Bot, target: Bot, arenaHalf: number, dt: number, d
     case 'strike':
     case 'flipper': {
       const onPlate = self.hinges?.some(h => h.touched) ?? false;   // v0.12: they're on the plate right now
-      fire = w.phase === 'ready' && w.refill <= 0 && (onPlate || (dist < 1.9 && facing > 0.9)) && Math.random() >= D.whiff;
+      // v0.31: swing / fire from further out (the AI hammer only swung ~1.7 times a match)
+      const win = w.mode === 'strike' ? { dist: 3.0, facing: 0.7 } : { dist: 2.4, facing: 0.8 };
+      fire = w.phase === 'ready' && w.refill <= 0 && (onPlate || (dist < win.dist && facing > win.facing)) && Math.random() >= D.whiff;
       break;
     }
     case 'hold': fire = dist < 2.2 && facing > 0.8; break;

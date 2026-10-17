@@ -24,6 +24,8 @@ import { aiDrive, type Difficulty } from './ai.js';
 const MATCH_SECONDS = 180;
 /** v0.21: the drive is real wheels now -- see DRIVE / driveWheels in bot.ts. */
 const PHYS_STEP = 1 / 60;
+/** v0.31: spinner motor torque x this during the 3-2-1 (spin-up is sized for 3 s; the countdown is 2.7 s). */
+const PRESPIN_BOOST = 1.5;
 /** v0.21 physics sub-steps: each frame's physics runs in fixed 1/240 s steps. The real wheels hang the chassis'
  *  weight on axle joints; at one 1/60 s step per frame Havok let them sag 5-13 cm (headless), at 1/240 they hold. */
 const SUB_STEP_MS = 1000 / 240;
@@ -120,13 +122,16 @@ async function main() {
   // runs a 3-2-1-FIGHT! countdown, then the match. R comes back here. Nothing drives and the clock waits until FIGHT.
   let phase: 'ready' | 'countdown' | 'fight' = 'ready';
   let countdownAt = 0;                                       // performance.now() when the countdown began
+  let readySeen = false;                                     // v0.31: the card shows before the first battle only (I brings it back)
+  let rWas = false;                                          // v0.31: R restarts on the press, not every frame it's held
   const COUNT_MS = 900;                                      // per number (3, 2, 1), then FIGHT!
   const rd = {
     box: document.getElementById('ready')!, title: document.getElementById('rd-title')!,
     table: document.getElementById('rd-table')!, start: document.getElementById('rd-start') as HTMLButtonElement,
-    count: document.getElementById('countdown')!,
+    count: document.getElementById('countdown')!, small: document.getElementById('rd-small')!,
   };
-  const showReady = () => {
+  /** info = true: opened with I during a countdown / fight (no START button, the match keeps going). */
+  const showReady = (info = false) => {
     const [a, b] = bots;
     rd.title.innerHTML = `<span style="color:${a.build.cosmetics.paint}">${a.build.cosmetics.name}</span><span class="vs">VS</span>`
       + `<span style="color:${b.build.cosmetics.paint}">${b.build.cosmetics.name}</span>`;
@@ -135,16 +140,23 @@ async function main() {
       ['WEAPON', a.weapon.hint('SPACE')],
       ['CAMERA', 'Q changes the view · drag to look around · mouse wheel zooms'],
       ['TO WIN', 'Destroy the other bot, or knock it out of the arena. At 3:00, whoever took less damage wins.'],
-      ['KEYS', 'R: restart · B: lab · V: move the scoreboards · H: part details'],
+      ['KEYS', 'R: restart · B: lab · V: move the scoreboards · H: part details · I: show this card again'],
     ];
     if (p2Human) rows.splice(2, 0, ['PLAYER 2', `Arrows + Right SHIFT — ${b.weapon.hint('Right SHIFT')}`]);
     rd.table.innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+    rd.start.style.display = info ? 'none' : '';
+    rd.small.textContent = info ? 'I: close' : 'Enter or click START · B: back to the lab';
     rd.box.classList.add('on');
   };
   const beginCountdown = () => {
     if (phase !== 'ready' || !bots.length || builder.visible || mode !== 'match') return;
-    phase = 'countdown'; countdownAt = performance.now();
+    goCountdown();
+  };
+  /** v0.31: 3-2-1 starts; spinners switch on with the "3" so they're at top speed by FIGHT! */
+  const goCountdown = () => {
+    phase = 'countdown'; countdownAt = performance.now(); readySeen = true;
     rd.box.classList.remove('on');
+    for (const b of bots) if (b.weapon.mode === 'spinner' && !b.weapon.motorDead) b.weapon.spinning = true;
     canvas.focus();
   };
   rd.start.addEventListener('click', beginCountdown);
@@ -174,7 +186,8 @@ async function main() {
     timeLeft = MATCH_SECONDS; over = false; camFocus = null;
     hud.hideWinner();
     phase = 'ready'; rd.count.className = '';
-    showReady();                                       // v0.30 start screen (was a 6 s controls popup)
+    if (!readySeen) showReady();                       // v0.30 start screen; v0.31: first battle only, after that straight to 3-2-1
+    else goCountdown();
     canvas.focus();
   };
 
@@ -317,6 +330,10 @@ async function main() {
     if (mode === 'course') { courseCombat?.beforePhysics(); course.beforePhysics(); } else combat?.beforePhysics();
     const stepDt = SUB_STEP_MS / 1000;   // v0.21: observers run once per physics sub-step
     for (const b of bots) if (!b.eliminated) { applyGyro(b, stepDt); armBefore(b); applyMagnets(b, stepDt); hingesBefore(b); wheelsBefore(b, stepDt); }   // v0.8 gyro; v0.11 arm + magnets; v0.12 hinges; v0.21 drive motors
+    // v0.31 countdown: the weapons spin up but the bots stay where they were put (a spinning-up shell would turn its chassis)
+    if (mode === 'match' && phase === 'countdown') for (const b of bots) if (!b.eliminated) {
+      const w = b.body.getAngularVelocity(); b.body.setAngularVelocity(new Vector3(w.x, 0, w.z));
+    }
   });
   scene.onAfterPhysicsObservable.add(() => {
     const stepDt = SUB_STEP_MS / 1000;
@@ -335,6 +352,9 @@ async function main() {
       if (e.code === 'KeyC' && !cm.menu.classList.contains('on')) showCourseMenu();
       return;
     }
+    if (e.code === 'KeyI' && !e.repeat && mode === 'match' && !builder.visible && bots.length && phase !== 'ready') {   // v0.31
+      if (rd.box.classList.contains('on')) rd.box.classList.remove('on'); else showReady(true);
+    }
     if (e.code === 'KeyV') hud.cycleView();
     else if (e.code === 'KeyH') hud.toggleDetails();
   });
@@ -347,7 +367,8 @@ async function main() {
       courseFrame(dt, performance.now());
       return;
     }
-    if (isDown('KeyR')) { if (phase !== 'ready') start(); return; }   // v0.30: back to the start screen
+    const rNow = isDown('KeyR'), rPress = rNow && !rWas; rWas = rNow;
+    if (rNow) { if (rPress && phase !== 'ready') start(); return; }   // v0.30 restart; v0.31: once per press (no card after the first battle)
     if (isDown('KeyB')) { openLab(); return; }
     // T: player 2 on the arrows instead of the AI (test aid, not advertised)
     if (isDown('KeyT') && performance.now() - lastToggle > 400) {
@@ -355,7 +376,7 @@ async function main() {
       hud.sign(p2Human ? 'PLAYER 2: ARROWS + RIGHT SHIFT' : 'PLAYER 2: AI', 1200);
       if (phase === 'ready') showReady();
     }
-    helpEl.innerHTML = `WASD drive &nbsp;·&nbsp; SPACE weapon &nbsp;·&nbsp; Q camera &nbsp;·&nbsp; R restart &nbsp;·&nbsp; B lab`;
+    helpEl.innerHTML = `WASD drive &nbsp;·&nbsp; SPACE weapon &nbsp;·&nbsp; Q camera &nbsp;·&nbsp; R restart &nbsp;·&nbsp; B lab &nbsp;·&nbsp; I controls`;
 
     const now = performance.now();
     // v0.30 start screen + countdown: bots sit still, weapons off, clock waits
@@ -370,7 +391,7 @@ async function main() {
         : b.id === 'A' || p2Human
         ? readDrive(b.id)
         : (over ? { throttle: 0, turn: 0, fire: false } : aiDrive(b, bots[0], arena.half, dt, difficulty));
-      runBot(b, d, dt, now, over || waiting, false);
+      runBot(b, d, dt, now, over || waiting, false, phase === 'countdown');
     }
 
     // Camera follows the midpoint of the bots still in play (+ hit shake) — unless a bot has gone
@@ -422,7 +443,8 @@ async function main() {
 
   /** Drive + weapons for one bot this frame (match and test course). stopped = match over / run finished;
    *  inert = the course dummy (no self-right). */
-  function runBot(b: Bot, d: Drive, dt: number, now: number, stopped: boolean, inert: boolean) {
+  /** preSpin (v0.31): countdown -- spinners / the arm saw run up (with extra torque) while nothing else moves. */
+  function runBot(b: Bot, d: Drive, dt: number, now: number, stopped: boolean, inert: boolean, preSpin = false) {
     const over = stopped;
 
     // Upside down? -- helpless until the self-right fires (the course dummy just lies there)
@@ -437,7 +459,7 @@ async function main() {
     if (b.spinner) {
       const motorAlive = (b.state.parts['weapon_motor']?.hp ?? 0) > 0;
       b.weapon.motorDead = !motorAlive;
-      driveSpinner(b, b.weapon.spinning && !b.weapon.suppressed && canAttack(b.state), motorAlive);
+      driveSpinner(b, b.weapon.spinning && !b.weapon.suppressed && canAttack(b.state), motorAlive, b.spinner, preSpin ? PRESPIN_BOOST : 1);
       b.weapon.spinLevel = Math.min(1, Math.max(0, spinOmega(b) / b.spinner.omegaMax));
     }
     // v0.10 real overhead arm: tap = swing, hold = pin; the saw on the arm spins whenever it can
@@ -447,7 +469,7 @@ async function main() {
       b.weapon.motorDead = !motorAlive;
       driveArm(b, b.weapon.fireHeld, b.weapon.pressed, usable, motorAlive, dt);
       b.weapon.armState = b.arm.state;
-      if (b.saw) driveSpinner(b, usable && !over, motorAlive, b.saw);
+      if (b.saw) driveSpinner(b, usable && (!over || preSpin), motorAlive, b.saw, preSpin ? PRESPIN_BOOST : 1);
     }
 
     // v0.12 real flipper: tap = fire (upside down = self-right shot into the floor)

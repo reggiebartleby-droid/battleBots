@@ -1262,12 +1262,12 @@ export function spinOmega(bot: Bot): number { return bot.spinner ? omegaOf(bot.s
 export function spinEnergy(bot: Bot): number { return bot.spinner ? energyOf(bot.spinner) : 0; }
 
 /** Per frame: point the weapon motor at full speed (on), braking (off) or bearing drag only (motor dead). */
-export function driveSpinner(bot: Bot, on: boolean, motorAlive: boolean, s: RealSpinner | undefined = bot.spinner) {
+export function driveSpinner(bot: Bot, on: boolean, motorAlive: boolean, s: RealSpinner | undefined = bot.spinner, boost = 1) {
   if (!s) return;
   const A = PhysicsConstraintAxis.ANGULAR_X;
   if (on && motorAlive) {
     s.joint.setAxisMotorTarget(A, s.dir * s.omegaMax);
-    s.joint.setAxisMotorMaxForce(A, s.torque);
+    s.joint.setAxisMotorMaxForce(A, s.torque * boost);   // v0.31: boost > 1 during the countdown (top speed by FIGHT!)
   } else {
     s.joint.setAxisMotorTarget(A, 0);
     s.joint.setAxisMotorMaxForce(A, s.torque * (motorAlive ? SPINNER.brake : SPINNER.bearing));
@@ -1525,7 +1525,8 @@ export const FBS = {
 };
 
 export const H_SPIN = {
-  h_bar:       { len: 1.6, thick: 0.08, width: 0.2, y: 0.05, z: CHASSIS.d / 2 + 0.1 },
+  h_bar:       { len: 1.2,   // v0.31 tester balance (was 1.6: the long bar kept everyone away)
+                thick: 0.08, width: 0.2, y: 0.05, z: CHASSIS.d / 2 + 0.1 },
   h_disc:      { d: 1.0, thick: 0.08, y: 0.05, z: CHASSIS.d / 2 + 0.1 },
   // 1.4 m: at 8 cm the blade passes under a chassis (12.5 cm clearance), so it has to reach the wheels.
   // Headless: 1.2 m whiffed vs Hammer Time; 1.4 m hits every preset and stores ~ the bar's energy.

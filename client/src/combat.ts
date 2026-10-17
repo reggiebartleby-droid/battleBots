@@ -42,7 +42,7 @@
  *    takes a little damage (PART_HIT), credited to whoever knocked the part off
  */
 import { Vector3, type IPhysicsCollisionEvent, PhysicsEventType } from '@babylonjs/core';
-import { applyDamage, canAttack, isProtected } from '../../src/core/state.js';
+import { applyDamage, canAttack, isProtected, HIT } from '../../src/core/state.js';
 import { cubeSkinOf, isLooseBody } from './cubes.js';
 import { forward, spinEnergy, armEnergy, energyOf, weaponBodies, chassisBodies, isChassis, CONTROL, type Bot } from './bot.js';
 import type { PhysicsBody } from '@babylonjs/core';
@@ -60,6 +60,12 @@ export const SPIN_DMG = {
   maxHitMs: 200,         // a continuous grind is reported as separate hits this often
   minDmg: 1,             // below this the contact is silent (grinding / glancing touch)
 };
+
+/** v0.31 temporary tester balance (sandbox AI-vs-AI sims on Normal): weapon damage x this, by weapon kind.
+ *  Spinners down, hammer / flipper / lifter up. Kinds not listed: x1. */
+// v0.31 temporary tester balance: one hit does at most 15 (no one-shot FINISH HIM); a bot showing FINISH HIM takes x2
+Object.assign(HIT, { maxDealt: 15, immobilizedMult: 2 });
+export const DMG_SCALE: Record<string, number> = { h_bar: 0.35, disc: 0.7, shell: 0.6, hammer: 2.5, pneumatic_flipper: 5, lifter: 3 };
 
 /** v0.12 hinged weapons: energy given to the opponent while touching. */
 export const HINGE_DMG = {
@@ -275,7 +281,7 @@ export class Combat {
   }
 
   private spinHit(attacker: Bot, defender: Bot, c: SpinContact) {
-    const raw = canAttack(attacker.state) ? Math.round(c.lost / (c.jPerDmg ?? SPIN_DMG.joulesPerDmg)) : 0;
+    const raw = canAttack(attacker.state) ? Math.round(c.lost / (c.jPerDmg ?? SPIN_DMG.joulesPerDmg) * (DMG_SCALE[attacker.weaponKind ?? ''] ?? 1)) : 0;   // v0.31 DMG_SCALE
     if (raw < SPIN_DMG.minDmg) return;
     const alive = (id: string) => (defender.state.parts[id]?.hp ?? 0) > 0;
     // crusher pierces the top: top armor, then the insides (weapon motor, drive motor)
@@ -301,7 +307,7 @@ export class Combat {
     const st = defender.state;
     return sk.target(point, sid => {
       const ps = st.parts[sid];
-      return !!ps && ps.hp > 0 && !(isProtected(st, ps) && ps.hp <= 1);
+      return !!ps && ps.hp > 0 && !isProtected(st, ps);   // v0.31: hits go straight past unbreakable weapons (they were free armour)
     });
   }
 
