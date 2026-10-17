@@ -4,6 +4,7 @@
  */
 import { Camera, Color3, Matrix, Mesh, MeshBuilder, Scene, StandardMaterial, Vector3 } from '@babylonjs/core';
 import { botMeshes, type Bot } from './bot.js';
+import { cubeHit, cubeKnockout } from './cubes.js';
 
 interface Spark { m: Mesh; v: Vector3; life: number; max: number }
 interface Label { el: HTMLElement; pos: Vector3; life: number; max: number }
@@ -52,6 +53,7 @@ export class Fx {
     this.spawnSparks(point, 12, this.sparkMat, 4);
     this.label(`-${dmg}`, point.add(new Vector3(0, 0.6, 0)), attackerColor, 'dmg');
     this.flash(defender);
+    cubeHit(defender, point, dmg);   // v0.27 Cube Bots look: knock cubes loose (no-op otherwise)
     this.shake = Math.min(0.35, this.shake + 0.08 + dmg * 0.004);
   }
 
@@ -73,6 +75,7 @@ export class Fx {
     this.spawnSparks(at, EXPLODE.sparks / 3, this.sparkMat, EXPLODE.sparkSpeed * 0.7, 1.2);
     this.label('OUT!', at.add(new Vector3(0, 1.2, 0)), '#ff4d4d', 'dmg');
     this.shake = Math.max(this.shake, EXPLODE.shake);
+    cubeKnockout(bot);                // v0.27 Cube Bots look: every cube flies (the cubed meshes are hidden, so their clones below are too)
     for (const src of botMeshes(bot)) {
       if (!(src instanceof Mesh) || src.visibility < 0.01) continue;
       const m = src.clone(`debris_${src.name}`, src.parent as Mesh | null, true, false);   // no children, NO physics body

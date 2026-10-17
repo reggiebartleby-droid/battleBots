@@ -8,6 +8,7 @@ import { validateBuild } from '../../src/core/validate.js';
 import { partWeight } from '../../src/core/weight.js';
 import { DIFFICULTY, type Difficulty } from './ai.js';
 import { SHELL_AIDS, saveShellAids } from './bot.js';
+import { CUBES, saveCubes, type CubeSize, type CubeStyle } from './cubes.js';
 
 const STORAGE_KEY = 'battlebots.builder.v1';
 
@@ -115,6 +116,10 @@ export class Builder {
     shellAids: document.getElementById('bb-shellaids')!,                // v0.25 shell spinner nose aids
     cap: document.getElementById('bb-cap') as HTMLInputElement,
     arrow: document.getElementById('bb-arrow') as HTMLInputElement,
+    look: document.getElementById('bb-look') as HTMLSelectElement,             // v0.27 Cube Bots look
+    cubeOpts: document.getElementById('bb-cubeopts')!,
+    cubeStyle: document.getElementById('bb-cubestyle') as HTMLSelectElement,
+    cubeSize: document.getElementById('bb-cubesize') as HTMLSelectElement,
   };
   private onChange: (b: BotBuild) => void = () => {};
   private onDeploy: (a: DeployArgs) => void = () => {};
@@ -152,6 +157,15 @@ export class Builder {
     this.el.cap.checked = SHELL_AIDS.cap; this.el.arrow.checked = SHELL_AIDS.arrow;
     this.el.cap.onchange = () => { SHELL_AIDS.cap = this.el.cap.checked; saveShellAids(); this.changed(); };
     this.el.arrow.onchange = () => { SHELL_AIDS.arrow = this.el.arrow.checked; saveShellAids(); this.changed(); };
+
+    // v0.27 Cube Bots look (remembered in this browser; applies to both bots)
+    const showCubeOpts = () => { this.el.cubeOpts.style.display = CUBES.on ? 'flex' : 'none'; };
+    this.el.look.value = CUBES.on ? 'cubes' : 'worn';
+    this.el.cubeStyle.value = CUBES.style; this.el.cubeSize.value = CUBES.size;
+    showCubeOpts();
+    this.el.look.onchange = () => { CUBES.on = this.el.look.value === 'cubes'; saveCubes(); showCubeOpts(); this.changed(); };
+    this.el.cubeStyle.onchange = () => { CUBES.style = this.el.cubeStyle.value as CubeStyle; saveCubes(); this.changed(); };
+    this.el.cubeSize.onchange = () => { CUBES.size = this.el.cubeSize.value as CubeSize; saveCubes(); this.changed(); };
 
     this.el.name.oninput = () => { this.build.cosmetics.name = this.el.name.value.toUpperCase(); this.changed(); };
     this.el.paint.oninput = () => { this.build.cosmetics.paint = this.el.paint.value; this.changed(); };

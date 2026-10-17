@@ -78,7 +78,9 @@ export function buildArena(scene: Scene) {
   // glow behind it instead of being washed over by it. The see-through floor/walls are left out entirely.
   const neonMeshes = new Set<Mesh>();
   glow.customEmissiveColorSelector = (mesh, _sub, mat, out) => {
+    const cube = (mesh.metadata as { cubeGlow?: Color3 } | null)?.cubeGlow;   // v0.27 Cube Bots look
     if (neonMeshes.has(mesh as Mesh)) { const e = (mat as StandardMaterial).emissiveColor; out.set(e.r, e.g, e.b, 1); }
+    else if (cube) out.set(cube.r, cube.g, cube.b, 1);
     else out.set(0, 0, 0, 1);
   };
   for (const m of scene.meshes) if (m.name === 'floor' || m.name.startsWith('wall')) glow.addExcludedMesh(m as Mesh);

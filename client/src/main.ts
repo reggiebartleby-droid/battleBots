@@ -5,17 +5,18 @@ import HavokPhysics from '@babylonjs/havok';
 import type { BotBuild } from '../../src/core/types.js';
 import { canAttack, isDestroyed } from '../../src/core/state.js';
 import { catalog } from './catalog.js';
-import { buildArena, WALL_H, ARENA_COLOURS, FLOOR_GRIDS, type ArenaStyle } from './arena.js';
-import { buildBot, forward, upVector, driveSpinner, spinOmega, applyGyro, disposeBot, freezeBot, snapSpinner, driveArm, armBefore, armAfter, applyMagnets, driveFlipper, driveControl, hingesBefore, driveWheels, wheelsBefore, carryWheels, botMeshes, DRIVE, type Bot } from './bot.js';
+import { buildArena, WALL_H, ARENA_SIZE, ARENA_COLOURS, FLOOR_GRIDS, type ArenaStyle } from './arena.js';
+import { buildBot, forward, upVector, driveSpinner, spinOmega, applyGyro, disposeBot, freezeBot, snapSpinner, driveArm, armBefore, armAfter, applyMagnets, driveFlipper, driveControl, hingesBefore, driveWheels, wheelsBefore, carryWheels, botMeshes, dropBot, DRIVE, type Bot } from './bot.js';
 import { applyEnvironment, castShadows, makeShadows } from './look.js';
 import { readDrive, isDown, KEYS, type Drive } from './input.js';
 import { Combat } from './combat.js';
 import { Hud } from './hud.js';
 import { Fx } from './fx.js';
 import { Lab } from './lab.js';
+import { skinBot, cubeKnockout, cubeSkinOf, setDebrisFloors } from './cubes.js';
 import { CamControl } from './cam.js';
 import { Builder, PRESETS } from './builder.js';
-import { Course, STATIONS, COURSE_ORIGIN, type StationId, type RunResult } from './course.js';
+import { Course, STATIONS, COURSE_ORIGIN, COURSE, type StationId, type RunResult } from './course.js';
 import { aiDrive, type Difficulty } from './ai.js';
 
 const MATCH_SECONDS = 180;
@@ -82,6 +83,8 @@ async function main() {
   const course = new Course(scene);                  // v0.23 test course (own floor, far from the arena)
   const SUN_OFFSET = sun.position.clone();
   const fx = new Fx(scene, document.getElementById('fxlayer')!);
+  // v0.27 loose cubes land on the arena floor (walls bounce them) and on the test course floor
+  setDebrisFloors([{ cx: 0, cz: 0, half: ARENA_SIZE / 2, wallH: WALL_H }, { cx: COURSE_ORIGIN.x, cz: COURSE_ORIGIN.z, half: COURSE.size / 2, wallH: 0 }]);
 
   // ---- Lab scene (builder preview, no physics) ----
   const lab = new Lab(engine, catalog);
@@ -128,7 +131,7 @@ async function main() {
       buildBot('A', buildA, catalog, scene, arena.spawnA, Math.PI / 4, { breakableWeapons }),
       buildBot('B', buildB, catalog, scene, arena.spawnB, Math.PI + Math.PI / 4, { breakableWeapons }),
     ];
-    for (const b of bots) castShadows(shadows, botMeshes(b));   // v0.16
+    for (const b of bots) { castShadows(shadows, botMeshes(b)); skinBot(b, shadows); }   // v0.16; v0.27 Cube Bots look (if on)
     combat = new Combat(bots, fx);
     timeLeft = MATCH_SECONDS; over = false; camFocus = null;
     hud.hideWinner();
@@ -197,7 +200,7 @@ async function main() {
       bots.push(dummy);
       courseCombat = new Combat(bots, fx);
     }
-    for (const b of bots) castShadows(shadows, botMeshes(b));
+    for (const b of bots) { castShadows(shadows, botMeshes(b)); skinBot(b, shadows); }   // v0.27 Cube Bots look (if on)
     course.begin(player, bots[1], courseCombat);
     cam.target = player.root.position.clone(); cam.radius = camCtl.radius(11);   // v0.24: angle is the player's (Q / drag)
     hud.showControls([`<b>${STATIONS.find(s => s.id === id)!.name}</b> — ${KEYS.A.label} — ${player.weapon.hint('SPACE')}`, `R restart · C stations · B lab · Q camera view`], 4000);
@@ -350,6 +353,12 @@ async function main() {
       if (dead.length) {
         const w = bots.find(b => !isDestroyed(b.state));
         end(w ? `${w.build.cosmetics.name} WINS BY KO` : 'DOUBLE KO', w?.build.cosmetics.paint ?? '#fff');
+        // v0.28 Cube Bots look: a KO'd bot is blown apart and its collider goes with it (nothing left to hit)
+        for (const d of dead) if (cubeSkinOf(d.root)) {
+          cubeKnockout(d);
+          dropBot(d);
+          d.eliminated = { t: now, pos: d.root.position.clone(), vel: Vector3.Zero(), reason: 'ko' };
+        }
       } else if (timeLeft <= 0) {
         // Time-out: whoever took more damage (from any source) loses. Nothing else counts.
         const [a, b] = bots;

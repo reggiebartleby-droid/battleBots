@@ -13,6 +13,7 @@ import { assembleBotMesh, ARM, CONTROL, FLIP, SPINNER, type BotMesh } from './bo
 import { isDown } from './input.js';
 import type { WeaponKind } from '../../src/core/types.js';
 import { applyEnvironment, castShadows, makeShadows } from './look.js';
+import { CUBES, skinPreview } from './cubes.js';
 
 /** Stand-in Meshy models shown instead of the primitive assembly for matching presets. */
 const PROTOTYPE_MODELS: Record<string, { url: string; scale: number }> = {
@@ -160,6 +161,8 @@ export class Lab {
       // Let the glow layer bloom the sign's own texture, brighter than the rest of the scene.
       glow.customEmissiveColorSelector = (mesh, _sub, material, result) => {
         if (mesh === sign) { result.set(1.6, 1.6, 1.6, 1); return; }
+        const cube = (mesh.metadata as { cubeGlow?: Color3 } | null)?.cubeGlow;   // v0.27 Cube Bots look
+        if (cube) { result.set(cube.r, cube.g, cube.b, 1); return; }
         const c = (material as { emissiveColor?: Color3 }).emissiveColor ?? Color3.Black();
         result.set(c.r, c.g, c.b, 1);
       };
@@ -224,7 +227,9 @@ export class Lab {
     next.root.position.set(0, 0.16 + 0.35 / 2 + 0.1, 0);
     next.root.rotation.y = this.angle;
     castShadows(this.shadows, [next.root, ...next.root.getChildMeshes()]);
-    this.loadPrototype(build);
+    // v0.27 Cube Bots look: the cubes replace the primitives (and the Meshy stand-in model, which isn't cubed)
+    if (CUBES.on) skinPreview(this.scene, next.root, next.partMeshes, build.cosmetics.paint ?? '#1d7cf2', this.shadows);
+    else this.loadPrototype(build);
   }
 
   /** Swap in a stand-in Meshy model for this body type, if one exists. Primitives stay until it loads. */

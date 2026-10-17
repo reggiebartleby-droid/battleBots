@@ -81,7 +81,7 @@ export interface Bot {
   lastHit?: { socket: string; t: number };   // most recent damage taken (HUD flash)
   /** Set when the bot is knocked out of the arena (main.ts OUT block): the moment, where it was
    *  and how fast it was going. This is the hook for the elimination animation (fx.explode). */
-  eliminated?: { t: number; pos: Vector3; vel: Vector3; reason: 'out' };
+  eliminated?: { t: number; pos: Vector3; vel: Vector3; reason: 'out' | 'ko' };   // v0.28 'ko' = Cube Bots KO (blown apart, collider gone)
   /** Set while the bot is resting upside down (main.ts). since = when it landed inverted. */
   inverted?: { since: number };
   /** Self-right in progress: at this time the chassis is snapped back onto its wheels. */
@@ -98,6 +98,8 @@ export interface Bot {
   hinges?: RealHinge[];
   /** v0.21 real wheels: one body per tyre on a powered axle. */
   wheels?: RealWheel[];
+  /** v0.28 chassis collider pieces per part (front, side armour, skids, fixed jaw) -- so a part that falls off can lose its collider. */
+  partShapes: Record<string, PhysicsShape[]>;
 }
 
 /** v0.21 one tyre on its powered axle. */
@@ -117,6 +119,7 @@ export interface RealWheel {
   sideShape: PhysicsShape;       // the tyre cylinder (everything else)
   onTread: boolean;              // upright: the tread rolls on the floor; tipped: the cylinder does
   own: { chassis: number; weapon: number };   // this bot's filter bits
+  gone?: boolean;                // v0.28 Cube Bots: the wheel fell off -- collides with nothing
 }
 
 /** v0.21 wheel tilt (axle's world-up component) past which the tyre cylinder, not the tread, meets the floor. */
@@ -126,6 +129,7 @@ const TREAD_TILT = 0.5;
  *  (and except driving surfaces while the tread has them). */
 function setTread(w: RealWheel, on: boolean) {
   w.onTread = on;
+  if (w.gone) { for (const s of [w.tread, w.sideShape]) { s.filterMembershipMask = 0; s.filterCollideMask = 0; } return; }   // v0.28 fell off
   w.tread.filterMembershipMask = TREAD_BIT;
   w.tread.filterCollideMask = on ? SURFACE_BIT : 0;
   w.sideShape.filterMembershipMask = w.own.chassis;
@@ -526,7 +530,11 @@ export function buildBot(id: 'A' | 'B', build: BotBuild, catalog: Catalog, scene
 
   // ---- Compound collision shape ----
   const shape = new PhysicsShapeContainer(scene);
+  const partShapes: Record<string, PhysicsShape[]> = {};
+  let curSocket: string | null = null;   // v0.28: which part the next collider piece belongs to
+  const own = (s: PhysicsShape) => { if (curSocket) (partShapes[curSocket] ??= []).push(s); };
   const add = (s: PhysicsShape, m: PhysicsMaterialLike, child?: Mesh) => {
+    own(s);
     s.material = { ...m, frictionCombine: PhysicsMaterialCombineMode.GEOMETRIC_MEAN, restitutionCombine: PhysicsMaterialCombineMode.GEOMETRIC_MEAN };
     if (child) { child.computeWorldMatrix(true); shape.addChildFromParent(root, s, child); }
     else shape.addChild(s);
@@ -540,6 +548,7 @@ export function buildBot(id: 'A' | 'B', build: BotBuild, catalog: Catalog, scene
   // v0.21: the tyres are their own bodies (buildWheels below); only the 2WD skids are part of the chassis
   for (const [socketId, m] of Object.entries(mesh.partMeshes)) {
     const part = mesh.partKinds[socketId];
+    curSocket = socketId;
     switch (part.type) {
       case 'wheels':
         for (const sk of m.getChildMeshes(true)) if (sk.name.includes('_skid_')) {
@@ -563,7 +572,7 @@ export function buildBot(id: 'A' | 'B', build: BotBuild, catalog: Catalog, scene
             const ext = c.getBoundingInfo().boundingBox.extendSize.scale(2);
             const s = new PhysicsShapeBox(Vector3.Zero(), Quaternion.Identity(), ext, scene);
             s.material = { ...BODY.front, frictionCombine: PhysicsMaterialCombineMode.GEOMETRIC_MEAN, restitutionCombine: PhysicsMaterialCombineMode.GEOMETRIC_MEAN };
-            shape.addChildFromParent(root, s, c); track(shape, s);
+            shape.addChildFromParent(root, s, c); track(shape, s); own(s);
           }
           break;
         } else if (mesh.spinAxis === 'y') {           // full-body shell / cage: still a fixed sweep collider
@@ -582,6 +591,7 @@ export function buildBot(id: 'A' | 'B', build: BotBuild, catalog: Catalog, scene
     }
   }
 
+  curSocket = null;
   // v0.15 wheelie bar collider (Overhead): part of the chassis shape
   if (WHEELIE.bodies.includes(build.bodyId)) {
     const g = wheelieGeom();
@@ -617,7 +627,7 @@ export function buildBot(id: 'A' | 'B', build: BotBuild, catalog: Catalog, scene
   body.setLinearDamping(BODY.linearDamping);
 
   const weapon = new Weapon(mesh.weaponKind);
-  const bot: Bot = { id, build, state, body, weapon, ...mesh };
+  const bot: Bot = { id, build, state, body, weapon, partShapes, ...mesh };
   const ownWeapons = (b: PhysicsBody) => setFilter(b.shape!, FILTER[id].weapon, ~(FILTER[id].chassis | FILTER[id].weapon));
   if (realSpinner) {
     bot.spinner = buildSpinner(scene, root, body, mesh.weaponMesh!, mesh.weaponKind!, weaponMass);
@@ -1317,6 +1327,21 @@ export function disposeBot(bot: Bot) {
   for (const w of bot.wheels ?? []) { w.joint.dispose(); w.body.dispose(); w.hub.dispose(false, true); }   // v0.21
   bot.body.dispose();
   bot.root.dispose(false, true);
+}
+
+/** v0.28 Cube Bots: a part at 0 HP falls off for real -- its collider pieces stop colliding (mass is left as it was).
+ *  wheels = every tyre (the part is all four) + 2WD skids; weapon = its real body/bodies (breakable weapons only). */
+export function dropPart(bot: Bot, socketId: string) {
+  for (const s of bot.partShapes[socketId] ?? []) { s.filterMembershipMask = 0; s.filterCollideMask = 0; }
+  if (bot.state.parts[socketId]?.socketType === 'wheels') for (const w of bot.wheels ?? []) { w.gone = true; setTread(w, false); }
+  if (socketId === 'weapon') for (const w of weaponBodies(bot)) setFilter(w.body.shape!, 0, 0);
+}
+
+/** v0.28 Cube Bots KO: the bot is blown apart -- freeze + hide it and switch every collider off (nothing left to hit). */
+export function dropBot(bot: Bot) {
+  freezeBot(bot);
+  for (const b of [...chassisBodies(bot), ...weaponBodies(bot).map(w => w.body)]) if (b.shape) setFilter(b.shape, 0, 0);
+  for (const w of bot.wheels ?? []) { w.gone = true; setTread(w, false); }
 }
 
 /** Freeze + hide (knocked out of the arena). */
