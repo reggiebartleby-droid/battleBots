@@ -38,7 +38,7 @@ export const PRESETS: Record<string, BotBuild> = {
   },
   'Flip Side': {
     bodyId: 'flipper',
-    sockets: { weapon: 'fl_pneumatic', weapon_motor: 'wm_std', front: 'front_wedge', armor: 'armor_light', wheels_1: 'wheels_std', wheels_2: 'wheels_std', motor: 'motor_std' },
+    sockets: { weapon: 'fl_pneumatic', weapon_motor: 'wm_std', front: 'front_wedge', armor: 'armor_light', wheels: 'wheels_std', motor: 'motor_std' },
     cosmetics: { name: 'FLIP SIDE', paint: '#9b5de5' },
   },
 };
@@ -60,7 +60,7 @@ export function refitToBody(catalog: Catalog, build: BotBuild, bodyId: BodyId): 
   const body = catalog.bodies[bodyId];
   const next: BotBuild = { bodyId, sockets: {}, cosmetics: clone(build.cosmetics) };
   for (const s of body.sockets) {
-    const prev = build.sockets[s.id] ?? null;
+    const prev = build.sockets[s.id] ?? (s.id === 'wheels' ? build.sockets['wheels_1'] : null) ?? null;   // v0.21: old saved flippers had wheels_1 / wheels_2
     const options = compatibleParts(catalog, body, s);
     next.sockets[s.id] = prev && options.some(p => p.id === prev) ? prev
       : s.required === false ? null : (options[0]?.id ?? null);
@@ -68,8 +68,9 @@ export function refitToBody(catalog: Catalog, build: BotBuild, bodyId: BodyId): 
   return next;
 }
 
-function statLine(p: PartDef): string {
+function statLine(p: PartDef, bodyId?: string): string {
   const s = p.stats, out = [`hp ${s.hp}`];
+  if (p.layout) out.unshift(bodyId === 'full_body_spinner' ? '2WD INNER BASE' : p.layout.toUpperCase());   // v0.21 wheel layout; v0.22 shells: always 2WD
   if (s.armor !== undefined) out.push(`arm ${s.armor}`);
   if (s.damage !== undefined) out.push(`dmg ${s.damage}`);
   if (s.speed !== undefined) out.push(`spd ${s.speed}`);
@@ -81,7 +82,7 @@ function socketLabel(body: BodyDef, s: SocketDef): string {
   return SOCKET_LABEL[s.type] + (same > 1 ? ` ${s.id.split('_').pop()}` : '');
 }
 
-export interface DeployArgs { player: BotBuild; opponent: BotBuild; opponentName: string; difficulty: Difficulty; breakableWeapons: boolean }
+export interface DeployArgs { player: BotBuild; opponent: BotBuild; opponentName: string; difficulty: Difficulty; breakableWeapons: boolean; driveBoost: number }
 
 export class Builder {
   build: BotBuild;
@@ -106,6 +107,8 @@ export class Builder {
     opponent: document.getElementById('bb-opponent') as HTMLSelectElement,
     difficulty: document.getElementById('bb-difficulty') as HTMLSelectElement,
     breakable: document.getElementById('bb-breakable') as HTMLInputElement,
+    boost: document.getElementById('bb-boost') as HTMLInputElement,          // v0.22 temporary test slider
+    boostVal: document.getElementById('bb-boost-val')!,
     deploy: document.getElementById('bb-deploy') as HTMLButtonElement,
   };
   private onChange: (b: BotBuild) => void = () => {};
@@ -133,6 +136,10 @@ export class Builder {
     this.el.opponent.value = saved?.opponent && PRESETS[saved.opponent] ? saved.opponent : 'Blue Lift';
     this.el.difficulty.value = saved?.difficulty && DIFFICULTY[saved.difficulty] ? saved.difficulty : 'normal';
     this.el.breakable.checked = saved?.breakableWeapons ?? false;   // v0.17: off by default
+    this.el.boost.value = String(saved?.driveBoost ?? 1);
+    const showBoost = () => { this.el.boostVal.textContent = `x${Number(this.el.boost.value)}`; };
+    showBoost();
+    this.el.boost.oninput = () => { showBoost(); this.save(); };
 
     this.el.name.oninput = () => { this.build.cosmetics.name = this.el.name.value.toUpperCase(); this.changed(); };
     this.el.paint.oninput = () => { this.build.cosmetics.paint = this.el.paint.value; this.changed(); };
@@ -141,7 +148,7 @@ export class Builder {
       if (!this.validation.ok) return;
       this.save();
       this.hide();
-      this.onDeploy({ player: clone(this.build), opponent: clone(PRESETS[this.el.opponent.value]), opponentName: this.el.opponent.value, difficulty: this.el.difficulty.value as Difficulty, breakableWeapons: this.el.breakable.checked });
+      this.onDeploy({ player: clone(this.build), opponent: clone(PRESETS[this.el.opponent.value]), opponentName: this.el.opponent.value, difficulty: this.el.difficulty.value as Difficulty, breakableWeapons: this.el.breakable.checked, driveBoost: Number(this.el.boost.value) });
     };
 
     this.render();
@@ -181,7 +188,7 @@ export class Builder {
       row.type = 'button';
       row.className = 'rack-row' + (s.id === this.selectedSocket ? ' sel' : '') + (part ? '' : ' empty');
       row.innerHTML = `<span class="lbl">${socketLabel(body, s)}</span>` +
-        (part ? `<span class="pn">${part.name}</span><span class="ps">${statLine(part)} · ${partWeight(part, this.catalog.balance)} wt</span>`
+        (part ? `<span class="pn">${part.name}</span><span class="ps">${statLine(part, this.build.bodyId)} · ${partWeight(part, this.catalog.balance)} wt</span>`
               : `<span class="pn">— empty —</span><span class="ps">${s.required === false ? 'optional' : 'required'}</span>`);
       row.onclick = () => { this.selectedSocket = s.id; this.renderRack(); this.renderBin(); };
       this.el.rack.appendChild(row);
@@ -205,7 +212,7 @@ export class Builder {
     for (const p of compatibleParts(this.catalog, body, s)) {
       const b = document.createElement('button');
       b.type = 'button'; b.className = 'bin-item' + (p.id === current ? ' sel' : '');
-      b.innerHTML = `<span class="pn">${p.name}</span><span class="pw">${partWeight(p, this.catalog.balance)} wt</span><span class="ps">${statLine(p)}${p.description ? ' · ' + p.description : ''}</span>`;
+      b.innerHTML = `<span class="pn">${p.name}</span><span class="pw">${partWeight(p, this.catalog.balance)} wt</span><span class="ps">${statLine(p, this.build.bodyId)}${p.description ? ' · ' + p.description : ''}</span>`;
       b.onclick = () => pick(p.id);
       this.el.bin.appendChild(b);
     }
@@ -228,9 +235,9 @@ export class Builder {
   }
 
   private save() {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ build: this.build, opponent: this.el.opponent.value, difficulty: this.el.difficulty.value, breakableWeapons: this.el.breakable.checked })); } catch { /* ignore */ }
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ build: this.build, opponent: this.el.opponent.value, difficulty: this.el.difficulty.value, breakableWeapons: this.el.breakable.checked, driveBoost: Number(this.el.boost.value) })); } catch { /* ignore */ }
   }
-  private load(): { build: BotBuild; opponent?: string; difficulty?: Difficulty; breakableWeapons?: boolean } | null {
+  private load(): { build: BotBuild; opponent?: string; difficulty?: Difficulty; breakableWeapons?: boolean; driveBoost?: number } | null {
     try { const s = localStorage.getItem(STORAGE_KEY); return s ? JSON.parse(s) : null; } catch { return null; }
   }
 }

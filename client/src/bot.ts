@@ -42,20 +42,27 @@
  *    grappler = the same fork + a clamp jaw from above; crusher = fixed lower jaw + slow hydraulic beak that
  *    pierces (Razer-style). Rear weight bias + front axle forward so lifting doesn't tip the lifter (Razer).
  *  - Full-body spinner: the shell / cage is a real spinner on a vertical hinge around the chassis.
- *  - Tyre grip (all horizontal-axis spinners): the spin-up reaction torque is held by the tyres up to what
- *    friction can take (TYRE), instead of yawing the light chassis around.
+ *
+ * v0.21 real wheels (user: real-life drive): every tyre is its own body on a powered axle (6DoF, only the axle
+ * free, velocity motor), like the weapons. Grip is real tyre friction against whatever the tyre touches --
+ * floor, walls, obstacles, other bots -- so a lifted wheel has no grip and a magnet's pull is extra tyre load.
+ * Skid steer (tank mixing): the left and right wheels are driven separately. The layout (2WD + skids / 4WD /
+ * 6WD) comes from the wheels part; the drive motor part sets the gearing (top speed vs wheel force). See DRIVE.
+ * This replaced the v0.7 chassis-centre drive force, the yaw-rate steering, the sideways grip damping, the
+ * chassis-height grounded check, the magnet grip multiplier and the v0.12 spin-up "tyre grip" torque.
  */
 import {
   Color3, Matrix, Mesh, TransformNode, MeshBuilder, type Material, type Node, PhysicsBody, PhysicsMotionType, PhysicsShape, PhysicsShapeBox, PhysicsShapeContainer,
-  PhysicsShapeConvexHull, PhysicsShapeCylinder, PhysicsMaterialCombineMode, Scene, Vector3, VertexData, Quaternion,
+  PhysicsShapeConvexHull, PhysicsShapeCylinder, PhysicsShapeSphere, PhysicsMaterialCombineMode, Scene, Vector3, VertexData, Quaternion,
   Physics6DoFConstraint, PhysicsConstraintAxis, PhysicsConstraintMotorType, type AbstractMesh,
 } from '@babylonjs/core';
 import type { BotBuild, Catalog, PartDef, WeaponKind } from '../../src/core/types.js';
-import { createBotState, type BotState, type StateOptions } from '../../src/core/state.js';
+import { createBotState, currentSpeed, type BotState, type StateOptions } from '../../src/core/state.js';
 import { validateBuild } from '../../src/core/validate.js';
 import { partWeight } from '../../src/core/weight.js';
 import { Weapon } from './weapon.js';
 import { botMaterials, type BotMats } from './look.js';
+import { SURFACE_BIT } from './arena.js';
 
 const CHASSIS_H = 0.35;   // = CHASSIS.h (ARM below needs it before CHASSIS is declared)
 
@@ -89,7 +96,67 @@ export interface Bot {
   magnetPull?: number;
   /** v0.12 hinged real weapons: flipper plate, lifter / grappler fork, grappler jaw, crusher beak. */
   hinges?: RealHinge[];
+  /** v0.21 real wheels: one body per tyre on a powered axle. */
+  wheels?: RealWheel[];
 }
+
+/** v0.21 one tyre on its powered axle. */
+export interface RealWheel {
+  hub: Mesh;                     // physics node at the axle centre (the tyre mesh is its child)
+  body: PhysicsBody;
+  joint: Physics6DoFConstraint;
+  pivot: Vector3;                // axle centre in chassis space
+  side: -1 | 1;                  // -1 = left (chassis -x), 1 = right
+  torque: number;                // N m stall torque at this wheel (from the drive motor's gearing)
+  mass: number;
+  tyre: Mesh;
+  cmd: number;                   // speed controller output -1..1 (set by driveWheels)
+  omegaMax: number;              // rad/s no-load wheel speed (top speed / radius); 0 = drive dead
+  drag: boolean;                 // drive dead: gearbox drag only
+  tread: PhysicsShape;           // round tread (driving surfaces only)
+  sideShape: PhysicsShape;       // the tyre cylinder (everything else)
+  onTread: boolean;              // upright: the tread rolls on the floor; tipped: the cylinder does
+  own: { chassis: number; weapon: number };   // this bot's filter bits
+}
+
+/** v0.21 wheel tilt (axle's world-up component) past which the tyre cylinder, not the tread, meets the floor. */
+const TREAD_TILT = 0.5;
+
+/** Collision filters for one wheel: tread vs driving surfaces only; cylinder vs everything except its own bot
+ *  (and except driving surfaces while the tread has them). */
+function setTread(w: RealWheel, on: boolean) {
+  w.onTread = on;
+  w.tread.filterMembershipMask = TREAD_BIT;
+  w.tread.filterCollideMask = on ? SURFACE_BIT : 0;
+  w.sideShape.filterMembershipMask = w.own.chassis;
+  w.sideShape.filterCollideMask = ~(w.own.chassis | w.own.weapon | (on ? SURFACE_BIT : 0));
+}
+
+/** v0.21 drive (real-life). Gearing: every drive motor has the same power; a motor geared for more top speed
+ *  gives less force at the wheels (stall force = power / top speed), shared over the driven wheels.
+ *  Neutral stick = the speed controllers brake (velocity motor holding 0), so friction does the stopping. */
+export const DRIVE = {
+  speedScale: 0.6,               // motor speed stat -> top speed, m/s
+  power: 6000,                   // W, total drive power (same for every motor part; gearing decides the split)
+  gearDrag: 0.1,                 // drive dead (motor or wheels destroyed): gearbox drag, fraction of stall torque
+  tyre: { friction: 1.0, restitution: 0.05 },   // vs the 0.8 floor (geometric mean) = 0.9, rubber on steel
+  skid: { friction: 0.1, restitution: 0.05, gap: 0.01, width: 0.3, depth: 0.12, z: 0.68 },   // 2WD: UHMW skids front + back, 1 cm off the floor
+  sixMid: 0.5,                   // 6WD: centre axle halfway between the front and rear axles
+  /** v0.22 arcade mixing (user): steering mix rate at full throttle (like a transmitter's mix rate). 1 = plain tank
+   *  mix: full forward + full turn stops the inner wheels, and skid-steer scrub then barely lets the bot turn.
+   *  1.5 = the inner wheels run slightly backward: it turns while keeping most of its speed. Standing still the
+   *  turn is always 1 (spin on the spot). Headless (Blue Lift, 2 s of W+A): 1 -> 50 deg at 3.8 m/s; 1.5 -> 145 deg
+   *  at 4.5 m/s; 0.5 -> 0 deg (couldn't break the tyre scrub). */
+  arc: 1.5,
+  /** v0.22 temporary test boost (lab slider): multiplies the drive power of both bots. */
+  boost: 1,
+  /** v0.22 drop centre (real 6WD trick): the centre axle sits this much lower, so the bot rocks onto 4 wheels
+   *  and scrubs less when it turns. Bodies listed in dropCentreBodies only. */
+  dropCentre: 0.01,
+  dropCentreBodies: ['overhead'] as string[],   // headless: Hammer on 6WD + drop turns while driving, but can tip on a swing mid-turn
+};
+/** Constraint-angle sign that drives a wheel FORWARD (checked headless). */
+const WHEEL_SIGN = 1;
 
 export type HingeRole = 'flipper' | 'fork' | 'jaw' | 'beak';
 export type HingeState = 'ready' | 'fire' | 'lower' | 'hold';
@@ -151,19 +218,15 @@ export const CONTROL = {
   rearBias: -0.15,               // centre of mass shifted back (z, m) so a loaded fork doesn't tip the bot forward
 };
 
-/** v0.12 tyre grip against weapon spin-up torque (horizontal-axis spinners). Real: "torque reaction at weapon
- *  start-up can be quite troublesome" (Ask Aaron); the tyres hold it up to their friction limit. */
-export const TYRE = { mu: 0.9, lever: 0.8 };
-
 /** v0.11 floor magnets (user: Overhead only for now; yes to extra pushing power). Magnetar ran 4 x 50 kg
- *  pull magnets (~2 kN). Pull falls off with the square of the air gap ratio (simple magnet model). */
+ *  pull magnets (~2 kN). Pull falls off with the square of the air gap ratio (simple magnet model).
+ *  v0.21: the extra pushing power is real now -- the pull is extra load on the tyres, so more friction. */
 export const MAGNET = {
   bodies: ['overhead'] as string[],
   pull: 2000,                    // N total with the wheels on the floor (5 mm air gap)
   gap0: 0.005,                   // m air gap at rest
   points: [0.5, -0.3],           // chassis z of the two magnet blocks (front / rear of centre), half the pull each
   minUp: 0.5,                    // bot tipped past ~60 deg (or upside down): magnets face away from the floor
-  maxGrip: 2.0,                  // drive force limit x (weight + pull) / weight, capped here (the drive motors' limit)
   arenaHalf: 8,                  // only over the steel floor
 };
 
@@ -233,8 +296,6 @@ export interface RealSpinner {
   omegaMax: number;              // rad/s top speed
   torque: number;                // N m motor torque (inertia * omegaMax / spinUpS)
   mass: number;
-  omegaAbsPrev?: number;         // v0.12 tyre grip: world spin speed before the physics step
-  touched?: boolean;             // v0.12: weapon touched anything during the step
 }
 
 /** Real spinners. v0.8 vertical: spin-up 3 s to top speed for all three; disc stores the most
@@ -259,7 +320,16 @@ export const SPINNER = {
 };
 
 export const CHASSIS = { w: 1.4, h: 0.35, d: 1.6 };
+/** v0.22 shell spinner (user, option 1): a still inner drive base on 2 wheels under the spinning shell. The base
+ *  has to fit inside the shell (the old 1.4 x 1.6 m chassis poked its corners out through the 12-sided shell). */
+export const FBS_BASE = { w: 1.2, d: 1.2, skidZ: 0.45 };
+export function chassisFor(bodyId: string) { return bodyId === 'full_body_spinner' ? { w: FBS_BASE.w, h: CHASSIS.h, d: FBS_BASE.d } : CHASSIS; }
+/** Wheel layout on this body: shell spinners always run 2WD on their inner base (real shell spinners). */
+export function layoutFor(bodyId: string, part: PartDef): string { return bodyId === 'full_body_spinner' ? '2wd' : (part.layout ?? '4wd'); }
 export const WHEEL = { r: 0.25, w: 0.2, y: -0.05, x: CHASSIS.w / 2 + 0.12 };
+/** v0.22 wider stance (real vertical spinners need a wide base: turning while spun up rolls them over through
+ *  the gyro effect). Extra track per side, m: the wheels sit out on short axle outriggers. */
+export const STANCE: Record<string, number> = { vertical_spinner: 0.2 };
 /** Chassis centre height when the wheels sit on the floor (floor top is y = 0). */
 export const REST_Y = WHEEL.r - WHEEL.y;          // 0.30
 
@@ -285,7 +355,6 @@ export const BODY = {
   linearDamping: 0.1,
   // per-part materials (friction combines by geometric mean with whatever it touches)
   chassis: { friction: 0.5, restitution: 0.35 },
-  wheel:   { friction: 0.15, restitution: 0.1 },   // low: the drive model supplies grip; wheels mostly roll
   front:   { friction: 0.12, restitution: 0.2 },   // slick ramp so things slide up it
   weapon:  { friction: 0.4, restitution: 0.4 },
   armor:   { friction: 0.5, restitution: 0.35 },
@@ -298,6 +367,41 @@ const FRONT: Record<string, { angleDeg: number; tipY: number; topY: number }> = 
   wedgelet: { angleDeg: 35, tipY: -REST_Y + 0.040, topY: CHASSIS.h / 2 },    // hinged in real life: sits a touch higher
 };
 
+
+/** v0.22 weapon slot through a vertical spinner's nose (visual only: a weapon never collides with its own chassis).
+ *  half = slot half-width, back = how far back (chassis z) the slot runs. */
+const VS_SLOT: Partial<Record<WeaponKind, { half: number; back: number }>> = {
+  disc: { half: 0.09, back: 0.32 },   // disc + teeth reach 0.54 m from the axle (z 0.9)
+  bar:  { half: 0.08, back: 0.31 },   // 1.1 m bar: 0.55 m from the axle
+  drum: { half: 0.66, back: 0.6 },    // 1.2 m drum: the slot is most of the nose
+};
+
+function slotChassis(scene: Scene, root: Mesh, mats: Mats, parts: Record<string, Mesh>, slot: { half: number; back: number }) {
+  const { w, h, d } = CHASSIS, D = d / 2;
+  root.isVisible = false;                                         // the collider keeps the full box
+  const piece = (nm: string, x: number, z: number, bw: number, bd: number) => {
+    const m = MeshBuilder.CreateBox(`${root.name}_${nm}${DECO}`, { width: bw, height: h, depth: bd }, scene);
+    m.material = mats.paint; m.parent = root; m.position.set(x, 0, z);
+  };
+  piece('rear', 0, (slot.back - D) / 2, w, slot.back + D);
+  const sw = w / 2 - slot.half;
+  if (sw > 0.01) for (const sx of [-1, 1]) piece(`cheek${sx}`, sx * (slot.half + sw / 2), (slot.back + D) / 2, sw, D - slot.back);
+  // front ramp: two wedgelets either side of the weapon (the hidden full ramp still gives the collider)
+  const f = parts['front'];
+  if (f) {
+    f.isVisible = false;
+    if (sw > 0.01) for (const sx of [-1, 1]) {
+      const c = f.clone(`${f.name}_side${sx}${DECO}`, f, true) as Mesh;
+      c.isVisible = true; c.scaling.x = sw / w; c.position.set(sx * (slot.half + sw / 2), 0, 0);
+    }
+  }
+  // top armor stops short of the slot
+  const a = parts['armor'];
+  if (a) {
+    const full = CHASSIS.d * 0.9, front = Math.min(full / 2, slot.back - 0.02), back = -full / 2;
+    a.scaling.z = (front - back) / full; a.position.z = (front + back) / 2;
+  }
+}
 
 /** Visual-only assembly (no physics). Used by the lab preview and by buildBot(). */
 export interface BotMesh {
@@ -315,7 +419,8 @@ export function assembleBotMesh(id: string, build: BotBuild, catalog: Catalog, s
   if (!v.ok) throw new Error(`Bot ${id} invalid: ${v.errors.join('; ')}`);
   const paint = build.cosmetics.paint ?? (id === 'A' ? '#e63946' : '#1d7cf2');
 
-  const root = MeshBuilder.CreateBox(`bot${id}`, { width: CHASSIS.w, height: CHASSIS.h, depth: CHASSIS.d }, scene);
+  const ch = chassisFor(build.bodyId);
+  const root = MeshBuilder.CreateBox(`bot${id}`, { width: ch.w, height: ch.h, depth: ch.d }, scene);
   const mats = botMaterials(scene, id, paint);   // v0.16 battle-worn PBR set (look.ts)
   root.material = mats.paint;
 
@@ -340,6 +445,11 @@ export function assembleBotMesh(id: string, build: BotBuild, catalog: Catalog, s
 
   // Full-body spinners: hide the chassis inside the shell
   if (build.bodyId === 'full_body_spinner') root.visibility = 0.001;
+  // v0.22 vertical spinners: the weapon runs in a slot through the nose (real bots), not through the chassis
+  const vsSlot = weaponKind ? VS_SLOT[weaponKind] : undefined;
+  if (vsSlot) slotChassis(scene, root, mats, partMeshes, vsSlot);
+  // v0.22 flippers: the plate IS the top surface -- the top armor sits flush under it, not through it
+  if (build.bodyId === 'flipper' && partMeshes['armor']) partMeshes['armor'].position.y = CHASSIS.h / 2 - 0.03;
 
   // v0.15 wheelie bar (visual; the collider is added in buildBot)
   if (WHEELIE.bodies.includes(build.bodyId)) {
@@ -371,16 +481,19 @@ export function buildBot(id: 'A' | 'B', build: BotBuild, catalog: Catalog, scene
   };
 
   // chassis
-  add(new PhysicsShapeBox(Vector3.Zero(), Quaternion.Identity(), new Vector3(CHASSIS.w, CHASSIS.h, CHASSIS.d), scene), BODY.chassis);
+  const ch = chassisFor(build.bodyId);
+  add(new PhysicsShapeBox(Vector3.Zero(), Quaternion.Identity(), new Vector3(ch.w, ch.h, ch.d), scene), BODY.chassis);
 
-  // wheels: cylinders along x at each wheel position (the visual wheels are children of the wheels mesh)
+  // v0.21: the tyres are their own bodies (buildWheels below); only the 2WD skids are part of the chassis
   for (const [socketId, m] of Object.entries(mesh.partMeshes)) {
     const part = mesh.partKinds[socketId];
     switch (part.type) {
       case 'wheels':
-        for (const w of m.getChildMeshes(true)) {   // direct children = the tyres (v0.16: hub detail sits under each tyre)
-          const p = (w as Mesh).position;   // local to the wheels group, which sits at the chassis origin
-          add(new PhysicsShapeCylinder(new Vector3(p.x - WHEEL.w / 2, p.y, p.z), new Vector3(p.x + WHEEL.w / 2, p.y, p.z), WHEEL.r, scene), BODY.wheel);
+        for (const sk of m.getChildMeshes(true)) if (sk.name.includes('_skid_')) {
+          const g = skidGeom(sk.position.z);
+          const s = new PhysicsShapeBox(g.centre, Quaternion.Identity(), new Vector3(DRIVE.skid.width, g.h, DRIVE.skid.depth), scene);
+          s.density = 0.001;   // massless like the wheelie bar (new collider shapes skew the mass otherwise)
+          add(s, DRIVE.skid);
         }
         break;
       case 'front':
@@ -441,8 +554,10 @@ export function buildBot(id: 'A' | 'B', build: BotBuild, catalog: Catalog, scene
   const hingeShares = realHinge ? hingeShareFor(mesh.weaponKind!) : {};
   const hingeMass = Object.values(hingeShares).reduce((a, s) => a + s * fullWeapon, 0);
   const weaponMass = realSpinner || realArm ? fullWeapon * (realArm ? ARM.massShare : 1) : 0;
+  const wheelsPart = Object.values(mesh.partKinds).find(p => p.type === 'wheels');
+  const wheelsMass = wheelsPart ? partWeight(wheelsPart, catalog.balance) * BODY.massScale : 0;   // v0.21: lives in the tyres
   const mp = body.getMassProperties();
-  const mass = Math.max(BODY.minMass, mesh.totalWeight * BODY.massScale - weaponMass - hingeMass);
+  const mass = Math.max(BODY.minMass, mesh.totalWeight * BODY.massScale - weaponMass - hingeMass - wheelsMass);
   const com = (mp.centerOfMass ?? Vector3.Zero()).add(new Vector3(0, -BODY.comDrop, build.bodyId === 'control' ? CONTROL.rearBias : 0));
   body.setMassProperties({ mass, centerOfMass: com });
   body.setAngularDamping(BODY.angularDamping);
@@ -473,8 +588,114 @@ export function buildBot(id: 'A' | 'B', build: BotBuild, catalog: Catalog, scene
     if (mesh.weaponKind === 'pneumatic_flipper' || mesh.weaponKind === 'electric_flipper') weapon.gas = FLIP[mesh.weaponKind].gas;
   }
   for (const w of [bot.spinner, bot.arm, bot.saw, ...(bot.hinges ?? [])]) if (w) ownWeapons(w.body);
+  // v0.21 real wheels: same filter group as the chassis (a hit on a tyre is a hit on the bot), but never touch own chassis / weapons
+  const tyres: Mesh[] = [];
+  for (const [sid, m] of Object.entries(mesh.partMeshes)) if (mesh.partKinds[sid].type === 'wheels') tyres.push(...(m.getChildMeshes(true) as Mesh[]).filter(t => !t.name.includes('_skid_') && !isDeco(t)));
+  if (tyres.length) {
+    const vTop = Math.max(0.1, currentSpeed(state) * DRIVE.speedScale);
+    const torque = (DRIVE.power * DRIVE.boost / vTop) * WHEEL.r / tyres.length;   // v0.22: x lab test boost   // gearing: stall force = power / top speed
+    bot.wheels = buildWheels(scene, root, body, tyres, Math.max(1, wheelsMass / tyres.length), torque, FILTER[id]);
+    for (const w of bot.wheels) setTread(w, true);
+  }
   return bot;
 }
+
+/** v0.21 turn each tyre mesh into its own body on a powered axle (6DoF: only rotation about chassis x free). */
+function buildWheels(scene: Scene, root: Mesh, chassis: PhysicsBody, tyres: Mesh[], mass: number, torque: number, own: { chassis: number; weapon: number }): RealWheel[] {
+  const out: RealWheel[] = [];
+  root.computeWorldMatrix(true);
+  const inv = Matrix.Invert(root.getWorldMatrix());
+  tyres.forEach((tyre, i) => {
+    tyre.computeWorldMatrix(true);
+    const world = tyre.getAbsolutePosition().clone();
+    const pivot = Vector3.TransformCoordinates(world, inv);
+    const hub = new Mesh(`${root.name}_wheel${i}`, scene);
+    hub.position = world;
+    hub.rotationQuaternion = root.absoluteRotationQuaternion.clone();
+    tyre.parent = hub;
+    tyre.position.setAll(0);                                     // keeps its rotation (cylinder axis on chassis x)
+    hub.computeWorldMatrix(true);
+    // Tread: a sphere of the tyre's radius that only touches driving surfaces (round contact = smooth rolling; Havok's
+    // flat-sided cylinder hopped and slipped on the floor in the headless test). Sides: the real tyre cylinder for
+    // everything else (walls, bots, weapons). Tipped past TREAD_TILT the cylinder takes over on the floor too.
+    const mat = { ...DRIVE.tyre, frictionCombine: PhysicsMaterialCombineMode.GEOMETRIC_MEAN, restitutionCombine: PhysicsMaterialCombineMode.GEOMETRIC_MEAN };
+    const tread = new PhysicsShapeSphere(Vector3.Zero(), WHEEL.r, scene);
+    const sideShape = new PhysicsShapeCylinder(new Vector3(-WHEEL.w / 2, 0, 0), new Vector3(WHEEL.w / 2, 0, 0), WHEEL.r, scene);
+    tread.material = mat; sideShape.material = mat;
+    const shape = new PhysicsShapeContainer(scene);
+    shape.addChild(tread); shape.addChild(sideShape);
+    const body = new PhysicsBody(hub, PhysicsMotionType.DYNAMIC, false, scene);
+    body.shape = shape;
+    body.setCollisionCallbackEnabled(true);                      // landings on the wheels (combat slam damage)
+    body.setMassProperties({ mass });
+    body.setAngularDamping(0);
+    body.setLinearDamping(BODY.linearDamping);
+    const X = new Vector3(1, 0, 0), Y = new Vector3(0, 1, 0);
+    const lock = (axis: PhysicsConstraintAxis) => ({ axis, minLimit: 0, maxLimit: 0 });
+    const joint = new Physics6DoFConstraint(
+      { pivotA: pivot, pivotB: Vector3.Zero(), axisA: X, axisB: X, perpAxisA: Y, perpAxisB: Y, collision: false },
+      [lock(PhysicsConstraintAxis.LINEAR_X), lock(PhysicsConstraintAxis.LINEAR_Y), lock(PhysicsConstraintAxis.LINEAR_Z),
+       lock(PhysicsConstraintAxis.ANGULAR_Y), lock(PhysicsConstraintAxis.ANGULAR_Z)],
+      scene);
+    chassis.addConstraint(body, joint);                          // axle free: the drive motor's torque is applied in wheelsBefore
+    out.push({ hub, body, joint, pivot, side: pivot.x < 0 ? -1 : 1, torque, mass, tyre, cmd: 0, omegaMax: 0, drag: false, tread, sideShape, onTread: true, own });
+  });
+  return out;
+}
+
+/** v0.21 skid-steer drive: left = throttle + turn, right = throttle - turn (v0.22: arcade mix, see DRIVE.arc). Sets each wheel's speed controller output; wheelsBefore turns it into motor torque.
+ *  `on` false = neutral (the controllers brake). Drive dead (motor / wheels destroyed) = only gearbox drag. */
+export function driveWheels(bot: Bot, throttle: number, turn: number, on: boolean) {
+  const vTop = currentSpeed(bot.state) * DRIVE.speedScale;
+  // v0.22 arcade mix: the turn shrinks toward DRIVE.arc as throttle rises (full turn when standing still)
+  const a = Math.min(1, Math.abs(throttle));
+  const tm = turn * (1 - a + a * DRIVE.arc);
+  let l = throttle + tm, r = throttle - tm;
+  const k = Math.max(1, Math.abs(l), Math.abs(r)); l /= k; r /= k;
+  for (const w of bot.wheels ?? []) {
+    w.cmd = on && vTop > 0 ? (w.side < 0 ? l : r) : 0;
+    w.drag = vTop <= 0;
+    if (vTop > 0) w.omegaMax = vTop / WHEEL.r;
+  }
+}
+
+/** v0.21 per physics step: brushed DC drive motor through its gearbox. Torque = stall x (output - speed / no-load
+ *  speed): full torque from a standstill, none at top speed, and at neutral it brakes (shorted windings / ESC
+ *  brake) in proportion to the speed. The motor's reaction goes into the chassis. Tyre friction decides how much
+ *  of it reaches the floor (or wall, or opponent). */
+export function wheelsBefore(bot: Bot, dt: number) {
+  if (!bot.wheels?.length) return;
+  // quaternions, not world matrices: those are only refreshed once per frame and this runs every sub-step
+  const X = new Vector3(1, 0, 0);
+  const axis = X.applyRotationQuaternion(bot.root.rotationQuaternion ?? Quaternion.Identity());
+  const wc = Vector3.Dot(bot.body.getAngularVelocity(), axis);
+  for (const w of bot.wheels) {
+    const tipped = Math.abs(X.applyRotationQuaternion(w.hub.rotationQuaternion ?? Quaternion.Identity()).y) > TREAD_TILT;
+    if (tipped === w.onTread) setTread(w, !tipped);
+    if (w.omegaMax <= 0) continue;
+    const rel = (Vector3.Dot(w.body.getAngularVelocity(), axis) - wc) * WHEEL_SIGN;   // wheel speed on its axle, + = forward
+    const t = w.drag
+      ? -Math.max(-1, Math.min(1, rel / w.omegaMax)) * w.torque * DRIVE.gearDrag
+      : Math.max(-1, Math.min(1, w.cmd - rel / w.omegaMax)) * w.torque;
+    const imp = axis.scale(t * WHEEL_SIGN * dt);
+    w.body.applyAngularImpulse(imp);
+    bot.body.applyAngularImpulse(imp.negate());
+  }
+}
+
+/** v0.21: give the wheels the chassis' motion (v + w x r) after a script sets the chassis velocity directly
+ *  (self-right hop). Without it the wheels' own inertia soaks up half the scripted roll. */
+export function carryWheels(bot: Bot) {
+  const v = bot.body.getLinearVelocity(), w = bot.body.getAngularVelocity();
+  for (const wh of bot.wheels ?? []) {
+    wh.body.setLinearVelocity(v.add(Vector3.Cross(w, wh.hub.position.subtract(bot.root.position))));
+    wh.body.setAngularVelocity(w.clone());
+  }
+}
+
+/** The bot's chassis plus its wheels: anything touching these touched the bot itself (not its weapon). */
+export function chassisBodies(bot: Bot): PhysicsBody[] { return [bot.body, ...(bot.wheels ?? []).map(w => w.body)]; }
+export function isChassis(bot: Bot, body: PhysicsBody | undefined): boolean { return !!body && (body === bot.body || !!bot.wheels?.some(w => w.body === body)); }
 
 /** v0.12 hinged weapon kinds (flippers + control). */
 const REAL_HINGE = new Set<WeaponKind>(['pneumatic_flipper', 'electric_flipper', 'lifter', 'grappler', 'crusher']);
@@ -646,6 +867,8 @@ export function hingesBefore(bot: Bot) { for (const h of bot.hinges ?? []) h.tou
 /** Collision filter bits: a bot's real weapon bodies never collide with its own chassis or with each
  *  other (the saw on the arm used to hit its own chassis), but hit everything else. */
 const FILTER = { A: { chassis: 1 << 1, weapon: 1 << 2 }, B: { chassis: 1 << 3, weapon: 1 << 4 } } as const;
+/** v0.21 wheel treads (round, see buildWheels): they only ever touch driving surfaces (arena SURFACE_BIT). */
+const TREAD_BIT = 1 << 8;
 /** Havok applies filters per child shape (a container's own filter isn't inherited), so remember children. */
 const kids = new WeakMap<PhysicsShape, PhysicsShape[]>();
 function track(container: PhysicsShape, child: PhysicsShape) { const k = kids.get(container) ?? []; k.push(child); kids.set(container, k); }
@@ -917,7 +1140,6 @@ function buildSpinner(scene: Scene, root: Mesh, chassis: PhysicsBody, wm: Mesh, 
   const torque = (inertia * omegaMax) / (SPINNER.spinUpByKind[kind] ?? SPINNER.spinUpS);
   joint.setAxisMotorMaxForce(PhysicsConstraintAxis.ANGULAR_X, torque * SPINNER.brake);
   const sp: RealSpinner = { parentNode: root, parentBody: chassis, axis, dir: SPINNER.dir[vertical ? 'x' : 'y'], hub, body, joint, pivot, inertia, omegaMax, torque, mass };
-  body.getCollisionObservable().add(() => { sp.touched = true; });   // own chassis is filtered out: any contact is external
   return sp;
 }
 
@@ -973,29 +1195,6 @@ export function applyGyro(bot: Bot, dt: number) {
   if (lenN > 1e-6) bot.body.setAngularVelocity(Wn.scale(len / lenN));
 }
 
-/** v0.12 tyre grip, onBeforePhysics: remember the horizontal spinner's ABSOLUTE spin speed (world frame). */
-export function tyreBefore(bot: Bot) {
-  const s = bot.spinner;
-  if (!s || s.axis.y === 0) return;
-  const axis = Vector3.TransformNormal(s.axis, bot.root.getWorldMatrix()).normalize();
-  s.omegaAbsPrev = Vector3.Dot(s.body.getAngularVelocity(), axis);
-  s.touched = false;
-}
-
-/** v0.12 tyre grip, onAfterPhysics: the weapon motor's torque (I dw/dt of the free-spinning weapon) reacted on
- *  the chassis; with the wheels on the floor the tyres take it back up to mu x weight x lever. Impacts
- *  (weapon touching anything) are not compensated -- hits stay real. */
-export function tyreAfter(bot: Bot, dt: number, grounded: boolean) {
-  const s = bot.spinner;
-  if (!s || s.axis.y === 0 || dt <= 0 || s.touched || s.omegaAbsPrev === undefined || !grounded) return;
-  const axis = Vector3.TransformNormal(s.axis, bot.root.getWorldMatrix()).normalize();
-  const motor = s.inertia * (Vector3.Dot(s.body.getAngularVelocity(), axis) - s.omegaAbsPrev) / dt;   // torque the weapon got
-  const total = (bot.body.getMassProperties().mass ?? 50) + s.mass;
-  const limit = TYRE.mu * total * 9.81 * TYRE.lever;
-  const back = Math.max(-limit, Math.min(limit, motor));
-  bot.body.applyAngularImpulse(axis.scale(back * dt));        // chassis got -motor from the hinge; tyres give it back
-}
-
 /** Per physics step: pull the chassis toward the floor at each magnet block. Returns the total pull (N). */
 export function applyMagnets(bot: Bot, dt: number): number {
   if (!MAGNET.bodies.includes(bot.build.bodyId)) return 0;
@@ -1016,14 +1215,6 @@ export function applyMagnets(bot: Bot, dt: number): number {
   return total;
 }
 
-/** Drive force multiplier from magnet grip: (weight + pull) / weight, capped by the drive motors. */
-export function magnetGrip(bot: Bot): number {
-  const pull = bot.magnetPull ?? 0;
-  if (pull <= 0) return 1;
-  const w = (bot.body.getMassProperties().mass ?? 50) * 9.81;
-  return Math.min(MAGNET.maxGrip, (w + pull) / w);
-}
-
 /** Every real weapon body of the bot (main spinner, overhead arm, saw on the arm). */
 export function weaponBodies(bot: Bot): { body: PhysicsBody; hub: Mesh; joint: Physics6DoFConstraint; mass: number }[] {
   return [bot.spinner, bot.arm, bot.saw, ...(bot.hinges ?? [])].filter(<T>(x: T | undefined): x is T => !!x);
@@ -1033,6 +1224,7 @@ export function weaponBodies(bot: Bot): { body: PhysicsBody; hub: Mesh; joint: P
 export function botMeshes(bot: Bot): AbstractMesh[] {
   const out: AbstractMesh[] = [bot.root, ...bot.root.getChildMeshes()];
   for (const w of weaponBodies(bot)) out.push(...w.hub.getChildMeshes().filter(m => !out.includes(m)));   // all descendants (arm bar + head, teeth)
+  for (const w of bot.wheels ?? []) out.push(...w.hub.getChildMeshes());   // v0.21 tyres + hub detail
   return out;
 }
 
@@ -1043,19 +1235,20 @@ export function disposeBot(bot: Bot) {
     w.body.dispose();
     w.hub.dispose(false, true);
   }
+  for (const w of bot.wheels ?? []) { w.joint.dispose(); w.body.dispose(); w.hub.dispose(false, true); }   // v0.21
   bot.body.dispose();
   bot.root.dispose(false, true);
 }
 
 /** Freeze + hide (knocked out of the arena). */
 export function freezeBot(bot: Bot) {
-  for (const b of [bot.body, ...weaponBodies(bot).map(w => w.body)]) {
+  for (const b of [...chassisBodies(bot), ...weaponBodies(bot).map(w => w.body)]) {
     b.setLinearVelocity(Vector3.Zero());
     b.setAngularVelocity(Vector3.Zero());
     b.setMotionType(PhysicsMotionType.STATIC);
   }
   bot.root.setEnabled(false);
-  for (const w of weaponBodies(bot)) w.hub.setEnabled(false);
+  for (const w of [...weaponBodies(bot), ...(bot.wheels ?? [])]) w.hub.setEnabled(false);
 }
 
 /** Put a real spinner back on its hinge after its parent was teleported, keeping its spin. */
@@ -1069,7 +1262,7 @@ function snapOne(s: RealSpinner, scene: Scene) {
   const axis = Vector3.TransformNormal(s.axis, s.parentNode.getWorldMatrix()).normalize();
   s.body.setAngularVelocity(axis.scale(w * s.dir).add(s.parentBody.getAngularVelocity()));
   s.body.setLinearVelocity(s.parentBody.getLinearVelocity());
-  scene.onAfterRenderObservable.addOnce(() => { s.body.disablePreStep = true; });
+  scene.onAfterPhysicsObservable.addOnce(() => { s.body.disablePreStep = true; });
 }
 
 /** After the chassis is teleported (self-right snap), put real weapons back on their hinges.
@@ -1086,7 +1279,7 @@ export function snapSpinner(bot: Bot, scene: Scene) {
     a.body.setAngularVelocity(bot.body.getAngularVelocity());
     a.body.setLinearVelocity(bot.body.getLinearVelocity());
     a.state = 'ready'; a.t = 0;
-    scene.onAfterRenderObservable.addOnce(() => { a.body.disablePreStep = true; });
+    scene.onAfterPhysicsObservable.addOnce(() => { a.body.disablePreStep = true; });
   }
   if (bot.saw) snapOne(bot.saw, scene);
   for (const h of bot.hinges ?? []) {                          // v0.12: flipper plate / forks / jaws back to rest
@@ -1097,7 +1290,16 @@ export function snapSpinner(bot: Bot, scene: Scene) {
     h.body.setAngularVelocity(bot.body.getAngularVelocity());
     h.body.setLinearVelocity(bot.body.getLinearVelocity());
     h.state = 'ready'; h.t = 0;
-    scene.onAfterRenderObservable.addOnce(() => { h.body.disablePreStep = true; });
+    scene.onAfterPhysicsObservable.addOnce(() => { h.body.disablePreStep = true; });
+  }
+  for (const w of bot.wheels ?? []) {                          // v0.21: tyres back on their axles
+    w.hub.position = Vector3.TransformCoordinates(w.pivot, bot.root.getWorldMatrix());
+    w.hub.rotationQuaternion = (bot.root.rotationQuaternion ?? Quaternion.Identity()).clone();
+    w.hub.computeWorldMatrix(true);
+    w.body.disablePreStep = false;
+    w.body.setAngularVelocity(bot.body.getAngularVelocity());
+    w.body.setLinearVelocity(bot.body.getLinearVelocity());
+    scene.onAfterPhysicsObservable.addOnce(() => { w.body.disablePreStep = true; });
   }
 }
 
@@ -1147,11 +1349,26 @@ function wedgePrism(scene: Scene, name: string, kind: string): Mesh {
   return m;
 }
 
+/** v0.21 axle positions (chassis z) for a wheel layout. 2WD: one axle at the centre, skids carry the ends. */
+function axleZs(layout: string, bodyId: string): number[] {
+  const front = FRONT_AXLE[bodyId] ?? 0.5, rear = REAR_AXLE[bodyId] ?? -0.5;
+  if (layout === '2wd') return [0];
+  if (layout === '6wd') return [front, rear + (front - rear) * DRIVE.sixMid, rear];
+  return [front, rear];
+}
+
+/** v0.21 2WD skid block: from the chassis underside down to `gap` above the floor. */
+function skidGeom(z: number) {
+  const top = -CHASSIS.h / 2, bottom = -REST_Y + DRIVE.skid.gap;
+  return { centre: new Vector3(0, (top + bottom) / 2, z), h: top - bottom };
+}
+
 /** Front axle position (chassis z). Vertical spinners carry a heavy weapon out front, so their front
  *  wheels sit further forward -- otherwise the bot tips onto its nose (found in the v0.8 headless test). */
 const ARM_SAW_R = 0.25;   // saw disc radius on an overhead arm (0.5 m disc)
 
-const FRONT_AXLE: Record<string, number> = { vertical_spinner: 0.68, horizontal_spinner: 0.68, control: 0.68 };   // v0.12: control too (load on the fork)
+export const REAR_AXLE: Record<string, number> = {};   // v0.22 per-body rear axle z (default -0.5)
+export const FRONT_AXLE: Record<string, number> = { vertical_spinner: 0.68, horizontal_spinner: 0.68, control: 0.68 };   // v0.12: control too (load on the fork)
 
 /** v0.9 horizontal spinner geometry (chassis space; floor is y = -REST_Y = -0.30).
  *  Bar / disc sit at mid-chassis height so they meet the opponent's chassis (world y ~0.35);
@@ -1175,6 +1392,7 @@ export const H_SPIN = {
 function partMesh(scene: Scene, id: string, socketId: string, part: PartDef, mats: Mats, bodyId: string): Mesh | undefined {
   const n = `${id}_${socketId}`;
   const front = CHASSIS.d / 2;
+  const fbs = bodyId === 'full_body_spinner';
   switch (part.type) {
     case 'weapon': return weaponMesh(scene, n, part.kind as WeaponKind, mats);
     case 'front': {
@@ -1192,12 +1410,21 @@ function partMesh(scene: Scene, id: string, socketId: string, part: PartDef, mat
     }
     case 'wheels': {
       const m = new Mesh(n, scene);
-      const zOff = socketId === 'wheels_1' ? 0.45 : socketId === 'wheels_2' ? -0.45 : 0;
-      const zs = zOff ? [zOff] : [FRONT_AXLE[bodyId] ?? 0.5, -0.5];
-      for (const z of zs) for (const x of [-1, 1]) {
+      const layout = layoutFor(bodyId, part), skidZ = bodyId === 'full_body_spinner' ? FBS_BASE.skidZ : DRIVE.skid.z;
+      const zs = axleZs(layout, bodyId);
+      if (layout === '2wd') for (const z of [skidZ, -skidZ]) {   // v0.21 skids (collider in buildBot)
+        const g = skidGeom(z);
+        const sk = MeshBuilder.CreateBox(`${n}_skid_${z}`, { width: DRIVE.skid.width, height: g.h, depth: DRIVE.skid.depth }, scene);
+        sk.position.copyFrom(g.centre);
+        sk.material = mats.dark;
+        sk.parent = m;
+      }
+      const drop = layout === '6wd' && DRIVE.dropCentreBodies.includes(bodyId) ? DRIVE.dropCentre : 0;
+      const wx = chassisFor(bodyId).w / 2 + 0.12 + (STANCE[bodyId] ?? 0);
+      for (const [i, z] of zs.entries()) for (const x of [-1, 1]) {
         const w = MeshBuilder.CreateCylinder(`${n}_${x}_${z}`, { diameter: WHEEL.r * 2, height: WHEEL.w }, scene);
         w.rotation.z = Math.PI / 2;
-        w.position.set(x * WHEEL.x, WHEEL.y, z);
+        w.position.set(x * wx, WHEEL.y - (i === 1 ? drop : 0), z);   // v0.22: 6WD centre axle = zs[1]
         w.material = mats.rubber;
         w.parent = m;
       }
@@ -1206,12 +1433,14 @@ function partMesh(scene: Scene, id: string, socketId: string, part: PartDef, mat
     case 'weapon_motor': {
       const m = MeshBuilder.CreateBox(n, { width: 0.35, height: 0.18, depth: 0.3 }, scene);
       m.position.set(-0.35, CHASSIS.h / 2 + 0.09, front - 0.35);
+      if (fbs) m.position.set(-0.3, -0.03, 0.25);    // v0.22: inside the shell (its top is at y 0.25), not on show
       m.material = mats.dark;
       return m;
     }
     case 'motor': {
       const m = MeshBuilder.CreateBox(n, { width: 0.5, height: 0.2, depth: 0.5 }, scene);
       m.position.set(0, CHASSIS.h / 2 + 0.1, -0.4);
+      if (fbs) m.position.set(0.1, -0.02, -0.25);    // v0.22: inside the shell
       m.material = mats.dark;
       return m;
     }
@@ -1445,6 +1674,7 @@ function addDetails(scene: Scene, root: Mesh, bodyId: string, parts: Record<stri
   const H = CHASSIS.h / 2, W = CHASSIS.w / 2, D = CHASSIS.d / 2;
   const fbs = bodyId === 'full_body_spinner';
   const topBusy = bodyId === 'flipper' || bodyId === 'control';   // plates / forks lie on the top and the wedge
+  const slotted = !!VS_SLOT[(kinds['weapon']?.kind ?? '') as WeaponKind];   // v0.22: nothing across the weapon slot
 
   // ---- chassis: angle-iron rails on the top edges, bolted panels ----
   if (!fbs) {
@@ -1453,7 +1683,7 @@ function addDetails(scene: Scene, root: Mesh, bodyId: string, parts: Record<stri
       boltLine(bin, root, mats.bolt, V(sx * (W - 0.03), H + 0.03 + B, -D + 0.08), V(sx * (W - 0.03), H + 0.03 + B, D - 0.08), 0.2, 'y');
       boltLine(bin, root, mats.bolt, V(sx * (W + B), 0.07, -D + 0.1), V(sx * (W + B), 0.07, D - 0.1), 0.22, 'x');
     }
-    for (const sz of topBusy ? [-1] : [-1, 1]) {
+    for (const sz of topBusy || slotted ? [-1] : [-1, 1]) {
       box(bin, root, mats.dark, V(0, H + 0.015, sz * (D - 0.03)), CHASSIS.w - 0.12, 0.03, 0.06);
       boltLine(bin, root, mats.bolt, V(-W + 0.14, H + 0.03 + B, sz * (D - 0.03)), V(W - 0.14, H + 0.03 + B, sz * (D - 0.03)), 0.2, 'y');
     }
@@ -1472,11 +1702,17 @@ function addDetails(scene: Scene, root: Mesh, bodyId: string, parts: Record<stri
         if (topBusy) break;                                     // a flipper lip / fork lies on the wedge face
         const f = FRONT[k.kind ?? 'wedge'] ?? FRONT.wedge, a = (f.angleDeg * Math.PI) / 180;
         const p0 = V(0, f.topY, D).add(V(0, -Math.sin(a), Math.cos(a)).scale(0.07)).add(V(0, Math.cos(a), Math.sin(a)).scale(B));
-        for (let i = 0; i < 7; i++) bolt(bin, m, mats.bolt, p0.add(V(-W + 0.1 + (i * (2 * W - 0.2)) / 6, 0, 0)), 'y').rotation.x = a;
+        const gap = VS_SLOT[(kinds['weapon']?.kind ?? '') as WeaponKind]?.half ?? 0;   // v0.22: no bolts in the weapon slot
+        for (let i = 0; i < 7; i++) { const x = -W + 0.1 + (i * (2 * W - 0.2)) / 6; if (gap && Math.abs(x) < gap + 0.03) continue; bolt(bin, m, mats.bolt, p0.add(V(x, 0, 0)), 'y').rotation.x = a; }
         break;
       }
       case 'wheels':
-        for (const w of m.getChildMeshes(true) as Mesh[]) {      // tyre: local y is the axle (rotated onto world x)
+        if ((STANCE[bodyId] ?? 0) > 0) for (const w of (m.getChildMeshes(true) as Mesh[]).filter(t => !t.name.includes('_skid_'))) {   // v0.22 axle outriggers
+          const sx = Math.sign(w.position.x), inner = Math.abs(w.position.x) - WHEEL.w / 2;
+          box(bin, root, mats.dark, V(sx * (W + inner) / 2, w.position.y + 0.06, w.position.z), inner - W, 0.08, 0.14);
+          cyl(bin, root, mats.chrome, V(sx * (W + inner) / 2, w.position.y, w.position.z), 'x', 0.05, inner - W, 12);
+        }
+        for (const w of (m.getChildMeshes(true) as Mesh[]).filter(t => !t.name.includes('_skid_'))) {      // tyre: local y is the axle (rotated onto world x)
           const out = -(Math.sign(w.position.x) || 1), y0 = out * WHEEL.w / 2;
           cyl(bin, w, mats.bolt, V(0, y0 + out * 0.012, 0), 'y', WHEEL.r * 1.15, 0.024, 20);   // hub
           boltRing(bin, w, mats.chrome, V(0, y0 + out * (0.024 + B), 0), 'y', 0.075, 5);         // wheel nuts

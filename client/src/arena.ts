@@ -23,6 +23,11 @@ export const FLOOR_GRIDS = [16, 8, 4, 2, 1];
 
 export interface ArenaStyle { colour: string; grid: number }
 
+/** v0.21 collision filter bits. Driving surfaces (the floor; later ramps / obstacle tops) are what the bots' round
+ *  wheel treads roll on; the walls are their own group. Everything else in the game collides with both as before. */
+export const SURFACE_BIT = 1 << 6;
+export const WALL_BIT = 1 << 7;
+
 export function buildArena(scene: Scene) {
   const half = ARENA_SIZE / 2;
 
@@ -40,7 +45,7 @@ export function buildArena(scene: Scene) {
   const floor = MeshBuilder.CreateBox('floor', { width: ARENA_SIZE, depth: ARENA_SIZE, height: 0.5 }, scene);
   floor.position.y = -0.25;
   floor.material = black;
-  new PhysicsAggregate(floor, PhysicsShapeType.BOX, { mass: 0, friction: 0.8, restitution: 0.1 }, scene);
+  new PhysicsAggregate(floor, PhysicsShapeType.BOX, { mass: 0, friction: 0.8, restitution: 0.1 }, scene).shape.filterMembershipMask = SURFACE_BIT;
 
   const walls: { x: number; z: number; rot: number }[] = [
     { x: 0, z: half, rot: 0 }, { x: 0, z: -half, rot: 0 },
@@ -51,7 +56,7 @@ export function buildArena(scene: Scene) {
     wall.position.set(w.x, WALL_H / 2, w.z);
     wall.rotation.y = w.rot;
     wall.material = glass;
-    new PhysicsAggregate(wall, PhysicsShapeType.BOX, { mass: 0, friction: 0.3, restitution: 0.4 }, scene);
+    new PhysicsAggregate(wall, PhysicsShapeType.BOX, { mass: 0, friction: 0.3, restitution: 0.4 }, scene).shape.filterMembershipMask = WALL_BIT;
   }
 
   // ---- Neon (visual only) ----

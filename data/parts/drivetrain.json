@@ -1,9 +1,9 @@
 [
-  { "id": "wheels_light",  "name": "Light Wheels",  "type": "wheels", "stats": { "hp": 12 }, "description": "Exposed, easy to knock off." },
-  { "id": "wheels_std",    "name": "Standard Wheels","type": "wheels", "stats": { "hp": 20 }, "description": "Standard set." },
-  { "id": "wheels_armored","name": "Armored Wheels","type": "wheels", "stats": { "hp": 24, "armor": 4 }, "description": "Shielded hubs." },
+  { "id": "wheels_light",  "name": "Light Wheels",  "type": "wheels", "layout": "2wd", "stats": { "hp": 12 }, "description": "2WD on a centre axle with skids front and back. Exposed, easy to knock off." },
+  { "id": "wheels_std",    "name": "Standard Wheels","type": "wheels", "layout": "4wd", "stats": { "hp": 20 }, "description": "4WD skid steer. Standard set." },
+  { "id": "wheels_armored","name": "Armored Wheels","type": "wheels", "layout": "6wd", "stats": { "hp": 24, "armor": 4 }, "description": "6WD skid steer, shielded hubs." },
 
-  { "id": "motor_std",   "name": "Standard Motor", "type": "motor", "stats": { "hp": 15, "speed": 8 },  "description": "Reliable drive." },
-  { "id": "motor_fast",  "name": "Fast Motor",     "type": "motor", "stats": { "hp": 12, "speed": 12 }, "description": "Quick, less durable." },
-  { "id": "motor_tank",  "name": "Tank Motor",     "type": "motor", "stats": { "hp": 22, "speed": 5 },  "description": "Slow and hard to kill." }
+  { "id": "motor_std",   "name": "Standard Motor", "type": "motor", "stats": { "hp": 15, "speed": 8 },  "description": "Reliable drive. Balanced gearing." },
+  { "id": "motor_fast",  "name": "Fast Motor",     "type": "motor", "stats": { "hp": 12, "speed": 12 }, "description": "Geared for speed: quick, but pushes less. Less durable." },
+  { "id": "motor_tank",  "name": "Tank Motor",     "type": "motor", "stats": { "hp": 22, "speed": 5 },  "description": "Geared for torque: slow, pushes hardest. Hard to kill." }
 ]

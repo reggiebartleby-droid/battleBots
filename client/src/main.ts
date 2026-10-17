@@ -3,10 +3,10 @@ import {
 } from '@babylonjs/core';
 import HavokPhysics from '@babylonjs/havok';
 import type { BotBuild } from '../../src/core/types.js';
-import { canAttack, currentSpeed, isDestroyed } from '../../src/core/state.js';
+import { canAttack, isDestroyed } from '../../src/core/state.js';
 import { catalog } from './catalog.js';
 import { buildArena, WALL_H, ARENA_COLOURS, FLOOR_GRIDS, type ArenaStyle } from './arena.js';
-import { buildBot, forward, upVector, REST_Y, driveSpinner, spinOmega, applyGyro, disposeBot, freezeBot, snapSpinner, driveArm, armBefore, armAfter, applyMagnets, magnetGrip, driveFlipper, driveControl, hingesBefore, tyreBefore, tyreAfter, botMeshes, type Bot } from './bot.js';
+import { buildBot, forward, upVector, driveSpinner, spinOmega, applyGyro, disposeBot, freezeBot, snapSpinner, driveArm, armBefore, armAfter, applyMagnets, driveFlipper, driveControl, hingesBefore, driveWheels, wheelsBefore, carryWheels, botMeshes, DRIVE, type Bot } from './bot.js';
 import { applyEnvironment, castShadows, makeShadows } from './look.js';
 import { readDrive, isDown, KEYS, type Drive } from './input.js';
 import { Combat } from './combat.js';
@@ -17,21 +17,11 @@ import { Builder } from './builder.js';
 import { aiDrive, type Difficulty } from './ai.js';
 
 const MATCH_SECONDS = 180;
-/** Drive feel. Push strength = mass x (baseAccel + accelPerSpeed x speed).
- *  v0.7: the drive only acts while the wheels are actually on the floor (grounded + upright) --
- *  a bot lifted on a wedge, launched, or tipped has no grip, which is what makes lifts work. */
-const DRIVE = {
-  speedScale: 0.6,      // motor speed stat -> m/s
-  gain: 6,              // how hard it chases the target speed (1/s)
-  baseAccel: 16,        // m/s^2 every motor can manage
-  accelPerSpeed: 3.5,   // extra m/s^2 per m/s of top speed (stronger motor pushes harder)
-  wheelsDownDot: 0.8,   // up-vector . world-up must be above this for the wheels to grip at all
-  groundedY: 0.08,      // chassis centre may be this far above its rest height and still count as on the floor
-  lateralGrip: 8,       // sideways velocity damping (1/s)
-  turnRate: 3.0,        // rad/s at full stick
-  turnGain: 10,         // how fast yaw rate chases the stick (1/s) -- applied as a torque-like velocity blend
-};
+/** v0.21: the drive is real wheels now -- see DRIVE / driveWheels in bot.ts. */
 const PHYS_STEP = 1 / 60;
+/** v0.21 physics sub-steps: each frame's physics runs in fixed 1/240 s steps. The real wheels hang the chassis'
+ *  weight on axle joints; at one 1/60 s step per frame Havok let them sag 5-13 cm (headless), at 1/240 they hold. */
+const SUB_STEP_MS = 1000 / 240;
 /** OUT of the arena (v0.5): a bot is out once its centre is past a wall plane AND has dropped
  *  below the floor. Out = loss for that bot; first out loses. */
 const OUT = {
@@ -85,6 +75,7 @@ async function main() {
   setupArenaPicker(arena.setStyle, canvas);          // v0.18: neon colour + floor grid (in-match, top right)
   // v0.8: real spinners spin at up to ~70 rad/s -- make sure Havok's speed cap is well above that
   havokPlugin.setVelocityLimits(200, 400);
+  scene.getPhysicsEngine()!.setSubTimeStep(SUB_STEP_MS);
   const hud = new Hud();
   const fx = new Fx(scene, document.getElementById('fxlayer')!);
 
@@ -131,7 +122,7 @@ async function main() {
   const openLab = () => {
     builder.show(
       b => lab.setBuild(b),
-      ({ player, opponent, difficulty: d, breakableWeapons: bw }) => { buildA = player; buildB = opponent; difficulty = d; breakableWeapons = bw; start(); },
+      ({ player, opponent, difficulty: d, breakableWeapons: bw, driveBoost }) => { buildA = player; buildB = opponent; difficulty = d; breakableWeapons = bw; DRIVE.boost = driveBoost; start(); },   // v0.22 test boost (both bots)
     );
   };
   openLab();
@@ -139,13 +130,13 @@ async function main() {
   // v0.8 real spinner damage: weapon energy measured around every physics step
   scene.onBeforePhysicsObservable.add(() => {
     combat?.beforePhysics();
-    const stepDt = Math.min(0.1, Math.max(1 / 240, engine.getDeltaTime() / 1000));   // same clamp as the physics step
-    for (const b of bots) if (!b.eliminated) { applyGyro(b, stepDt); armBefore(b); applyMagnets(b, stepDt); hingesBefore(b); tyreBefore(b); }   // v0.8 gyro; v0.11 arm + magnets; v0.12 hinges + tyre grip
+    const stepDt = SUB_STEP_MS / 1000;   // v0.21: observers run once per physics sub-step
+    for (const b of bots) if (!b.eliminated) { applyGyro(b, stepDt); armBefore(b); applyMagnets(b, stepDt); hingesBefore(b); wheelsBefore(b, stepDt); }   // v0.8 gyro; v0.11 arm + magnets; v0.12 hinges; v0.21 drive motors
   });
   scene.onAfterPhysicsObservable.add(() => {
-    const stepDt = Math.min(0.1, Math.max(1 / 240, engine.getDeltaTime() / 1000));
+    const stepDt = SUB_STEP_MS / 1000;
     combat?.afterPhysics(stepDt);
-    for (const b of bots) if (!b.eliminated) { armAfter(b, stepDt); tyreAfter(b, stepDt, wheelsOnFloor(b)); }   // v0.11 reactionless hammer; v0.12 tyre grip
+    for (const b of bots) if (!b.eliminated) armAfter(b, stepDt);   // v0.11 reactionless hammer
   });
 
   let lastToggle = 0;
@@ -212,36 +203,16 @@ async function main() {
         driveControl(b, b.weapon.held, !b.weapon.suppressed && canAttack(b.state) && !over, motorAlive, dt);
       }
 
-      // Force-based drive: push toward the target speed with a force capped by the motor, so
-      // mass x motor wins shoves and impulses aren't overwritten. Only while the wheels are on
-      // the floor: upright enough AND the chassis sitting at (or near) its rest height.
-      const spd = currentSpeed(b.state) * DRIVE.speedScale;   // motor speed stat -> m/s
-      const v = b.body.getLinearVelocity();
-      const fwd = forward(b); fwd.y = 0;
-      const upDotNow = Vector3.Dot(upVector(b), Vector3.Up());
-      const grounded = b.root.position.y < REST_Y + DRIVE.groundedY;
-      const wheelsDown = upDotNow > DRIVE.wheelsDownDot && grounded && fwd.lengthSquared() > 1e-4;
-      if (wheelsDown) fwd.normalize();
-      if (spd > 0 && !over && !helpless && wheelsDown) {
-        const mass = b.body.getMassProperties().mass ?? 50;
-        const right = Vector3.Cross(Vector3.Up(), fwd);
-        const vf = Vector3.Dot(v, fwd), vr = Vector3.Dot(v, right);
-        const maxAccel = (DRIVE.baseAccel + DRIVE.accelPerSpeed * spd) * magnetGrip(b);   // motor strength (v0.11: x magnet grip)
-        const wantAccel = (d.throttle * spd - vf) * DRIVE.gain;
-        const accel = Math.max(-maxAccel, Math.min(maxAccel, wantAccel));
-        const lateral = -vr * DRIVE.lateralGrip;                                  // tyres resist sliding
-        const force = fwd.scale(accel * mass).add(right.scale(lateral * mass));
-        b.body.applyForce(force, b.root.position);
-        // Steering: blend the yaw rate toward the stick; pitch/roll are left to physics now
-        const av = b.body.getAngularVelocity();
-        const k = Math.min(1, dt * DRIVE.turnGain);
-        b.body.setAngularVelocity(new Vector3(av.x, av.y + (d.turn * DRIVE.turnRate - av.y) * k, av.z));
-      }
+      // v0.21 real wheels: tank-mixed stick into each wheel's drive motor (wheelsBefore); tyre friction does the rest
+      driveWheels(b, d.throttle, d.turn, !over && !helpless);
 
       // Grey out dead parts
       for (const [sid, m] of Object.entries(b.partMeshes)) {
         const ps = b.state.parts[sid];
-        if (ps && ps.hp <= 0) { m.visibility = 0.25; for (const c of m.getChildMeshes()) c.visibility = 0.25; }
+        if (ps && ps.hp <= 0) {
+          m.visibility = 0.25; for (const c of m.getChildMeshes()) c.visibility = 0.25;
+          if (sid === 'wheels') for (const w of b.wheels ?? []) for (const c of [w.tyre, ...w.tyre.getChildMeshes()]) c.visibility = 0.25;   // v0.21 tyres live on their own bodies
+        }
       }
     }
 
@@ -295,10 +266,11 @@ async function main() {
       if (now >= b.rightingUntil) {
         const fwd = forward(b);
         const yaw = Math.atan2(fwd.x, fwd.z);
-        b.body.disablePreStep = false;                           // let the mesh transform drive the body this frame
+        b.body.disablePreStep = false;                           // let the mesh transform drive the body at the next physics step
+                                                                 // (v0.21: re-enabled after physics, not after render -- physics runs before render, so the snap never applied)
         b.root.rotationQuaternion = Quaternion.RotationAxis(Vector3.Up(), yaw);
         b.body.setAngularVelocity(Vector3.Zero());
-        scene.onAfterRenderObservable.addOnce(() => { b.body.disablePreStep = true; });
+        scene.onAfterPhysicsObservable.addOnce(() => { b.body.disablePreStep = true; });
         snapSpinner(b, scene);                                   // weapon follows the chassis, keeps its spin
         b.rightingUntil = undefined;
         b.inverted = undefined;
@@ -326,13 +298,10 @@ async function main() {
       const fwd = forward(b); fwd.y = 0; fwd.normalize();
       b.body.setLinearVelocity(new Vector3(vel.x, INVERT.hopUp, vel.z));
       b.body.setAngularVelocity(fwd.scale(INVERT.roll));
+      carryWheels(b);                                    // v0.21: the wheels roll with it
       b.rightingUntil = now + INVERT.snapMs;
       hud.sign('SELF-RIGHT!', 700, '#4dd2ff');
     }
-  }
-
-  function wheelsOnFloor(b: Bot): boolean {
-    return Vector3.Dot(upVector(b), Vector3.Up()) > DRIVE.wheelsDownDot && b.root.position.y < REST_Y + DRIVE.groundedY;
   }
 
   function isOut(b: Bot): boolean {

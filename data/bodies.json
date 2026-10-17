@@ -50,15 +50,14 @@
   {
     "id": "flipper",
     "name": "Flipper",
-    "description": "Rear-hinged flipper: pneumatic (huge, limited gas) or electric (weaker, unlimited). Self-rights with the flipper. Two wheel sets, no secondary.",
+    "description": "Rear-hinged flipper: pneumatic (huge, limited gas) or electric (weaker, unlimited). Self-rights with the flipper. No secondary.",
     "weightLimit": 275,
     "sockets": [
       { "id": "weapon", "type": "weapon" },
       { "id": "weapon_motor", "type": "weapon_motor" },
       { "id": "front", "type": "front", "required": false },
       { "id": "armor", "type": "armor" },
-      { "id": "wheels_1", "type": "wheels" },
-      { "id": "wheels_2", "type": "wheels" },
+      { "id": "wheels", "type": "wheels" },
       { "id": "motor", "type": "motor" }
     ],
     "allowedWeaponKinds": ["pneumatic_flipper", "electric_flipper"]

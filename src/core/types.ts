@@ -82,6 +82,9 @@ export type Trait =
   | 'grip'              // grappler/crusher: can hold the opponent
   | 'burn';             // flame: damage over time
 
+/** v0.21 wheel layout (wheels parts only): driven wheels per side. 2wd = one centre axle + skids. */
+export type WheelLayout = '2wd' | '4wd' | '6wd';
+
 export interface PartDef {
   id: string;
   name: string;
@@ -89,6 +92,8 @@ export interface PartDef {
   /** Required for weapon/front/secondary; absent for armor/wheels/motor. */
   kind?: PartKind;
   stats: PartStats;
+  /** Wheels parts only (v0.21). */
+  layout?: WheelLayout;
   traits?: Trait[];
   description?: string;
 }

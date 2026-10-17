@@ -107,12 +107,12 @@ test('v0.17 unbreakable weapons: weapon + weapon motor stop at 1 HP, KO ignores 
   assert.ok(createBotState(good, catalog).breakableWeapons);   // core default unchanged
 });
 
-test('flipper: one wheel set left still mobile', () => {
-  const s = createBotState({ bodyId: 'flipper', sockets: { weapon: 'fl_pneumatic', weapon_motor: 'wm_std', front: null, armor: 'armor_light', wheels_1: 'wheels_light', wheels_2: 'wheels_light', motor: 'motor_std' }, cosmetics: { name: 'F' } }, catalog);
-  applyDamage(s, 'wheels_1', 999);
+test('v0.21 flipper: one wheel socket; wheel parts carry a layout', () => {
+  const s = createBotState({ bodyId: 'flipper', sockets: { weapon: 'fl_pneumatic', weapon_motor: 'wm_std', front: null, armor: 'armor_light', wheels: 'wheels_light', motor: 'motor_std' }, cosmetics: { name: 'F' } }, catalog);
   assert.ok(!isImmobilized(s));
-  applyDamage(s, 'wheels_2', 999);
+  applyDamage(s, 'wheels', 999);
   assert.ok(isImmobilized(s));
+  assert.deepEqual(['wheels_light', 'wheels_std', 'wheels_armored'].map(id => catalog.parts[id].layout), ['2wd', '4wd', '6wd']);
 });
 
 test('horizontal spinner (v0.9): needs a weapon motor, Noisy Cricket fits 275', () => {
@@ -149,14 +149,14 @@ test('vertical spinner needs a weapon motor; weapon motors only fit that socket'
 
 test('v0.12: flipper, control and full-body spinner need a weapon motor; presets fit 275', () => {
   const builds: BotBuild[] = [
-    // Flip Side: fl_pneumatic 88 + wm_std 22 + front_wedge 35 + armor_light 25 + wheels_std 30 x2 + motor_std 37 = 267
-    { bodyId: 'flipper', sockets: { weapon: 'fl_pneumatic', weapon_motor: 'wm_std', front: 'front_wedge', armor: 'armor_light', wheels_1: 'wheels_std', wheels_2: 'wheels_std', motor: 'motor_std' }, cosmetics: { name: 'FS' } },
+    // Flip Side (v0.21 one wheel socket): fl_pneumatic 88 + wm_std 22 + front_wedge 35 + armor_light 25 + wheels_std 30 + motor_std 37 = 237
+    { bodyId: 'flipper', sockets: { weapon: 'fl_pneumatic', weapon_motor: 'wm_std', front: 'front_wedge', armor: 'armor_light', wheels: 'wheels_std', motor: 'motor_std' }, cosmetics: { name: 'FS' } },
     // Blue Lift: ct_lifter 74 (v0.13 armored fork) + 22 + 35 + armor_medium 37 x2 + 30 + motor_fast 40 = 275
     { bodyId: 'control', sockets: { weapon: 'ct_lifter', weapon_motor: 'wm_std', front: 'front_wedge', armor_1: 'armor_medium', armor_2: 'armor_medium', wheels: 'wheels_std', motor: 'motor_fast', secondary: null }, cosmetics: { name: 'BL' } },
     // Shell Shock: fbs_shell 170 + 22 + 30 + 37 = 259
     { bodyId: 'full_body_spinner', sockets: { weapon: 'fbs_shell', weapon_motor: 'wm_std', wheels: 'wheels_std', motor: 'motor_std' }, cosmetics: { name: 'SS' } },
   ];
-  const totals = [267, 275, 259];
+  const totals = [237, 275, 259];
   builds.forEach((b, i) => {
     const v = validateBuild(b, catalog);
     assert.deepEqual(v.errors, []);

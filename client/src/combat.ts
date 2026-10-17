@@ -36,7 +36,7 @@
  */
 import { Vector3, type IPhysicsCollisionEvent, PhysicsEventType } from '@babylonjs/core';
 import { applyDamage, canAttack } from '../../src/core/state.js';
-import { forward, spinEnergy, armEnergy, energyOf, weaponBodies, CONTROL, type Bot } from './bot.js';
+import { forward, spinEnergy, armEnergy, energyOf, weaponBodies, chassisBodies, isChassis, CONTROL, type Bot } from './bot.js';
 import type { PhysicsBody } from '@babylonjs/core';
 import type { Fx } from './fx.js';
 
@@ -137,7 +137,7 @@ export class Combat {
       }
     }
     // v0.12 slam damage: chassis hitting floor / walls
-    for (const b of bots) for (const body of [b.body, ...weaponBodies(b).map(w => w.body)]) body.getCollisionObservable().add(ev => this.onSlam(b, ev));
+    for (const b of bots) for (const body of [...chassisBodies(b), ...weaponBodies(b).map(w => w.body)]) body.getCollisionObservable().add(ev => this.onSlam(b, ev));   // v0.21: + real wheels
   }
 
   private pierceJ = new Map<string, number>();
@@ -149,8 +149,8 @@ export class Combat {
   private onSlam(self: Bot, ev: IPhysicsCollisionEvent) {
     if (ev.type !== PhysicsEventType.COLLISION_STARTED) return;
     const other = this.other(self);
-    if (ev.collidedAgainst === other.body || weaponBodies(other).some(w => w.body === ev.collidedAgainst)) return;
-    if (ev.collidedAgainst === self.body || weaponBodies(self).some(w => w.body === ev.collidedAgainst)) return;
+    if (isChassis(other, ev.collidedAgainst) || weaponBodies(other).some(w => w.body === ev.collidedAgainst)) return;
+    if (isChassis(self, ev.collidedAgainst) || weaponBodies(self).some(w => w.body === ev.collidedAgainst)) return;
     const touch = this.lastWeaponTouch.get(self.id);
     const now = performance.now();
     if (!touch || now - touch.t > SLAM.windowMs) return;
@@ -169,7 +169,7 @@ export class Combat {
     const up = Vector3.TransformNormal(Vector3.Up(), self.root.getWorldMatrix()).y;
     const alive = (id: string) => (self.state.parts[id]?.hp ?? 0) > 0;
     // landed on its back -> top armor takes it; on its wheels / side -> wheels, then side armor
-    const order = up < 0 ? ['armor', 'armor_1', 'armor_2', 'weapon', 'motor'] : ['wheels', 'wheels_1', 'wheels_2', 'armor_1', 'armor_2', 'armor', 'motor'];
+    const order = up < 0 ? ['armor', 'armor_1', 'armor_2', 'weapon', 'motor'] : ['wheels', 'armor_1', 'armor_2', 'armor', 'motor'];
     const socket = order.find(alive) ?? Object.keys(self.state.parts).find(alive);
     if (!socket) return;
     const dealt = applyDamage(self.state, socket, raw);
@@ -231,7 +231,7 @@ export class Combat {
     const other = this.other(self);
     const hitW = weaponBodies(other).find(w => w.body === ev.collidedAgainst);
     const vsWeapon = !!hitW;
-    if (ev.collidedAgainst !== other.body && !vsWeapon) return;     // floor / wall / own chassis
+    if (!isChassis(other, ev.collidedAgainst) && !vsWeapon) return;     // floor / wall / own chassis (v0.21: their wheels count as their chassis)
     if (ev.type !== PhysicsEventType.COLLISION_STARTED && ev.type !== PhysicsEventType.COLLISION_CONTINUED) return;
     c.touching = true;
     this.lastWeaponTouch.set(other.id, { t: performance.now(), by: self });   // v0.12 slam credit
@@ -269,7 +269,7 @@ export class Combat {
     const other = this.other(self);
     // wall/floor hit: no damage (hazards are a later topic). v0.8: the other bot's real weapons count as that bot.
     const vsHub = weaponBodies(other).some(w => w.body === ev.collidedAgainst);
-    if (ev.collidedAgainst !== other.body && !vsHub) return;
+    if (!isChassis(other, ev.collidedAgainst) && !vsHub) return;
     if (ev.type === PhysicsEventType.COLLISION_STARTED) {
       this.resolve(self, other, ev, !vsHub);           // touching a spinning weapon isn't announced as a bump
     } else if (ev.type === PhysicsEventType.COLLISION_CONTINUED) {
@@ -331,8 +331,8 @@ function pickSocket(defender: Bot, attacker: Bot): string {
   const anyAlive = () => Object.keys(defender.state.parts).find(alive) ?? 'weapon';
 
   if (f > 0.5)  return firstAlive('front', 'weapon', 'weapon_motor', 'armor', 'armor_1', 'armor_2') ?? anyAlive();
-  if (f < -0.5) return firstAlive('wheels', 'wheels_1', 'wheels_2', 'motor', 'armor', 'armor_1', 'armor_2', 'weapon_motor') ?? anyAlive();
+  if (f < -0.5) return firstAlive('wheels', 'motor', 'armor', 'armor_1', 'armor_2', 'weapon_motor') ?? anyAlive();
   // side hits: full-body spinners have no armor, so the shell takes it
-  const side = r > 0 ? ['armor_2', 'wheels_2'] : ['armor_1', 'wheels_1'];
+  const side = r > 0 ? ['armor_2'] : ['armor_1'];
   return firstAlive(...side, 'armor', 'wheels', 'secondary', 'weapon_motor', 'weapon', 'motor') ?? anyAlive();
 }
