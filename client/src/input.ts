@@ -1,3 +1,5 @@
+import { TOUCH, VKEYS } from './mobile.js';
+
 export interface Drive { throttle: number; turn: number; fire: boolean }
 
 export const KEYS = {
@@ -13,7 +15,7 @@ window.addEventListener('keydown', e => {
 window.addEventListener('keyup', e => keys.delete(e.code));
 window.addEventListener('blur', () => keys.clear());
 
-export function isDown(code: string) { return keys.has(code); }
+export function isDown(code: string) { return keys.has(code) || VKEYS.has(code); }   // v0.32: + phone buttons
 
 /** v0.21 gamepads (browser Gamepad API, standard mapping): P1 = first connected pad, P2 = second.
  *  Left stick = one-stick drive like a real transmitter (partial throttle / turn); A / Cross or the right
@@ -37,6 +39,12 @@ export function readDrive(player: 'A' | 'B'): Drive {
     throttle = bigger(throttle, -dz(g.axes[1] ?? 0));   // stick up = negative axis
     turn = bigger(turn, dz(g.axes[0] ?? 0));
     fire = fire || !!g.buttons[0]?.pressed || (g.buttons[7]?.value ?? 0) > 0.5;
+  }
+  if (player === 'A') {                                   // v0.32 phone joystick + FIRE (a quick tap still counts for one frame)
+    throttle = bigger(throttle, TOUCH.throttle);
+    turn = bigger(turn, TOUCH.turn);
+    fire = fire || TOUCH.fireHeld || TOUCH.fireLatch;
+    TOUCH.fireLatch = false;
   }
   return { throttle, turn, fire };
 }

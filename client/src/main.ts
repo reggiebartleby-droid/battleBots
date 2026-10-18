@@ -20,6 +20,8 @@ import { CamControl } from './cam.js';
 import { Builder, PRESETS } from './builder.js';
 import { Course, STATIONS, COURSE_ORIGIN, COURSE, type StationId, type RunResult } from './course.js';
 import { aiDrive, type Difficulty } from './ai.js';
+import { MOBILE, MobileMenu, setupTouchControls } from './mobile.js';
+import { CUBES } from './cubes.js';
 
 const MATCH_SECONDS = 180;
 /** v0.21: the drive is real wheels now -- see DRIVE / driveWheels in bot.ts. */
@@ -56,6 +58,7 @@ const INVERT = {
 async function main() {
   const canvas = document.getElementById('c') as HTMLCanvasElement;
   const engine = new Engine(canvas, true);
+  if (MOBILE) { engine.setHardwareScalingLevel(1.5); CUBES.size = 'big'; }   // v0.32 phone: lower resolution, big cubes (not saved)
 
   // ---- Match scene (arena + physics) ----
   const scene = new Scene(engine);
@@ -93,8 +96,17 @@ async function main() {
   // ---- Lab scene (builder preview, no physics) ----
   const lab = new Lab(engine, catalog);
   const builder = new Builder(catalog);
+  // v0.32 phones: simple menu instead of the builder; no shadows, lighter glow
+  const mmenu = MOBILE ? new MobileMenu(PRESETS, { player: 'Noisy Cricket', opponent: 'Hammer Time' }) : null;
+  const inMenu = () => builder.visible || !!mmenu?.visible;
+  if (MOBILE) for (const sc of [scene, lab.scene]) {
+    sc.shadowsEnabled = false;
+    for (const l of sc.effectLayers) { const g = l as unknown as { blurKernelSize: number; intensity: number }; g.blurKernelSize = 16; g.intensity *= 0.8; }
+  }
+  if (MOBILE) { hud.details = false; }
   // v0.24 camera views: Q cycles, remembered in this browser (all modes)
-  const camCtl = new CamControl(cam, lab.camera, canvas, () => builder.visible || bots.length === 0);
+  const camCtl = new CamControl(cam, lab.camera, canvas, () => inMenu() || bots.length === 0);
+  setupTouchControls(() => camCtl.cycle());                       // v0.32 phone joystick / FIRE / CAM / RESTART / MENU
   // v0.24 lab weapon test button (SPACE works too)
   const wtBtn = document.getElementById('bb-wtest') as HTMLButtonElement;
   wtBtn.addEventListener('pointerdown', () => { lab.buttonHeld = true; });
@@ -135,7 +147,13 @@ async function main() {
     const [a, b] = bots;
     rd.title.innerHTML = `<span style="color:${a.build.cosmetics.paint}">${a.build.cosmetics.name}</span><span class="vs">VS</span>`
       + `<span style="color:${b.build.cosmetics.paint}">${b.build.cosmetics.name}</span>`;
-    const rows: [string, string][] = [
+    const rows: [string, string][] = MOBILE ? [
+      ['DRIVE', 'Joystick (bottom left)'],
+      ['WEAPON', a.weapon.hint('FIRE')],
+      ['CAMERA', 'CAM changes the view · drag the screen to look around'],
+      ['TO WIN', 'Destroy the other bot, or knock it out of the arena. At 3:00, whoever took less damage wins.'],
+      ['BUTTONS', 'RESTART: new battle · MENU: pick bots'],
+    ] : [
       ['DRIVE', 'W A S D (or gamepad left stick)'],
       ['WEAPON', a.weapon.hint('SPACE')],
       ['CAMERA', 'Q changes the view · drag to look around · mouse wheel zooms'],
@@ -145,11 +163,11 @@ async function main() {
     if (p2Human) rows.splice(2, 0, ['PLAYER 2', `Arrows + Right SHIFT — ${b.weapon.hint('Right SHIFT')}`]);
     rd.table.innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
     rd.start.style.display = info ? 'none' : '';
-    rd.small.textContent = info ? 'I: close' : 'Enter or click START · B: back to the lab';
+    rd.small.textContent = MOBILE ? 'Tap START' : info ? 'I: close' : 'Enter or click START · B: back to the lab';
     rd.box.classList.add('on');
   };
   const beginCountdown = () => {
-    if (phase !== 'ready' || !bots.length || builder.visible || mode !== 'match') return;
+    if (phase !== 'ready' || !bots.length || inMenu() || mode !== 'match') return;
     goCountdown();
   };
   /** v0.31: 3-2-1 starts; spinners switch on with the "3" so they're at top speed by FIGHT! */
@@ -161,7 +179,7 @@ async function main() {
   };
   rd.start.addEventListener('click', beginCountdown);
   window.addEventListener('keydown', e => {
-    if ((e.code === 'Enter' || e.code === 'NumpadEnter') && !e.repeat && phase === 'ready' && !builder.visible && mode === 'match') { e.preventDefault(); beginCountdown(); }
+    if ((e.code === 'Enter' || e.code === 'NumpadEnter') && !e.repeat && phase === 'ready' && !inMenu() && mode === 'match') { e.preventDefault(); beginCountdown(); }
   });
   /** Countdown display; returns true once FIGHT! is reached. */
   const tickCountdown = (now: number): boolean => {
@@ -193,6 +211,13 @@ async function main() {
 
   const openLab = () => {
     rd.box.classList.remove('on'); rd.count.className = '';
+    if (mmenu) {                                       // v0.32 phone menu: preset bots only, arena only
+      if (mmenu.visible) return;
+      mmenu.show(b => lab.setBuild(b), ({ player, opponent, difficulty: d }) => {
+        buildA = player; buildB = opponent; difficulty = d; breakableWeapons = false; DRIVE.boost = 3; start();
+      });
+      return;
+    }
     builder.show(
       b => lab.setBuild(b),
       ({ player, opponent, difficulty: d, breakableWeapons: bw, driveBoost }) => { buildA = player; buildB = opponent; difficulty = d; breakableWeapons = bw; DRIVE.boost = driveBoost; start(); },   // v0.22 test boost (both bots)
@@ -346,13 +371,13 @@ async function main() {
   // v0.19 HUD: V cycles the layout (top / bottom / left), H shows the test numbers. One press = one step
   // (key events, not polling); ignored while typing in the lab.
   window.addEventListener('keydown', e => {
-    if (e.repeat || builder.visible) return;
+    if (e.repeat || inMenu()) return;
     if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
     if (mode === 'course') {                       // v0.23: C = back to the station picker
       if (e.code === 'KeyC' && !cm.menu.classList.contains('on')) showCourseMenu();
       return;
     }
-    if (e.code === 'KeyI' && !e.repeat && mode === 'match' && !builder.visible && bots.length && phase !== 'ready') {   // v0.31
+    if (e.code === 'KeyI' && !e.repeat && mode === 'match' && !inMenu() && bots.length && phase !== 'ready') {   // v0.31
       if (rd.box.classList.contains('on')) rd.box.classList.remove('on'); else showReady(true);
     }
     if (e.code === 'KeyV') hud.cycleView();
@@ -498,7 +523,7 @@ async function main() {
     }
   }
 
-  function end(text: string, color: string) { over = true; hud.showWinner(text + '  —  R: play again · B: lab', color); }
+  function end(text: string, color: string) { over = true; hud.showWinner(text + (MOBILE ? '' : '  —  R: play again · B: lab'), color); }
 
   /** Track upside-down / self-righting for one bot. */
   function updateInverted(b: Bot, now: number) {
@@ -563,7 +588,7 @@ async function main() {
   }
 
   engine.runRenderLoop(() => {
-    if (builder.visible || bots.length === 0) lab.render();
+    if (inMenu() || bots.length === 0) lab.render();
     else scene.render();
   });
   window.addEventListener('resize', () => engine.resize());

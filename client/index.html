@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
   <title>Robot Revolution</title>
   <style>
     html, body { margin: 0; height: 100%; background: #0b0d10; overflow: hidden; font-family: system-ui, sans-serif; color: #eee; }
@@ -158,6 +158,41 @@
     body.incourse #chud { display: block; }
     body.incourse #hud, body.incourse #controls, body.incourse #finish, body.incourse #winner { display: none; }
     body.incourse.inmenu #chud, body.incourse.inmenu #help { display: none; }
+
+    /* ---- v0.32 phone / tablet mode (body.mobile, see mobile.ts) ---- */
+    #m-controls, #mmenu, #rotate { display: none; }
+    body.mobile { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; touch-action: none; }
+    body.mobile #help, body.mobile #lab, body.mobile #controls { display: none !important; }
+    body.mobile #m-controls { display: block; position: absolute; inset: 0; pointer-events: none; }
+    body.mobile.inlab #m-controls { display: none; }
+    body.mobile #ready.on ~ #m-controls { display: none; }   /* start card first, then the controls */
+    #m-stick { position: absolute; left: max(16px, env(safe-area-inset-left)); bottom: 16px; width: 170px; height: 170px; border-radius: 50%; background: rgba(255,255,255,.06); border: 2px solid rgba(62,230,196,.45); pointer-events: auto; touch-action: none; }
+    #m-knob { position: absolute; left: 50%; top: 50%; width: 70px; height: 70px; margin: -35px 0 0 -35px; border-radius: 50%; background: rgba(62,230,196,.35); border: 2px solid #3ee6c4; box-shadow: 0 0 12px rgba(62,230,196,.6); pointer-events: none; }
+    #m-fire { position: absolute; right: max(20px, env(safe-area-inset-right)); bottom: 30px; width: 120px; height: 120px; border-radius: 50%; border: 3px solid #ff5a3c; background: rgba(255,90,60,.25); color: #fff; font: 900 20px/1 system-ui, sans-serif; letter-spacing: .1em; pointer-events: auto; touch-action: none; }
+    #m-fire.down { background: rgba(255,90,60,.65); box-shadow: 0 0 20px #ff5a3c; }
+    #m-btns { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); display: flex; gap: 8px; pointer-events: auto; }
+    #m-btns button { font: 700 12px/1 system-ui, sans-serif; letter-spacing: .1em; background: rgba(14,16,20,.75); color: #d7e3e6; border: 1px solid #4a4f58; border-radius: 5px; padding: 10px 12px; }
+    body.mobile #mmenu.on { display: block; position: absolute; right: max(12px, env(safe-area-inset-right)); top: 50%; transform: translateY(-50%); width: min(300px, calc(100% - 24px)); background: rgba(20,27,32,.94); border: 2px solid #2a363f; border-radius: 8px; padding: 12px 14px; box-sizing: border-box; font-family: ui-monospace, Consolas, monospace; color: #d7e3e6; }
+    #mmenu h3 { margin: 0 0 10px; font: 800 15px/1 system-ui, sans-serif; letter-spacing: .14em; color: #f2b134; }
+    #mmenu label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; letter-spacing: .1em; color: #8fa3ad; margin-bottom: 8px; }
+    #mmenu select { font: inherit; font-size: 15px; background: #0b1013; color: #d7e3e6; border: 1px solid #33424c; border-radius: 4px; padding: 8px; }
+    #mmenu .go { width: 100%; margin-top: 4px; font: 800 20px/1 system-ui, sans-serif; letter-spacing: .16em; background: #f2b134; color: #141b20; border: 0; border-radius: 6px; padding: 14px; }
+    #mmenu .note { margin-top: 8px; font-size: 10px; color: #6f8089; text-align: center; }
+    /* smaller HUD / signs on a phone; scoreboards always along the top */
+    body.mobile #hud { top: 6px !important; bottom: auto !important; left: 8px !important; right: 8px !important; width: auto !important; flex-direction: row !important; align-items: flex-start !important; justify-content: space-between !important; }
+    body.mobile .board { width: 165px; padding: 3px 6px 4px; }
+    body.mobile #timer { width: 42px; height: 42px; font-size: 14px; }
+    body.mobile #finish { font-size: 34px; top: 30% !important; }
+    body.mobile #winner { font-size: 26px; padding: 0 12px; }
+    body.mobile #sign { font-size: 24px; top: 34% !important; }
+    body.mobile #countdown { font-size: 72px; }
+    body.mobile #ready .card { padding: 12px 16px; max-height: calc(100% - 24px); overflow: auto; }
+    body.mobile #ready table { font-size: 12px; }
+    body.mobile #ready .go { margin: 10px auto 4px; padding: 12px 36px; }
+    /* landscape only */
+    @media (orientation: portrait) {
+      body.mobile #rotate { display: flex; position: fixed; inset: 0; z-index: 100; background: #0b0d10; align-items: center; justify-content: center; text-align: center; font: 800 20px/1.5 system-ui, sans-serif; letter-spacing: .08em; color: #f2b134; padding: 24px; }
+    }
   </style>
 </head>
 <body>
@@ -247,6 +282,21 @@
       <div class="keys">R run again · C stations · B lab</div>
     </div>
   </div>
+  <!-- v0.32 phone mode -->
+  <div id="m-controls">
+    <div id="m-stick"><div id="m-knob"></div></div>
+    <button id="m-fire" type="button">FIRE</button>
+    <div id="m-btns"><button id="m-cam" type="button">CAM</button><button id="m-restart" type="button">RESTART</button><button id="m-menu" type="button">MENU</button></div>
+  </div>
+  <div id="mmenu">
+    <h3>ROBOT REVOLUTION</h3>
+    <label>YOUR BOT <select id="mm-bot"></select></label>
+    <label>OPPONENT (AI) <select id="mm-opp"></select></label>
+    <label>AI LEVEL <select id="mm-diff"><option value="easy">Easy</option><option value="normal">Normal</option><option value="hard">Hard</option></select></label>
+    <button class="go" id="mm-fight" type="button">FIGHT ▶</button>
+    <div class="note">Phone version: preset bots only. Build your own bot on a computer.</div>
+  </div>
+  <div id="rotate">⟳ Turn your phone sideways to play</div>
   <div id="finish">FINISH HIM!</div>
   <div id="winner"></div>
   <div id="hud">
