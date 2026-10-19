@@ -28,12 +28,14 @@ import { Upgrades } from './upgrades.js';   // v0.40 race upgrades (SCRAP meter)
 import { Race, RACE, TRACK_IDS, ordinal, fmtTime, type Racer, type TrackId } from './race.js';
 
 const MATCH_SECONDS = 180;
-/** v0.37 tester version: the page opens straight into a race (no lab, no arena battle). Track + car are picked on the
- *  start card and on the results screen. Your lab: add ?lab=1 to the link (npm run dev always has the lab; ?tester=1
- *  shows the tester version there). Phones keep the v0.32 phone menu (race is desktop only). */
+/** v0.37 tester version: the page opens straight into a race. Track + car are picked on the start card and on the
+ *  results screen.
+ *  v0.46 (user): the main link (and npm run dev) always opens that race with the pickers; nothing on screen mentions the
+ *  lab or the arena, but B (desktop) still opens the lab. ?lab=1 still opens the lab straight away. A race started from
+ *  the lab's RACE button is a lab race (lab settings, no pickers, B back to the lab). */
 const QS0 = new URLSearchParams(location.search);
 // v0.39 (user): phones get the race only too (race + track / car pickers, no menu, no arena) -- ?mobile=1 tries it on the PC
-const TESTER = QS0.get('lab') !== '1' && (MOBILE || !import.meta.env.DEV || QS0.get('tester') === '1');
+const TESTER = QS0.get('lab') !== '1' || MOBILE;   // v0.46: the picker race is the start page everywhere (was: built site only)
 /** Fixed tester settings (the user's own race settings, 2026-10-19): drive boost x3, race speed x3, AI Normal,
  *  Cube Bots look, Neon Energy cubes, 8-bit (big). Not saved, so they never change the lab's own settings. */
 const TESTER_SET = { boost: 3, raceSpeed: 3, ai: 'normal' as Difficulty, track: 'oval' as TrackId | 'random', car: 'Flip Side' };
@@ -205,7 +207,7 @@ async function main() {
   rd.start.addEventListener('click', () => { if (mode === 'race') goFullscreen(); beginCountdown(); });   // v0.39 phone: full screen on START
   window.addEventListener('keydown', e => {
     if ((e.code === 'Enter' || e.code === 'NumpadEnter') && !e.repeat && phase === 'ready' && !inMenu() && mode !== 'course') { e.preventDefault(); beginCountdown(); }
-    else if ((e.code === 'Enter' || e.code === 'NumpadEnter') && !e.repeat && TESTER && mode === 'race' && rr.box.classList.contains('on')) { e.preventDefault(); startRace(true); }   // v0.37
+    else if ((e.code === 'Enter' || e.code === 'NumpadEnter') && !e.repeat && pickRace && mode === 'race' && rr.box.classList.contains('on')) { e.preventDefault(); startRace(true); }   // v0.37
   });
   /** Countdown display; returns true once FIGHT! is reached. */
   const tickCountdown = (now: number): boolean => {
@@ -245,6 +247,7 @@ async function main() {
       });
       return;
     }
+    if (pickRace) { Object.assign(CUBES, LAB_CUBES); setPickRace(false); }   // v0.46 B from the picker race: the lab's own look + settings
     builder.show(
       b => lab.setBuild(b),
       ({ player, opponent, difficulty: d, breakableWeapons: bw, driveBoost }) => { buildA = player; buildB = opponent; difficulty = d; breakableWeapons = bw; DRIVE.boost = driveBoost; start(); },   // v0.22 test boost (both bots)
@@ -389,7 +392,7 @@ async function main() {
     again: document.getElementById('rr-again') as HTMLButtonElement, lab: document.getElementById('rr-lab') as HTMLButtonElement,
     cubes: document.getElementById('rr-cubes')!,   // v0.38
   };
-  rr.again.onclick = () => { goFullscreen(); startRace(TESTER); };   // v0.37 tester: the pickers are on the results screen, so straight to 3-2-1
+  rr.again.onclick = () => { goFullscreen(); startRace(pickRace); };   // v0.37 tester: the pickers are on the results screen, so straight to 3-2-1
   rr.lab.onclick = () => { leaveRace(); openLab(); };
   const RIVAL_IDS = ['B', 'C', 'D'] as const;
   let raceSpeedMul = 1;   // v0.34d lab RACE SPEED slider: x1 = the v0.34 race pace, up to x3
@@ -425,6 +428,16 @@ async function main() {
     car: [document.getElementById('tp-car') as HTMLSelectElement, document.getElementById('tp-car2') as HTMLSelectElement],
   };
   let testerCar = TESTER_SET.car;
+  /** v0.46: this race uses the track + car pickers (true from the start page; false once the lab's RACE button is used) */
+  let pickRace = TESTER;
+  const LAB_CUBES = { ...CUBES };   // v0.46 the lab's own saved cube look (the picker race forces Neon Energy, not saved)
+  const RR_TEXT = { again: rr.again.textContent ?? '', keys: (rr.box.querySelector('.keys') as HTMLElement).textContent ?? '' };
+  const setPickRace = (on: boolean) => {
+    pickRace = on;
+    document.body.classList.toggle('tester', on);
+    rr.again.textContent = on ? 'START ▶' : RR_TEXT.again;
+    (rr.box.querySelector('.keys') as HTMLElement).textContent = on ? (MOBILE ? 'START: next race' : 'Enter or START: next race · R: restart') : RR_TEXT.keys;
+  };
   if (TESTER) {
     document.body.classList.add('tester');
     let saved: { track?: string; car?: string } = {};
@@ -450,14 +463,13 @@ async function main() {
       sel.addEventListener('keydown', e => e.preventDefault());   // mouse only: R / Enter / WASD never change the pick by accident
       sel.addEventListener('change', () => pick(sel, sel === tp.track[0] || sel === tp.car[0]));
     }
-    rr.again.textContent = 'START ▶';
-    (rr.box.querySelector('.keys') as HTMLElement).textContent = MOBILE ? 'START: next race' : 'Enter or START: next race · R: restart';
+    setPickRace(true);
   }
   // ---------------- v0.43 controller (user): menus + buttons. A / Start = START, Y = camera, Back / View = restart,
   // LB / RB = track, D-pad left / right = car (start card + results). Phone: a controller hides the touch buttons.
   const cardUp = () => rd.box.classList.contains('on') || rr.box.classList.contains('on');
   function padPick(kind: 'track' | 'car', dir: number) {
-    if (!TESTER || mode !== 'race' || !cardUp()) return;
+    if (!pickRace || mode !== 'race' || !cardUp()) return;
     const sel = (kind === 'track' ? tp.track : tp.car)[rd.box.classList.contains('on') ? 0 : 1];
     const n = sel.options.length; if (!n) return;
     sel.selectedIndex = (sel.selectedIndex + dir + n) % n;
@@ -527,7 +539,7 @@ async function main() {
     if (MOBILE && camCtl.view === 'chase') cam.beta = Math.min(cam.beta, PHONE_CAM.maxBeta);   // v0.41 phone: a bit higher
     sun.position = p.root.position.add(SUN_OFFSET);
     drawRaceHud(performance.now(), true);
-    if (TESTER && !skipCard) showRaceReady();   // v0.37 tester: track + car pickers before every START (first load, R)
+    if (pickRace && !skipCard) showRaceReady();   // v0.37 tester: track + car pickers before every START (first load, R)
     else if (!raceSeen) showRaceReady(); else goCountdown();
     canvas.focus();
   }
@@ -564,15 +576,15 @@ async function main() {
       ['UPGRADES', 'Vacuumed cubes, laps (more for the back of the pack), damage and the gold SCRAP boxes fill your SCRAP meter: 25 = MOTOR, 60 = ARMOR plating, 100 = WEAPON power, 150 = a spiked RAM on your back that punches the first bot to get close behind you (once). Upgrades are cubes: hits knock them off. 25 more scrap rebuilds a lost one. Wrecked = all lost.'],   // v0.40
       ['TRACK', race.def.desc],   // v0.35
       ['WALLET', `${CUBE_ICON}<b class="cubes">${walletCubes()}</b> cubes · par ${fmtTime(parFor())}`],   // v0.38
-      pad ? ['BUTTONS', 'Y: camera · Back / View: restart'] : MOBILE ? ['BUTTONS', 'CAM: change the view · RESTART: start over'] : ['KEYS', TESTER ? 'R: restart · Q: camera' : 'R: restart · B: lab · Q: camera'],
+      pad ? ['BUTTONS', 'Y: camera · Back / View: restart'] : MOBILE ? ['BUTTONS', 'CAM: change the view · RESTART: start over'] : ['KEYS', pickRace ? 'R: restart · Q: camera' : 'R: restart · B: lab · Q: camera'],
     ];
     // v0.37 tester: full card on the first race; after that just the track line (the pickers are what matter)
     // v0.39 phone: a short card that fits a landscape phone (pickers, how to drive, wallet)
     const shown = MOBILE ? rows.filter(([k]) => (raceSeen ? ['WALLET'] : ['DRIVE', 'WEAPON', 'WALLET'])   /* v0.40: no room for UPGRADES on a phone card */.includes(k))
-      : TESTER && raceSeen ? rows.filter(([k]) => k === 'TRACK' || k === 'WALLET') : rows;
+      : pickRace && raceSeen ? rows.filter(([k]) => k === 'TRACK' || k === 'WALLET') : rows;
     rd.table.innerHTML = shown.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
     rd.start.style.display = '';
-    rd.small.textContent = pad ? (TESTER ? 'LB / RB: track · D-pad ◀ ▶: car · A or Start: START · Y: camera · Back: restart' : 'A or Start: START · Y: camera · Back: restart') : MOBILE ? 'Pick a track and a car · tap START' : TESTER ? 'Pick a track and a car · Enter or click START' : 'Enter or click START · B: back to the lab';
+    rd.small.textContent = pad ? (pickRace ? 'LB / RB: track · D-pad ◀ ▶: car · A or Start: START · Y: camera · Back: restart' : 'A or Start: START · Y: camera · Back: restart') : MOBILE ? 'Pick a track and a car · tap START' : pickRace ? 'Pick a track and a car · Enter or click START' : 'Enter or click START · B: back to the lab';
     rd.box.classList.add('on');
   }
   /** v0.41 phone race camera distance (11 = the desktop race camera). */
@@ -616,8 +628,8 @@ async function main() {
   function raceFrame(dt: number, now: number) {
     const rNow = isDown('KeyR'), rPress = rNow && !rWas; rWas = rNow;
     if (rPress) { startRace(); return; }
-    if (!TESTER && isDown('KeyB')) { leaveRace(); openLab(); return; }   // v0.37 no lab for testers
-    helpEl.innerHTML = `WASD drive &nbsp;·&nbsp; SPACE weapon &nbsp;·&nbsp; Q camera &nbsp;·&nbsp; R restart` + (TESTER ? '' : ` &nbsp;·&nbsp; B lab`);
+    if (!MOBILE && isDown('KeyB')) { leaveRace(); openLab(); return; }   // v0.46 B opens the lab from any race (not shown on the picker race)
+    helpEl.innerHTML = `WASD drive &nbsp;·&nbsp; SPACE weapon &nbsp;·&nbsp; Q camera &nbsp;·&nbsp; R restart` + (pickRace ? '' : ` &nbsp;·&nbsp; B lab`);
     if (phase === 'countdown' && tickCountdown(now)) phase = 'fight';
     const waiting = phase !== 'fight';
     scene.getPhysicsEngine()?.setTimeStep(PHYS_STEP);
