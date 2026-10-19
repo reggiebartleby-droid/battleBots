@@ -12,7 +12,7 @@ import { CUBES, saveCubes, type CubeSize, type CubeStyle } from './cubes.js';
 
 const STORAGE_KEY = 'battlebots.builder.v1';
 /** v0.30 shared tester defaults (settings.ts): the lab starts with these when nothing is saved. */
-const DEFAULT = { preset: 'Noisy Cricket', opponent: 'Hammer Time', boost: 3 };
+const DEFAULT = { preset: 'Noisy Cricket', opponent: 'Hammer Time', boost: 3, raceSpeed: 1 };
 
 export const PRESETS: Record<string, BotBuild> = {
   'Red Disc': {
@@ -87,6 +87,8 @@ function socketLabel(body: BodyDef, s: SocketDef): string {
 }
 
 export interface DeployArgs { player: BotBuild; opponent: BotBuild; opponentName: string; difficulty: Difficulty; breakableWeapons: boolean; driveBoost: number }
+/** v0.33 race track */
+export interface RaceArgs { player: BotBuild; difficulty: Difficulty; driveBoost: number; raceSpeed: number }   // v0.34d raceSpeed: x1 = the v0.34 race pace
 
 export class Builder {
   build: BotBuild;
@@ -113,8 +115,11 @@ export class Builder {
     breakable: document.getElementById('bb-breakable') as HTMLInputElement,
     boost: document.getElementById('bb-boost') as HTMLInputElement,          // v0.22 temporary test slider
     boostVal: document.getElementById('bb-boost-val')!,
+    raceSpeed: document.getElementById('bb-racespeed') as HTMLInputElement,   // v0.34d race speed slider
+    raceSpeedVal: document.getElementById('bb-racespeed-val')!,
     deploy: document.getElementById('bb-deploy') as HTMLButtonElement,
     course: document.getElementById('bb-course') as HTMLButtonElement,   // v0.23 test course
+    race: document.getElementById('bb-race') as HTMLButtonElement,       // v0.33 race track
     shellAids: document.getElementById('bb-shellaids')!,                // v0.25 shell spinner nose aids
     cap: document.getElementById('bb-cap') as HTMLInputElement,
     arrow: document.getElementById('bb-arrow') as HTMLInputElement,
@@ -126,6 +131,7 @@ export class Builder {
   private onChange: (b: BotBuild) => void = () => {};
   private onDeploy: (a: DeployArgs) => void = () => {};
   private onCourse: (a: { player: BotBuild; driveBoost: number }) => void = () => {};
+  private onRace: (a: RaceArgs) => void = () => {};
 
   constructor(private catalog: Catalog) {
     const saved = this.load();
@@ -154,6 +160,10 @@ export class Builder {
     const showBoost = () => { this.el.boostVal.textContent = `x${Number(this.el.boost.value)}`; };
     showBoost();
     this.el.boost.oninput = () => { showBoost(); this.save(); };
+    this.el.raceSpeed.value = String(saved?.raceSpeed ?? DEFAULT.raceSpeed);   // v0.34d
+    const showRaceSpeed = () => { this.el.raceSpeedVal.textContent = `x${Number(this.el.raceSpeed.value)}`; };
+    showRaceSpeed();
+    this.el.raceSpeed.oninput = () => { showRaceSpeed(); this.save(); };
 
     // v0.25 shell spinner nose aids (remembered in this browser)
     this.el.cap.checked = SHELL_AIDS.cap; this.el.arrow.checked = SHELL_AIDS.arrow;
@@ -187,15 +197,24 @@ export class Builder {
       this.onCourse({ player: clone(this.build), driveBoost: Number(this.el.boost.value) });
     };
 
+    // v0.33 race: your build vs 3 AI presets, same AI level + drive boost
+    this.el.race.onclick = () => {
+      if (!this.validation.ok) return;
+      this.save();
+      this.hide();
+      this.onRace({ player: clone(this.build), difficulty: this.el.difficulty.value as Difficulty, driveBoost: Number(this.el.boost.value), raceSpeed: Number(this.el.raceSpeed.value) });
+    };
+
     this.render();
   }
 
   get validation() { return validateBuild(this.build, this.catalog); }
   get visible() { return this.el.overlay.classList.contains('on'); }
 
-  show(onChange: (b: BotBuild) => void, onDeploy: (a: DeployArgs) => void, onCourse?: (a: { player: BotBuild; driveBoost: number }) => void) {
+  show(onChange: (b: BotBuild) => void, onDeploy: (a: DeployArgs) => void, onCourse?: (a: { player: BotBuild; driveBoost: number }) => void, onRace?: (a: RaceArgs) => void) {
     this.onChange = onChange; this.onDeploy = onDeploy;
     if (onCourse) this.onCourse = onCourse;
+    if (onRace) this.onRace = onRace;
     this.el.overlay.classList.add('on');
     document.body.classList.add('inlab');
     this.changed();
@@ -271,12 +290,13 @@ export class Builder {
     this.el.errors.innerHTML = v.errors.map(e => `<li>${e}</li>`).join('');
     this.el.deploy.disabled = !v.ok;
     this.el.course.disabled = !v.ok;
+    this.el.race.disabled = !v.ok;
   }
 
   private save() {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ build: this.build, opponent: this.el.opponent.value, difficulty: this.el.difficulty.value, breakableWeapons: this.el.breakable.checked, driveBoost: Number(this.el.boost.value), gear: 'v0.25' })); } catch { /* ignore */ }
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ build: this.build, opponent: this.el.opponent.value, difficulty: this.el.difficulty.value, breakableWeapons: this.el.breakable.checked, driveBoost: Number(this.el.boost.value), raceSpeed: Number(this.el.raceSpeed.value), gear: 'v0.25' })); } catch { /* ignore */ }
   }
-  private load(): { build: BotBuild; opponent?: string; difficulty?: Difficulty; breakableWeapons?: boolean; driveBoost?: number; gear?: string } | null {
+  private load(): { build: BotBuild; opponent?: string; difficulty?: Difficulty; breakableWeapons?: boolean; driveBoost?: number; raceSpeed?: number; gear?: string } | null {
     try { const s = localStorage.getItem(STORAGE_KEY); return s ? JSON.parse(s) : null; } catch { return null; }
   }
 }

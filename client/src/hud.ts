@@ -12,7 +12,7 @@ export type HudView = typeof HUD_VIEWS[number];
 const VIEW_KEY = 'bb-hud-view';
 const DETAIL_KEY = 'bb-hud-details';
 
-export interface HudScore { score: Record<'A' | 'B', number>; lastBonus: Partial<Record<'A' | 'B', ScoreBonus>> }
+export interface HudScore { score: Record<string, number>; lastBonus: Partial<Record<string, ScoreBonus>> }
 
 export class Hud {
   private boards = [document.getElementById('board1')!, document.getElementById('board2')!];
@@ -52,7 +52,7 @@ export class Hud {
     for (const v of HUD_VIEWS) document.body.classList.toggle(`hud-${v}`, v === this.view);
   }
 
-  update(bots: Bot[], secondsLeft: number, stats?: Record<'A' | 'B', Stats>, score?: HudScore) {
+  update(bots: Bot[], secondsLeft: number, stats?: Record<string, Stats>, score?: HudScore) {
     bots.forEach((b, i) => this.boards[i].innerHTML = this.board(b, bots[1 - i], stats?.[b.id], score));
     const m = Math.floor(secondsLeft / 60), s = Math.floor(secondsLeft % 60);
     this.timerEl.textContent = `${m}:${s.toString().padStart(2, '0')}`;

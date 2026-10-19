@@ -62,12 +62,16 @@ import { validateBuild } from '../../src/core/validate.js';
 import { partWeight } from '../../src/core/weight.js';
 import { Weapon } from './weapon.js';
 import { botMaterials, type BotMats } from './look.js';
-import { SURFACE_BIT } from './arena.js';
+import { SURFACE_BIT, WALL_BIT } from './arena.js';
 
 const CHASSIS_H = 0.35;   // = CHASSIS.h (ARM below needs it before CHASSIS is declared)
 
+/** v0.33: up to 4 bots (race mode). The arena match still uses A + B. */
+export type BotId = 'A' | 'B' | 'C' | 'D';
+export const BOT_IDS: BotId[] = ['A', 'B', 'C', 'D'];
+
 export interface Bot {
-  id: 'A' | 'B';
+  id: BotId;
   build: BotBuild;
   state: BotState;
   root: Mesh;
@@ -160,6 +164,19 @@ export const DRIVE = {
   arc: 1.5,
   /** v0.22 temporary test boost (lab slider): multiplies the drive power of both bots. */
   boost: 1,
+  /** v0.34 race only (user): x2 top speed AND x2 drive power on top of the lab boost (same feel, twice as fast). 1 everywhere else. */
+  raceSpeed: 1,
+  /** v0.34 race only (user): weapons don't change how a bot drives -- weapon weight doesn't slow it, weapon bodies don't
+   *  touch the track floor / walls (bots + loose parts only). Gyro, magnets and spin-up twist: off in race (main.ts / race.ts). */
+  raceWeaponsNeutral: false,
+  /** v0.34c race only (user): easier steering -- speed-sensitive steering (steerAtTop of the turn at top speed, full turn
+   *  standing still) and the heading-hold gyro on every bot (stops turning the moment you let go). Keyboard ramp: main.ts. */
+  raceSteer: false,
+  steerAtTop: 0.5,
+  /** v0.34f race only: drive force capped at this x the tyres' grip (traction control). 0 = off. */
+  raceGripCap: 1.5,
+  /** v0.34f race only: arcade handling (turn-rate steering + sideways grip, applied in race.ts). */
+  raceArcade: false,
   /** v0.25 heading-hold gyro (real RC gyro in the drive mix). With no steering input, the drive pushes back
    *  against any yaw (heading lock: it holds the heading you let go of the stick at). Shell spinners only: spinning the shell up
    *  twisted the base ~400 deg (reaction torque) because neutral only brakes lightly. */
@@ -523,7 +540,7 @@ function addShellAids(scene: Scene, root: Mesh, id: string) {
   }
 }
 
-export function buildBot(id: 'A' | 'B', build: BotBuild, catalog: Catalog, scene: Scene, pos: Vector3, facing: number, opts: StateOptions = {}): Bot {
+export function buildBot(id: BotId, build: BotBuild, catalog: Catalog, scene: Scene, pos: Vector3, facing: number, opts: StateOptions = {}): Bot {
   const mesh = assembleBotMesh(id, build, catalog, scene);
   const state = createBotState(build, catalog, opts);
   const { root } = mesh;
@@ -596,15 +613,20 @@ export function buildBot(id: 'A' | 'B', build: BotBuild, catalog: Catalog, scene
 
   curSocket = null;
   // v0.15 wheelie bar collider (Overhead): part of the chassis shape
+  let wheelieBar: PhysicsShape | null = null;
   if (WHEELIE.bodies.includes(build.bodyId)) {
     const g = wheelieGeom();
     const bar = new PhysicsShapeBox(g.centre, Quaternion.RotationAxis(new Vector3(1, 0, 0), g.rotX), new Vector3(WHEELIE.width, WHEELIE.thick, g.len), scene);
     bar.material = { friction: WHEELIE.friction, restitution: WHEELIE.restitution, frictionCombine: PhysicsMaterialCombineMode.GEOMETRIC_MEAN, restitutionCombine: PhysicsMaterialCombineMode.GEOMETRIC_MEAN };
     bar.density = 0.001;   // massless (no weight cost): at default density it skewed the chassis mass and tipped Overhead bots 2 deg nose-up at rest (headless)
     shape.addChild(bar); track(shape, bar);
+    wheelieBar = bar;
   }
   const body = new PhysicsBody(root, PhysicsMotionType.DYNAMIC, false, scene);
   setFilter(shape, FILTER[id].chassis, ~FILTER[id].weapon);  // never touches its own real weapons
+  // v0.34e race only (user): the wheelie bar skips the track floor / ramps / walls (it grounded at ~2 deg nose-up at the
+  // foot of the ~9.5 deg ramp and lifted the rear wheels: Hammer Time stuck). Still hits other bots.
+  if (wheelieBar && DRIVE.raceWeaponsNeutral) wheelieBar.filterCollideMask = ~(FILTER[id].weapon | SURFACE_BIT | WALL_BIT);
   body.shape = shape;
   body.setCollisionCallbackEnabled(true);
 
@@ -631,7 +653,7 @@ export function buildBot(id: 'A' | 'B', build: BotBuild, catalog: Catalog, scene
 
   const weapon = new Weapon(mesh.weaponKind);
   const bot: Bot = { id, build, state, body, weapon, partShapes, ...mesh };
-  const ownWeapons = (b: PhysicsBody) => setFilter(b.shape!, FILTER[id].weapon, ~(FILTER[id].chassis | FILTER[id].weapon));
+  const ownWeapons = (b: PhysicsBody) => setFilter(b.shape!, FILTER[id].weapon, ~(FILTER[id].chassis | FILTER[id].weapon | (DRIVE.raceWeaponsNeutral ? SURFACE_BIT | WALL_BIT : 0)));   // v0.34 race: weapons skip the track
   if (realSpinner) {
     bot.spinner = buildSpinner(scene, root, body, mesh.weaponMesh!, mesh.weaponKind!, weaponMass);
     weapon.realSpin = true;
@@ -659,7 +681,15 @@ export function buildBot(id: 'A' | 'B', build: BotBuild, catalog: Catalog, scene
   for (const [sid, m] of Object.entries(mesh.partMeshes)) if (mesh.partKinds[sid].type === 'wheels') tyres.push(...(m.getChildMeshes(true) as Mesh[]).filter(t => !t.name.includes('_skid_') && !isDeco(t)));
   if (tyres.length) {
     const vTop = Math.max(0.1, currentSpeed(state) * DRIVE.speedScale);
-    const torque = (DRIVE.power * DRIVE.boost / vTop) * WHEEL.r / tyres.length;   // v0.22: x lab test boost   // gearing: stall force = power / top speed
+    // v0.34 race: the weapon system's weight (weapon, weapon motor, secondary) gets its own drive power -> same pace as without it
+    const total = mass + weaponMass + hingeMass + wheelsMass;
+    const weaponSys = Object.values(mesh.partKinds).filter(p => p.type === 'weapon' || p.type === 'weapon_motor' || p.type === 'secondary')
+      .reduce((a, p) => a + partWeight(p, catalog.balance) * BODY.massScale, 0);
+    const weightComp = DRIVE.raceWeaponsNeutral ? total / Math.max(total * 0.3, total - weaponSys) : 1;
+    let torque = (DRIVE.power * DRIVE.boost * DRIVE.raceSpeed * weightComp / vTop) * WHEEL.r / tyres.length;   // v0.22: x lab test boost   // gearing: stall force = power / top speed
+    // v0.34f race only: traction limit (real ESC traction control). Stall force capped at gripCap x what the tyres can hold
+    // (rubber on the 0.8 track, ~0.9) -- the boosted race drive was 10-37x over grip: wheelspin = no sideways grip = no steering
+    if (DRIVE.raceWeaponsNeutral && DRIVE.raceGripCap > 0) torque = Math.min(torque, DRIVE.raceGripCap * 0.9 * 9.81 * total * WHEEL.r / tyres.length);
     bot.wheels = buildWheels(scene, root, body, tyres, Math.max(1, wheelsMass / tyres.length), torque, FILTER[id]);
     for (const w of bot.wheels) setTread(w, true);
   }
@@ -712,14 +742,28 @@ function buildWheels(scene: Scene, root: Mesh, chassis: PhysicsBody, tyres: Mesh
 /** v0.21 skid-steer drive: left = throttle + turn, right = throttle - turn (v0.22: arcade mix, see DRIVE.arc). Sets each wheel's speed controller output; wheelsBefore turns it into motor torque.
  *  `on` false = neutral (the controllers brake). Drive dead (motor / wheels destroyed) = only gearbox drag. */
 export function driveWheels(bot: Bot, throttle: number, turn: number, on: boolean) {
-  const vTop = currentSpeed(bot.state) * DRIVE.speedScale;
+  const vTop = currentSpeed(bot.state) * DRIVE.speedScale * DRIVE.raceSpeed;   // v0.34: x2 in races
+  if (DRIVE.raceSteer && vTop > 0) {                    // v0.34c race: less turn the faster it goes
+    const v = bot.body.getLinearVelocity(), f = Math.min(1, Math.hypot(v.x, v.z) / vTop);
+    turn *= 1 - (1 - DRIVE.steerAtTop) * f;
+  }
+  // v0.34f race arcade steering: the stick sets a turn RATE that race.ts applies straight to the chassis (same for every
+  // bot, whatever its power or weight); the wheels only drive forward / back
+  if (DRIVE.raceArcade) {
+    raceTurn.set(bot, on && vTop > 0 ? turn : 0);
+    gyroHold.set(bot, null);
+    mixWheels(bot, throttle, 0, on, vTop);
+    return;
+  }
   // v0.25 heading hold: not steering -> the gyro steers against yaw, updated every physics sub-step (wheelsBefore)
-  const holding = on && vTop > 0 && Math.abs(turn) < 0.05 && DRIVE.gyroBodies.includes(bot.build.bodyId);
+  const holding = on && vTop > 0 && Math.abs(turn) < 0.05 && (DRIVE.raceSteer || DRIVE.gyroBodies.includes(bot.build.bodyId));   // v0.34c: every bot in race
   // heading lock: remember the heading when the stick is let go, then hold it
   const was = gyroHold.get(bot);
   gyroHold.set(bot, holding ? { throttle, heading: was?.heading ?? headingOf(bot), age: was?.age ?? 0 } : null);
   mixWheels(bot, throttle, turn, on, vTop);
 }
+/** v0.34f race arcade steering: last turn command per bot (-1..1, + = right), read by race.ts every sub-step. */
+export const raceTurn = new WeakMap<Bot, number>();
 /** v0.25: throttle held while the heading-hold gyro is steering (null = gyro off this frame). */
 const gyroHold = new WeakMap<Bot, { throttle: number; heading: number; age: number } | null>();
 function headingOf(bot: Bot): number {
@@ -960,7 +1004,8 @@ export function hingesBefore(bot: Bot) { for (const h of bot.hinges ?? []) h.tou
 
 /** Collision filter bits: a bot's real weapon bodies never collide with its own chassis or with each
  *  other (the saw on the arm used to hit its own chassis), but hit everything else. */
-const FILTER = { A: { chassis: 1 << 1, weapon: 1 << 2 }, B: { chassis: 1 << 3, weapon: 1 << 4 } } as const;
+const FILTER = { A: { chassis: 1 << 1, weapon: 1 << 2 }, B: { chassis: 1 << 3, weapon: 1 << 4 },
+  C: { chassis: 1 << 10, weapon: 1 << 11 }, D: { chassis: 1 << 12, weapon: 1 << 13 } } as const;   // v0.33 C + D (race)
 /** v0.21 wheel treads (round, see buildWheels): they only ever touch driving surfaces (arena SURFACE_BIT). */
 const TREAD_BIT = 1 << 8;
 /** Havok applies filters per child shape (a container's own filter isn't inherited), so remember children. */
@@ -974,7 +1019,7 @@ function setFilter(shape: PhysicsShape, member: number, collide: number) {
  *  loose parts; bots listed in `exclude` it passes through (cubes.ts switches each bot on once the part is clear of
  *  it -- spawning inside a bot made Havok fling that bot 3.6 m up, headless). */
 export const LOOSE_BIT = 1 << 9;
-export function loosePartFilter(exclude: ('A' | 'B')[]): { member: number; collide: number } {
+export function loosePartFilter(exclude: BotId[]): { member: number; collide: number } {
   let ex = TREAD_BIT;
   for (const id of exclude) ex |= FILTER[id].chassis | FILTER[id].weapon;
   return { member: LOOSE_BIT, collide: ~ex };

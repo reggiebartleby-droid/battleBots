@@ -48,13 +48,25 @@ export class Fx {
     this.fireMat.disableLighting = true;
   }
 
+  /** v0.33 race: hits far from this point (the player) shake the camera less. null = full shake (arena). */
+  focus: Vector3 | null = null;
+  private near(p: Vector3) { return this.focus ? Math.max(0, 1 - Vector3.Distance(p, this.focus) / 14) : 1; }
+  /** v0.34h: a NaN in the shake made the camera target NaN for good (black 3D view, game still running). Bad hits
+   *  don't shake the camera; the first one is reported (yellow console warning) so the source can be found. */
+  private shakeAdd(amount: number, what: string, info: unknown) {
+    if (Number.isFinite(amount)) { this.shake = Math.max(0, this.shake + amount); return; }
+    if (!this.warned) { this.warned = true; console.warn(`[v0.34h] bad number in camera shake from ${what} -- ignored`, info); }
+  }
+  private warned = false;
+
   /** A real weapon hit. */
   hit(point: Vector3, dmg: number, defender: Bot, attackerColor: string) {
     this.spawnSparks(point, 12, this.sparkMat, 4);
     this.label(`-${dmg}`, point.add(new Vector3(0, 0.6, 0)), attackerColor, 'dmg');
     this.flash(defender);
     cubeHit(defender, point, dmg);   // v0.27 Cube Bots look: knock cubes loose (no-op otherwise)
-    this.shake = Math.min(0.35, this.shake + 0.08 + dmg * 0.004);
+    const add = Math.min(0.35, this.shake + (0.08 + dmg * 0.004) * this.near(point)) - this.shake;   // v0.34h: same cap, NaN-checked
+    this.shakeAdd(add, 'hit', { dmg, point: point.asArray(), defender: defender.id });
   }
 
   /** Contact with no live weapon behind it. */
@@ -70,11 +82,11 @@ export class Fx {
    * Bot eliminated (knocked out of the arena): fireball + every part flies off tumbling.
    * Clones the bot's meshes as free debris so the real bot can be hidden/frozen by the caller.
    */
-  explode(bot: Bot, at: Vector3) {
+  explode(bot: Bot, at: Vector3, text = 'OUT!') {
     this.spawnSparks(at, EXPLODE.sparks, this.fireMat, EXPLODE.sparkSpeed, 1.6);
     this.spawnSparks(at, EXPLODE.sparks / 3, this.sparkMat, EXPLODE.sparkSpeed * 0.7, 1.2);
-    this.label('OUT!', at.add(new Vector3(0, 1.2, 0)), '#ff4d4d', 'dmg');
-    this.shake = Math.max(this.shake, EXPLODE.shake);
+    this.label(text, at.add(new Vector3(0, 1.2, 0)), '#ff4d4d', 'dmg');
+    this.shakeAdd(Math.max(0, EXPLODE.shake * this.near(at) - this.shake), 'explode', { at: at.asArray(), bot: bot.id, text });   // v0.34h
     cubeKnockout(bot);                // v0.27 Cube Bots look: every cube flies (the cubed meshes are hidden, so their clones below are too)
     for (const src of botMeshes(bot)) {
       if (!(src instanceof Mesh) || src.visibility < 0.01) continue;
@@ -142,6 +154,7 @@ export class Fx {
 
   /** Offset to add to the camera target this frame. */
   shakeOffset(): Vector3 {
+    if (!Number.isFinite(this.shake)) { this.shakeAdd(NaN, 'shake value', this.shake); this.shake = 0; }   // v0.34h
     if (this.shake < 0.005) return Vector3.Zero();
     return new Vector3((Math.random() - 0.5) * this.shake, (Math.random() - 0.5) * this.shake * 0.6, (Math.random() - 0.5) * this.shake);
   }

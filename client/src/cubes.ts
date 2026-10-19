@@ -32,7 +32,7 @@ import {
   type AbstractMesh, Color3, DynamicTexture, Matrix, Mesh, MeshBuilder, type Node, PhysicsBody, PhysicsMotionType,
   PhysicsShapeBox, Quaternion, type Scene, type ShadowGenerator, StandardMaterial, TransformNode, Vector3, VertexBuffer,
 } from '@babylonjs/core';
-import { botMeshes, chassisFor, dropPart, loosePartFilter, spinOmega, weaponBodies, type Bot } from './bot.js';
+import { botMeshes, chassisFor, dropPart, loosePartFilter, spinOmega, weaponBodies, BOT_IDS, type Bot, type BotId } from './bot.js';
 import { castShadows } from './look.js';
 import { catalog } from './catalog.js';
 import { isProtected, type BotState } from '../../src/core/state.js';
@@ -233,7 +233,7 @@ interface Holder {
 }
 
 /** v0.29 a part that fell off, flying as its own body; its cubes ride it (st 4) until it breaks up. */
-interface Ride { node: TransformNode; body: PhysicsBody; cubes: number[]; off: Float32Array; q0: Float32Array; age: number; blocked: Set<'A' | 'B'>; rad: number }
+interface Ride { node: TransformNode; body: PhysicsBody; cubes: number[]; off: Float32Array; q0: Float32Array; age: number; blocked: Set<BotId>; rad: number }
 const LOOSE = new WeakSet<PhysicsBody>();
 /** v0.29: is this one of the flying parts? (combat.ts: landing on one isn't a slam) */
 export function isLooseBody(b: PhysicsBody | undefined): boolean { return !!b && LOOSE.has(b); }
@@ -630,7 +630,7 @@ export class Skin {
     node.rotationQuaternion = Quaternion.Identity();
     const shape = new PhysicsShapeBox(Vector3.Zero(), Quaternion.Identity(), ext, this.scene);
     shape.material = { friction: PART_FLY.friction, restitution: PART_FLY.restitution };
-    const blocked = new Set<'A' | 'B'>(['A', 'B']);                 // passes through both bots until clear of them
+    const blocked = new Set<BotId>(BOT_IDS);                         // passes through every bot until clear of them (v0.33: up to 4)
     const f = loosePartFilter([...blocked]);
     shape.filterMembershipMask = f.member; shape.filterCollideMask = f.collide;
     const body = new PhysicsBody(node, PhysicsMotionType.DYNAMIC, false, this.scene);

@@ -22,8 +22,10 @@ import { Course, STATIONS, COURSE_ORIGIN, COURSE, type StationId, type RunResult
 import { aiDrive, type Difficulty } from './ai.js';
 import { MOBILE, MobileMenu, setupTouchControls } from './mobile.js';
 import { CUBES } from './cubes.js';
+import { Race, RACE, RACE_ORIGIN, ordinal, fmtTime, type Racer } from './race.js';
 
 const MATCH_SECONDS = 180;
+const RACE_TEST = { autopilot: false };
 /** v0.21: the drive is real wheels now -- see DRIVE / driveWheels in bot.ts. */
 const PHYS_STEP = 1 / 60;
 /** v0.31: spinner motor torque x this during the 3-2-1 (spin-up is sized for 3 s; the countdown is 2.7 s). */
@@ -90,8 +92,9 @@ async function main() {
   const course = new Course(scene);                  // v0.23 test course (own floor, far from the arena)
   const SUN_OFFSET = sun.position.clone();
   const fx = new Fx(scene, document.getElementById('fxlayer')!);
+  const race = new Race(scene, fx);                  // v0.33 race track (own floor too, far from the arena and the course)
   // v0.27 loose cubes land on the arena floor (walls bounce them) and on the test course floor
-  setDebrisFloors([{ cx: 0, cz: 0, half: ARENA_SIZE / 2, wallH: WALL_H }, { cx: COURSE_ORIGIN.x, cz: COURSE_ORIGIN.z, half: COURSE.size / 2, wallH: 0 }]);
+  setDebrisFloors([{ cx: 0, cz: 0, half: ARENA_SIZE / 2, wallH: WALL_H }, { cx: COURSE_ORIGIN.x, cz: COURSE_ORIGIN.z, half: COURSE.size / 2, wallH: 0 }, race.debrisFloor]);
 
   // ---- Lab scene (builder preview, no physics) ----
   const lab = new Lab(engine, catalog);
@@ -123,7 +126,7 @@ async function main() {
   let breakableWeapons = false;      // v0.17 deploy-bar setting (applies to both bots)
   let camFocus: { pos: Vector3; until: number } | null = null;   // bot flying over the cage / exploding
   // v0.23 test course
-  let mode: 'match' | 'course' = 'match';
+  let mode: 'match' | 'course' | 'race' = 'match';   // v0.33 + race
   let courseBuild: BotBuild | null = null;          // the lab build that opened the course
   let courseStation: StationId | null = null;
   let courseReported = false;
@@ -167,25 +170,26 @@ async function main() {
     rd.box.classList.add('on');
   };
   const beginCountdown = () => {
-    if (phase !== 'ready' || !bots.length || inMenu() || mode !== 'match') return;
+    if (phase !== 'ready' || !bots.length || inMenu() || mode === 'course') return;
     goCountdown();
   };
   /** v0.31: 3-2-1 starts; spinners switch on with the "3" so they're at top speed by FIGHT! */
   const goCountdown = () => {
-    phase = 'countdown'; countdownAt = performance.now(); readySeen = true;
+    phase = 'countdown'; countdownAt = performance.now();
+    if (mode === 'race') raceSeen = true; else readySeen = true;
     rd.box.classList.remove('on');
     for (const b of bots) if (b.weapon.mode === 'spinner' && !b.weapon.motorDead) b.weapon.spinning = true;
     canvas.focus();
   };
   rd.start.addEventListener('click', beginCountdown);
   window.addEventListener('keydown', e => {
-    if ((e.code === 'Enter' || e.code === 'NumpadEnter') && !e.repeat && phase === 'ready' && !inMenu() && mode === 'match') { e.preventDefault(); beginCountdown(); }
+    if ((e.code === 'Enter' || e.code === 'NumpadEnter') && !e.repeat && phase === 'ready' && !inMenu() && mode !== 'course') { e.preventDefault(); beginCountdown(); }
   });
   /** Countdown display; returns true once FIGHT! is reached. */
   const tickCountdown = (now: number): boolean => {
     const t = now - countdownAt, n = 3 - Math.floor(t / COUNT_MS);
     if (n > 0) { rd.count.textContent = String(n); rd.count.className = 'on'; return false; }
-    rd.count.textContent = 'FIGHT!'; rd.count.className = 'on fight';
+    rd.count.textContent = mode === 'race' ? 'GO!' : 'FIGHT!'; rd.count.className = 'on fight';
     setTimeout(() => { if (phase === 'fight') rd.count.className = ''; }, 800);
     return true;
   };
@@ -193,6 +197,7 @@ async function main() {
   const start = () => {
     if (!buildA || !buildB) return;
     leaveCourse();
+    leaveRace();
     for (const b of bots) disposeBot(b);
     fx.clear();
     bots = [
@@ -222,6 +227,7 @@ async function main() {
       b => lab.setBuild(b),
       ({ player, opponent, difficulty: d, breakableWeapons: bw, driveBoost }) => { buildA = player; buildB = opponent; difficulty = d; breakableWeapons = bw; DRIVE.boost = driveBoost; start(); },   // v0.22 test boost (both bots)
       ({ player, driveBoost }) => { courseBuild = player; DRIVE.boost = driveBoost; showCourseMenu(); },   // v0.23 test course
+      ({ player, difficulty: d, driveBoost, raceSpeed }) => { raceBuild = player; raceDiff = d; DRIVE.boost = driveBoost; raceSpeedMul = raceSpeed; startRace(); },   // v0.33 race
     );
   };
 
@@ -246,7 +252,7 @@ async function main() {
 
   const isArenaMesh = (name: string) => name === 'floor' || name.startsWith('wall') || name.startsWith('arena');
   const setArenaVisible = (on: boolean) => { for (const m of scene.meshes) if (isArenaMesh(m.name)) m.setEnabled(on); };
-  const clearBots = () => { for (const b of bots) disposeBot(b); bots = []; fx.clear(); courseCombat = undefined; };
+  const clearBots = () => { leaveRace(); for (const b of bots) disposeBot(b); bots = []; fx.clear(); courseCombat = undefined; };
 
   /** Course menu: pick the bot + station. */
   function showCourseMenu() {
@@ -344,19 +350,220 @@ async function main() {
       + course.hudLines().map(l => `<div>${l}</div>`).join('') + (course.done ? `<div><b style="color:#39ff14">FINISHED</b></div>` : '');
     helpEl.innerHTML = `WASD drive &nbsp;·&nbsp; SPACE weapon &nbsp;·&nbsp; Q camera &nbsp;·&nbsp; R restart &nbsp;·&nbsp; C stations &nbsp;·&nbsp; B lab`;
     cam.target = Vector3.Lerp(cam.target, p.root.position, 0.1).add(fx.shakeOffset());
+    camGuard(p.root.position, 'course');   // v0.34h
     cam.radius += (camCtl.radius(11) - cam.radius) * 0.05;
     camCtl.chase(p.root.rotationQuaternion, dt);
     fx.update(dt, cam);
   }
+  // ---------------- v0.33 RACE ----------------
+  let raceBuild: BotBuild | null = null;
+  let raceDiff: Difficulty = 'normal';
+  let raceSeen = false;                                    // controls card before the first race per page load only
+  let raceShown = -1;                                      // results screen: when it was last drawn (-1 = not showing)
+  let raceHudAt = 0;
+  const rr = {
+    hud: document.getElementById('rhud')!, map: document.getElementById('rmap') as HTMLCanvasElement,
+    box: document.getElementById('rresults')!, table: document.getElementById('rr-table')!,
+    again: document.getElementById('rr-again') as HTMLButtonElement, lab: document.getElementById('rr-lab') as HTMLButtonElement,
+  };
+  rr.again.onclick = () => startRace();
+  rr.lab.onclick = () => { leaveRace(); openLab(); };
+  const RIVAL_IDS = ['B', 'C', 'D'] as const;
+  let raceSpeedMul = 1;   // v0.34d lab RACE SPEED slider: x1 = the v0.34 race pace, up to x3
+
+  function startRace() {
+    if (!raceBuild) return;
+    leaveCourse();
+    if (mode === 'race') { race.dispose(); bots = []; fx.clear(); } else clearBots();
+    mode = 'race';
+    document.body.classList.add('inrace');
+    rr.box.classList.remove('on'); raceShown = -1;
+    hud.hideWinner();
+    setArenaVisible(false); course.setVisible(false); race.setVisible(true);
+    // three different AI rivals from the presets
+    const names = Object.keys(PRESETS).sort(() => Math.random() - 0.5).slice(0, 3);
+    combat = new Combat([], fx);
+    DRIVE.raceSpeed = 2 * raceSpeedMul;   // v0.34 race only: x2 speed (bots are built with it); v0.34d x race speed slider (1-3)
+    DRIVE.raceWeaponsNeutral = true;   // v0.34 race only: weapons don't change the driving
+    DRIVE.raceSteer = true;            // v0.34c race only: speed-sensitive steering + heading hold
+    DRIVE.raceArcade = true;           // v0.34f race only: turn-rate steering + sideways grip (race.ts)
+    rampT = 0; rampDir = 0;
+    race.begin([
+      { id: 'A', human: true, build: raceBuild },
+      ...names.map((n, i) => ({ id: RIVAL_IDS[i], human: false, build: JSON.parse(JSON.stringify(PRESETS[n])) as BotBuild })),
+    ], catalog, combat, raceDiff, {
+      onSpawn: b => { castShadows(shadows, botMeshes(b)); skinBot(b, shadows); },
+      sign: (t, ms, c) => hud.sign(t, ms, c),
+    });
+    bots = race.bots();
+    for (const b of bots) combat.replaceBot(undefined, b);
+    over = false; camFocus = null;
+    phase = 'ready'; rd.count.className = '';
+    const p = race.player()!.bot;
+    cam.target = p.root.position.clone(); cam.radius = camCtl.radius(11);
+    sun.position = p.root.position.add(SUN_OFFSET);
+    drawRaceHud(performance.now(), true);
+    if (!raceSeen) showRaceReady(); else goCountdown();
+    canvas.focus();
+  }
+  function leaveRace() {
+    DRIVE.raceSpeed = 1;   // v0.34: arena / course / lab at normal speed
+    DRIVE.raceWeaponsNeutral = false;
+    DRIVE.raceSteer = false;
+    DRIVE.raceArcade = false;
+    if (mode !== 'race') return;
+    race.dispose(); bots = []; fx.clear(); fx.focus = null;
+    mode = 'match';
+    document.body.classList.remove('inrace');
+    rr.box.classList.remove('on'); raceShown = -1;
+    rd.box.classList.remove('on'); rd.count.className = '';
+    race.setVisible(false); setArenaVisible(true);
+    sun.position = SUN_OFFSET.clone();
+    cam.target = new Vector3(0, 0.5, 0); cam.radius = camCtl.radius(16);
+  }
+  function showRaceReady() {
+    const p = race.player()!.bot;
+    rd.title.innerHTML = `RACE <span class="vs">${RACE.laps} LAPS · 4 BOTS</span>`;
+    const rows: [string, string][] = [
+      ['DRIVE', 'W A S D (or gamepad left stick)'],
+      ['WEAPON', p.weapon.hint('SPACE') + ' — weapons are on'],
+      ['TO WIN', `First across the line after ${RACE.laps} laps. Hit, flip and wreck the others on the way.`],
+      ['WRECKED', 'Destroyed, or off the track (into the pit, over a wall): back at the last checkpoint in 2 s, repaired.'],
+      ['STUCK', 'Can\'t drive, or barely moving for 4 s (upside down, wedged, pinned): towed back to the last checkpoint, repaired.'],
+      ['DAMAGE', 'Your damage score (DMG) counts every point of damage you deal to the other bots.'],
+      ['TRACK', 'Banked turn · ramp jump over a pit · kill saws · hammer · hairpin'],
+      ['KEYS', 'R: restart · B: lab · Q: camera'],
+    ];
+    rd.table.innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+    rd.start.style.display = '';
+    rd.small.textContent = 'Enter or click START · B: back to the lab';
+    rd.box.classList.add('on');
+  }
+
+  /** v0.34c race only (user): keyboard steering ramp. A tap turns at RAMP.start, holding builds to full turn over
+   *  RAMP.fullS; letting go (or switching side) resets it. A gamepad stick below the ramp is left as it is. */
+  const RAMP = { start: 0.4, fullS: 0.3 };
+  let rampT = 0, rampDir = 0;
+  function steerRamp(d: Drive, dt: number): Drive {
+    const dir = Math.sign(d.turn);
+    if (dir === 0) { rampT = 0; rampDir = 0; return d; }
+    if (dir !== rampDir) { rampT = 0; rampDir = dir; }
+    rampT += dt;
+    const cap = Math.min(1, RAMP.start + (1 - RAMP.start) * rampT / RAMP.fullS);
+    return { ...d, turn: dir * Math.min(Math.abs(d.turn), cap) };
+  }
+
+  /** v0.34h safety net: a NaN camera target / angle / zoom never recovers on its own (black 3D view while the game runs).
+   *  Snap back onto `aim` and report it once (yellow console warning). */
+  let camWarned = false;
+  function camGuard(aim: Vector3, where: string) {
+    const t = cam.target, ok = (n: number) => Number.isFinite(n);
+    if (ok(t.x) && ok(t.y) && ok(t.z) && ok(cam.alpha) && ok(cam.beta) && ok(cam.radius)) return;
+    if (!camWarned) { camWarned = true; console.warn(`[v0.34h] camera had a bad number (${where}) -- reset`, { target: t.asArray(), alpha: cam.alpha, beta: cam.beta, radius: cam.radius, aim: aim.asArray() }); }
+    cam.target = ok(aim.x) && ok(aim.y) && ok(aim.z) ? aim.clone() : new Vector3(0, 0.5, 0);
+    if (!ok(cam.alpha)) cam.alpha = -Math.PI / 2;
+    if (!ok(cam.beta)) cam.beta = 1.2;
+    if (!ok(cam.radius)) cam.radius = 11;
+  }
+
+  /** One frame of the race. */
+  function raceFrame(dt: number, now: number) {
+    const rNow = isDown('KeyR'), rPress = rNow && !rWas; rWas = rNow;
+    if (rPress) { startRace(); return; }
+    if (isDown('KeyB')) { leaveRace(); openLab(); return; }
+    helpEl.innerHTML = `WASD drive &nbsp;·&nbsp; SPACE weapon &nbsp;·&nbsp; Q camera &nbsp;·&nbsp; R restart &nbsp;·&nbsp; B lab`;
+    if (phase === 'countdown' && tickCountdown(now)) phase = 'fight';
+    const waiting = phase !== 'fight';
+    scene.getPhysicsEngine()?.setTimeStep(PHYS_STEP);
+    for (const r of race.racers) {
+      if (r.down || r.bot.eliminated) continue;
+      const d: Drive = waiting ? { throttle: 0, turn: 0, fire: false } : r.human && !RACE_TEST.autopilot ? steerRamp(readDrive('A'), dt) : race.aiDrive(r, dt);
+      runBot(r.bot, d, dt, now, waiting, false, phase === 'countdown');
+    }
+    race.update(dt, now, !waiting);
+    bots = race.bots();
+    const pr = race.player()!;
+    const target = pr.down ? (pr.bot.eliminated?.pos ?? pr.bot.root.position) : pr.bot.root.position;
+    cam.target = Vector3.Lerp(cam.target, target, 0.1).add(fx.shakeOffset());
+    camGuard(target, 'race');   // v0.34h
+    cam.radius += (camCtl.radius(11) - cam.radius) * 0.05;
+    if (!pr.down) camCtl.chase(pr.bot.root.rotationQuaternion, dt);
+    sun.position = target.add(SUN_OFFSET);
+    fx.focus = target;
+    fx.update(dt, cam);
+    drawRaceHud(now);
+    if (race.playerFinishedAt > 0 && now - race.playerFinishedAt > 1500 && (raceShown < 0 || now - raceShown > 500)) showRaceResults(now);
+  }
+
+  /** Race HUD (position, lap, times, order) + minimap. Redrawn ~10x a second. */
+  const mapOutline = race.outline();
+  function drawRaceHud(now: number, force = false) {
+    if (!force && now - raceHudAt < 90) return;
+    raceHudAt = now;
+    const st = race.standings(), pr = race.player();
+    if (!pr) return;
+    const pos = st.indexOf(pr) + 1;
+    const best = pr.lapTimes.length ? fmtTime(Math.min(...pr.lapTimes)) : '—';
+    const last = pr.lapTimes.length ? fmtTime(pr.lapTimes[pr.lapTimes.length - 1]) : '—';
+    const stuck = (r: Racer) => r.stuckSince !== undefined && now - r.stuckSince >= 1000 ? ` <i class="x">STUCK ${Math.max(1, Math.ceil((RACE.stuckMs - (now - r.stuckSince)) / 1000))}</i>` : '';
+    const tag = (r: Racer) => r.finished !== undefined ? ' <i>FIN</i>' : r.down ? ` <i class="x">${r.down.why === 'stuck' ? 'TOWED' : 'WRECK'}</i>` : stuck(r);
+    const dmg = (r: Racer) => Math.round(combat?.stats[r.id]?.dmg ?? 0);   // v0.34 damage dealt to other bots (hazards don't count)
+    rr.hud.innerHTML = `<div class="pos">${ordinal(pos)}<span> / ${st.length}</span></div>`
+      + `<div>LAP <b>${pr.finished !== undefined ? RACE.laps : race.lap(pr)} / ${RACE.laps}</b> &nbsp; TIME <b>${fmtTime(pr.finished ?? race.t)}</b></div>`
+      + `<div>LAST <b>${last}</b> &nbsp; BEST <b>${best}</b> &nbsp; DMG <b>${dmg(pr)}</b></div>`
+      + `<ol>${st.map(r => `<li style="color:${r.paint}">${r.name}${r.human ? ' <b>(YOU)</b>' : ''} <span class="dmg">${dmg(r)}</span>${tag(r)}</li>`).join('')}</ol>`;
+    // minimap
+    const cv = rr.map, g = cv.getContext('2d');
+    if (!g) return;
+    const b = race.bounds, pad = 8, sx = (cv.width - pad * 2) / (b.x1 - b.x0), sz = (cv.height - pad * 2) / (b.z1 - b.z0), k = Math.min(sx, sz);
+    const X = (x: number) => pad + (x - b.x0) * k, Y = (z: number) => cv.height - pad - (z - b.z0) * k;
+    g.clearRect(0, 0, cv.width, cv.height);
+    g.lineWidth = RACE.width * k; g.lineJoin = 'round'; g.strokeStyle = 'rgba(60,72,82,.9)';
+    g.beginPath(); mapOutline.forEach((p, i) => i ? g.lineTo(X(p.x), Y(p.z)) : g.moveTo(X(p.x), Y(p.z))); g.closePath(); g.stroke();
+    g.lineWidth = 1; g.strokeStyle = 'rgba(0,229,255,.6)'; g.stroke();
+    const f = race.samples[0];
+    g.strokeStyle = '#fff'; g.lineWidth = 2; g.beginPath();
+    g.moveTo(X(f.x - Math.sin(f.h) * 4), Y(f.z + Math.cos(f.h) * 4)); g.lineTo(X(f.x + Math.sin(f.h) * 4), Y(f.z - Math.cos(f.h) * 4)); g.stroke();
+    for (const r of [...race.racers].sort((a, c) => Number(a.human) - Number(c.human))) {
+      if (r.down) continue;
+      const p = r.bot.root.position;
+      g.fillStyle = r.paint; g.beginPath(); g.arc(X(p.x - RACE_ORIGIN.x), Y(p.z - RACE_ORIGIN.z), r.human ? 5 : 3.5, 0, Math.PI * 2); g.fill();
+      if (r.human) { g.strokeStyle = '#fff'; g.lineWidth = 1.5; g.stroke(); }
+    }
+  }
+
+  function showRaceResults(now: number) {
+    raceShown = now;
+    const st = race.standings();
+    rr.table.innerHTML = `<tr><th></th><th>BOT</th><th>TIME</th><th>BEST LAP</th><th>DAMAGE</th></tr>` + st.map((r, i) => {
+      const t = r.finished !== undefined ? fmtTime(r.finished) : `racing — lap ${race.lap(r)}`;
+      const best = r.lapTimes.length ? fmtTime(Math.min(...r.lapTimes)) : '—';
+      return `<tr class="${r.human ? 'you' : ''}"><td>${ordinal(i + 1)}</td><td style="color:${r.paint}">${r.name}${r.human ? ' (YOU)' : ''}</td><td>${t}</td><td>${best}</td><td>${Math.round(combat?.stats[r.id]?.dmg ?? 0)}</td></tr>`;
+    }).join('');
+    rr.box.classList.add('on');
+  }
+
   openLab();
+  // v0.33 test aids (not advertised): ?race=<preset> jumps straight into a race with that bot; &autopilot=1 lets the AI
+  // drive your bot too. window.__bb exposes the race for the sandbox test runs.
+  const qs = new URLSearchParams(location.search);
+  RACE_TEST.autopilot = qs.get('autopilot') === '1';
+  if (qs.get('race') && PRESETS[qs.get('race')!]) {
+    builder.hide();
+    raceBuild = JSON.parse(JSON.stringify(PRESETS[qs.get('race')!])); raceDiff = (qs.get('ai') as Difficulty) ?? 'normal'; DRIVE.boost = Number(qs.get('boost') ?? 3); raceSpeedMul = Number(qs.get('racespeed') ?? 1);
+    raceSeen = true; startRace();
+  }
+  (window as unknown as { __bb: unknown }).__bb = { race, get phase() { return phase; } };
 
   // v0.8 real spinner damage: weapon energy measured around every physics step
   scene.onBeforePhysicsObservable.add(() => {
     if (mode === 'course') { courseCombat?.beforePhysics(); course.beforePhysics(); } else combat?.beforePhysics();
     const stepDt = SUB_STEP_MS / 1000;   // v0.21: observers run once per physics sub-step
-    for (const b of bots) if (!b.eliminated) { applyGyro(b, stepDt); armBefore(b); applyMagnets(b, stepDt); hingesBefore(b); wheelsBefore(b, stepDt); }   // v0.8 gyro; v0.11 arm + magnets; v0.12 hinges; v0.21 drive motors
+    const racing = mode === 'race';   // v0.34 race: no gyro / magnets (weapons don't change the driving); stabilizer instead
+    for (const b of bots) if (!b.eliminated) { if (!racing) applyGyro(b, stepDt); armBefore(b); if (!racing) applyMagnets(b, stepDt); hingesBefore(b); wheelsBefore(b, stepDt); }   // v0.8 gyro; v0.11 arm + magnets; v0.12 hinges; v0.21 drive motors
     // v0.31 countdown: the weapons spin up but the bots stay where they were put (a spinning-up shell would turn its chassis)
-    if (mode === 'match' && phase === 'countdown') for (const b of bots) if (!b.eliminated) {
+    if (racing) race.beforePhysics(stepDt);
+    if (mode !== 'course' && phase === 'countdown') for (const b of bots) if (!b.eliminated) {
       const w = b.body.getAngularVelocity(); b.body.setAngularVelocity(new Vector3(w.x, 0, w.z));
     }
   });
@@ -364,6 +571,7 @@ async function main() {
     const stepDt = SUB_STEP_MS / 1000;
     if (mode === 'course') courseCombat?.afterPhysics(stepDt); else combat?.afterPhysics(stepDt);
     for (const b of bots) if (!b.eliminated) armAfter(b, stepDt);   // v0.11 reactionless hammer
+    if (mode === 'race') race.afterPhysics();   // v0.34 race: spinner spin-up doesn't twist the chassis
     if (mode === 'course' && bots.length) course.afterPhysics();     // v0.23: timing lines + readouts, every sub-step
   });
 
@@ -385,6 +593,7 @@ async function main() {
   });
   scene.onBeforeRenderObservable.add(() => {
     const dt = engine.getDeltaTime() / 1000;
+    if (mode === 'race') { if (bots.length) raceFrame(dt, performance.now()); return; }   // v0.33
     if (mode === 'course') {
       if (!bots.length) return;
       if (isDown('KeyR') && courseStation) { startStation(courseStation); return; }
@@ -414,7 +623,7 @@ async function main() {
       if (b.eliminated) continue;                                 // frozen + hidden, nothing to drive
       const d: Drive = waiting ? { throttle: 0, turn: 0, fire: false }
         : b.id === 'A' || p2Human
-        ? readDrive(b.id)
+        ? readDrive(b.id as 'A' | 'B')
         : (over ? { throttle: 0, turn: 0, fire: false } : aiDrive(b, bots[0], arena.half, dt, difficulty));
       runBot(b, d, dt, now, over || waiting, false, phase === 'countdown');
     }
@@ -429,6 +638,7 @@ async function main() {
     const focusing = camFocus && now < camFocus.until;
     const chaseBot = camCtl.view === 'chase' && !bots[0].eliminated ? bots[0] : null;   // v0.24 CHASE: behind P1
     cam.target = Vector3.Lerp(cam.target, focusing ? camFocus!.pos : chaseBot ? chaseBot.root.position : mid, focusing ? OUT.camLerp : chaseBot ? 0.1 : 0.08).add(fx.shakeOffset());
+    camGuard(chaseBot ? chaseBot.root.position : mid, 'arena');   // v0.34h
     const dist = live.length === 2 ? Vector3.Distance(live[0].root.position, live[1].root.position) : 0;
     cam.radius += (camCtl.radius(chaseBot ? 11 : 10 + dist * 0.9) - cam.radius) * 0.05;
     if (!focusing) camCtl.chase(chaseBot?.root.rotationQuaternion, dt);
@@ -501,7 +711,7 @@ async function main() {
     if (flipper) {
       const motorAlive = (b.state.parts['weapon_motor']?.hp ?? 0) > 0;
       b.weapon.motorDead = !motorAlive;
-      const press = b.weapon.pressed || (!!b.inverted && b.id !== 'A' && !p2Human && mode === 'match');   // the AI self-rights at once
+      const press = b.weapon.pressed || (!!b.inverted && b.id !== 'A' && !p2Human && mode !== 'course');   // the AI self-rights at once (v0.33: race too)
       driveFlipper(b, press, !b.rightingUntil && canAttack(b.state) && !over, motorAlive, !!b.inverted, dt);
     } else if (b.hinges) {
       // v0.12 real control weapon: hold = lift / clamp / crush
@@ -556,7 +766,7 @@ async function main() {
         if (mode === 'course') courseCombat?.onFlipped(b);
         else if (!over) combat.onFlipped(b);           // v0.19 arcade score: FLIP bonus to whoever put it there
         const flip = b.hinges?.some(h => h.role === 'flipper');
-        hud.sign(flip ? 'UPSIDE DOWN — FIRE THE FLIPPER!' : 'UPSIDE DOWN', flip ? 1200 : 700, '#ff9f43');
+        if (mode !== 'race' || b.id === 'A') hud.sign(flip ? 'UPSIDE DOWN — FIRE THE FLIPPER!' : 'UPSIDE DOWN', flip ? 1200 : 700, '#ff9f43');   // v0.33 race: yours only
       }
       return;
     }
@@ -569,7 +779,7 @@ async function main() {
       b.body.setAngularVelocity(fwd.scale(INVERT.roll));
       carryWheels(b);                                    // v0.21: the wheels roll with it
       b.rightingUntil = now + INVERT.snapMs;
-      hud.sign('SELF-RIGHT!', 700, '#4dd2ff');
+      if (mode !== 'race' || b.id === 'A') hud.sign('SELF-RIGHT!', 700, '#4dd2ff');
     }
   }
 
