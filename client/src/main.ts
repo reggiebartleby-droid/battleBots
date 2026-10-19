@@ -15,7 +15,8 @@ import { Combat } from './combat.js';
 import { Hud } from './hud.js';
 import { Fx } from './fx.js';
 import { Lab } from './lab.js';
-import { skinBot, cubeKnockout, cubeSkinOf, setDebrisFloors } from './cubes.js';
+import { skinBot, cubeKnockout, cubeSkinOf, setDebrisFloors, LOOT, clearLoot } from './cubes.js';
+import { reward, payWallet, walletCubes, newTally, signed, CUBE_ICON, type Tally, type Reward } from './econ.js';   // v0.38 cube currency
 import { CamControl } from './cam.js';
 import { Builder, PRESETS } from './builder.js';
 import { Course, STATIONS, COURSE_ORIGIN, COURSE, type StationId, type RunResult } from './course.js';
@@ -378,12 +379,34 @@ async function main() {
     hud: document.getElementById('rhud')!, map: document.getElementById('rmap') as HTMLCanvasElement,
     box: document.getElementById('rresults')!, table: document.getElementById('rr-table')!,
     again: document.getElementById('rr-again') as HTMLButtonElement, lab: document.getElementById('rr-lab') as HTMLButtonElement,
+    cubes: document.getElementById('rr-cubes')!,   // v0.38
   };
   rr.again.onclick = () => startRace(TESTER);   // v0.37 tester: the pickers are on the results screen, so straight to 3-2-1
   rr.lab.onclick = () => { leaveRace(); openLab(); };
   const RIVAL_IDS = ['B', 'C', 'D'] as const;
   let raceSpeedMul = 1;   // v0.34d lab RACE SPEED slider: x1 = the v0.34 race pace, up to x3
   let raceTrack: TrackId | 'random' = 'gp';   // v0.35 lab TRACK picker (Random = a new pick every race)
+
+  // ---------------- v0.38 cube currency (races only) ----------------
+  let tally: Record<string, Tally> = {};
+  let paid: Reward | null = null;          // the player's race reward, once it's in the wallet
+  let walletAfter = walletCubes();
+  let cubePulse = 0;                       // HUD: the cube line lights up for a moment after a pickup
+  const inRace = (id: string) => { const r = race.racers.find(x => x.id === id); return !!r && r.finished === undefined && phase === 'fight'; };
+  LOOT.collectors = () => mode === 'race' && phase === 'fight'
+    ? race.racers.filter(r => !r.down && !r.bot.eliminated && r.finished === undefined).map(r => ({ id: r.id, bot: r.bot, lap: r.lapsDone }))
+    : [];
+  LOOT.lapOf = id => race.racers.find(r => r.id === id)?.lapsDone ?? 0;
+  LOOT.onLost = (id, v) => { if (inRace(id)) (tally[id] ??= newTally()).lost += v; };
+  LOOT.onCollect = (id, v, repaired) => {
+    if (!inRace(id)) return;
+    const t = (tally[id] ??= newTally());
+    t.got += v; if (repaired) t.repaired++;
+    if (race.player()?.id === id) cubePulse = performance.now();
+  };
+  /** par for this race: the track's par is at the tester race speed (x3); the lab's RACE SPEED slider scales it */
+  const parFor = () => race.def.par * TESTER_SET.raceSpeed / Math.max(0.5, raceSpeedMul);
+  const rewardOf = (r: Racer) => reward(race.standings().indexOf(r) + 1, combat?.stats[r.id]?.dmg ?? 0, r.finished, parFor(), tally[r.id] ?? newTally());
 
   // ---------------- v0.37 TESTER pickers (track + car) ----------------
   const tp = {
@@ -436,6 +459,7 @@ async function main() {
     if (!raceBuild) return;
     leaveCourse();
     if (mode === 'race') { race.dispose(); bots = []; fx.clear(); } else clearBots();
+    clearLoot(); LOOT.on = true; tally = {}; paid = null; cubePulse = 0;   // v0.38
     race.setVisible(false);
     race = races[raceTrack === 'random' ? TRACK_IDS[Math.floor(Math.random() * TRACK_IDS.length)] : raceTrack] ?? races.gp;   // v0.35
     mapOutline = race.outline();
@@ -479,6 +503,7 @@ async function main() {
     DRIVE.raceArcade = false;
     if (mode !== 'race') return;
     race.dispose(); bots = []; fx.clear(); fx.focus = null; hud.clearSign();   // v0.34i
+    clearLoot(); LOOT.on = false;   // v0.38
     mode = 'match';
     document.body.classList.remove('inrace');
     rr.box.classList.remove('on'); raceShown = -1;
@@ -498,11 +523,13 @@ async function main() {
       ['WRECKED', 'Destroyed, or off the track (into the pit, over a wall): back at the last checkpoint in 2 s, repaired.'],
       ['STUCK', 'Can\'t drive, or barely moving for 4 s (upside down, wedged, pinned): towed back to the last checkpoint, repaired.'],
       ['DAMAGE', 'Your damage score (DMG) counts every point of damage you deal to the other bots.'],
+      ['CUBES', 'Your bot\'s cubes are your money: −1 for each one knocked off you (wrecked = all of them). Drive near loose cubes to vacuum them up: +1 each, and they repair you. At the line you earn cubes for place, damage and time.'],   // v0.38
       ['TRACK', race.def.desc],   // v0.35
+      ['WALLET', `${CUBE_ICON}<b class="cubes">${walletCubes()}</b> cubes · par ${fmtTime(parFor())}`],   // v0.38
       ['KEYS', TESTER ? 'R: restart · Q: camera' : 'R: restart · B: lab · Q: camera'],
     ];
     // v0.37 tester: full card on the first race; after that just the track line (the pickers are what matter)
-    const shown = TESTER && raceSeen ? rows.filter(([k]) => k === 'TRACK') : rows;
+    const shown = TESTER && raceSeen ? rows.filter(([k]) => k === 'TRACK' || k === 'WALLET') : rows;
     rd.table.innerHTML = shown.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
     rd.start.style.display = '';
     rd.small.textContent = TESTER ? 'Pick a track and a car · Enter or click START' : 'Enter or click START · B: back to the lab';
@@ -562,6 +589,12 @@ async function main() {
     fx.focus = target;
     fx.update(dt, cam);
     drawRaceHud(now);
+    // v0.38 the player's race reward goes into the wallet the moment they cross the line
+    if (race.playerFinishedAt > 0 && !paid) {
+      paid = rewardOf(pr);
+      walletAfter = payWallet(paid.total);
+      hud.sign(`${signed(paid.total)} CUBES`, 1800, paid.total >= 0 ? '#39ff14' : '#ff4d4d');
+    }
     if (race.playerFinishedAt > 0 && now - race.playerFinishedAt > 1500 && (raceShown < 0 || now - raceShown > 500)) showRaceResults(now);
   }
 
@@ -581,6 +614,7 @@ async function main() {
     rr.hud.innerHTML = `<div class="pos">${ordinal(pos)}<span> / ${st.length}</span></div>`
       + `<div>LAP <b>${pr.finished !== undefined ? RACE.laps : race.lap(pr)} / ${RACE.laps}</b> &nbsp; TIME <b>${fmtTime(pr.finished ?? race.t)}</b></div>`
       + `<div>LAST <b>${last}</b> &nbsp; BEST <b>${best}</b> &nbsp; DMG <b>${dmg(pr)}</b></div>`
+      + cubeLine(pr, now)   // v0.38
       + (pr.draft !== undefined ? `<div class="draft">SLIPSTREAM ▲ BOOST</div>` : '')   // v0.35 oval
       + `<ol>${st.map(r => `<li style="color:${r.paint}">${r.name}${r.human ? ' <b>(YOU)</b>' : ''} <span class="dmg">${dmg(r)}</span>${tag(r)}</li>`).join('')}</ol>`;
     // minimap
@@ -603,14 +637,33 @@ async function main() {
     }
   }
 
+  /** v0.38 HUD: this race's cubes so far (collected, lost, net) + the wallet. */
+  function cubeLine(pr: Racer, now: number): string {
+    const t = tally[pr.id] ?? newTally(), got = Math.round(t.got), lost = Math.round(t.lost), net = got - lost;
+    const lit = now - cubePulse < 350 ? ' lit' : '';
+    return `<div class="cubeln${lit}">${CUBE_ICON}CUBES <b class="g">+${got}</b> <b class="l">−${lost}</b> = <b>${signed(net)}</b> &nbsp; <span class="wal">WALLET ${paid ? walletAfter : walletCubes()}</span></div>`;
+  }
+
   function showRaceResults(now: number) {
     raceShown = now;
     const st = race.standings();
-    rr.table.innerHTML = `<tr><th></th><th>BOT</th><th>TIME</th><th>BEST LAP</th><th>DAMAGE</th></tr>` + st.map((r, i) => {
+    // v0.38 CUBES = each bot's race reward (still-racing bots: so far, no time bonus yet)
+    rr.table.innerHTML = `<tr><th></th><th>BOT</th><th>TIME</th><th>BEST LAP</th><th>DAMAGE</th><th>CUBES</th></tr>` + st.map((r, i) => {
       const t = r.finished !== undefined ? fmtTime(r.finished) : `racing — lap ${race.lap(r)}`;
       const best = r.lapTimes.length ? fmtTime(Math.min(...r.lapTimes)) : '—';
-      return `<tr class="${r.human ? 'you' : ''}"><td>${ordinal(i + 1)}</td><td style="color:${r.paint}">${r.name}${r.human ? ' (YOU)' : ''}</td><td>${t}</td><td>${best}</td><td>${Math.round(combat?.stats[r.id]?.dmg ?? 0)}</td></tr>`;
+      const c = r.human && paid ? paid.total : rewardOf(r).total;
+      return `<tr class="${r.human ? 'you' : ''}"><td>${ordinal(i + 1)}</td><td style="color:${r.paint}">${r.name}${r.human ? ' (YOU)' : ''}</td><td>${t}</td><td>${best}</td><td>${Math.round(combat?.stats[r.id]?.dmg ?? 0)}</td><td class="${c < 0 ? 'neg' : 'pos'}">${signed(c)}${r.finished === undefined ? '…' : ''}</td></tr>`;
     }).join('');
+    // v0.38 your reward, line by line, and the wallet
+    const p = paid;
+    rr.cubes.innerHTML = p ? `<div class="rw-h">${CUBE_ICON}YOUR CUBES</div><table class="rw">`
+      + `<tr><td>PLACE</td><td>${ordinal(p.place)}</td><td>${signed(p.placeCubes)}</td></tr>`
+      + `<tr><td>DAMAGE</td><td>${Math.round(p.dmg)} dealt</td><td>${signed(p.dmgCubes)}</td></tr>`
+      + `<tr><td>TIME</td><td>${p.under > 0 ? `${p.under.toFixed(1)} s under par` : `par ${fmtTime(parFor())}`}</td><td>${signed(p.timeCubes)}</td></tr>`
+      + `<tr><td>COLLECTED</td><td>vacuumed up</td><td>${signed(p.got)}</td></tr>`
+      + `<tr><td>LOST</td><td>knocked off you</td><td>${signed(-p.lost)}</td></tr>`
+      + `<tr class="tot"><td>RACE</td><td></td><td>${signed(p.total)}</td></tr>`
+      + `<tr class="tot"><td>WALLET</td><td></td><td>${walletAfter}</td></tr></table>` : '';
     rr.box.classList.add('on');
   }
 
@@ -625,7 +678,8 @@ async function main() {
     const qt = qs.get('track') as TrackId | 'random' | null; if (qt && (qt === 'random' || TRACK_IDS.includes(qt))) raceTrack = qt;   // v0.35 &track=oval
     raceSeen = true; startRace();
   }
-  (window as unknown as { __bb: unknown }).__bb = { get race() { return race; }, get phase() { return phase; }, scene, cam };   // v0.35b scene + cam for sandbox screenshots   // v0.35 race changes with the track
+  (window as unknown as { __bb: unknown }).__bb = { get race() { return race; }, get phase() { return phase; }, scene, cam,
+    get tally() { return tally; }, get paid() { return paid; }, skinCount: (id: string) => { const r = race.racers.find(x => x.id === id); return r ? cubeSkinOf(r.bot.root)?.count : undefined; } };   // v0.38   // v0.35b scene + cam for sandbox screenshots   // v0.35 race changes with the track
 
   // v0.8 real spinner damage: weapon energy measured around every physics step
   scene.onBeforePhysicsObservable.add(() => {

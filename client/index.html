@@ -226,6 +226,20 @@
     .pick label { flex: 1; display: flex; flex-direction: column; gap: 4px; font: 700 11px/1 system-ui, sans-serif; letter-spacing: .12em; color: #8fa3ad; }
     .pick select { font: 600 14px/1.2 system-ui, sans-serif; background: #0b1013; color: #ffc400; border: 1px solid #ffc400; border-radius: 4px; padding: 9px 10px; cursor: pointer; }
     body.tester #rr-lab { display: none; }
+    /* v0.38 cube currency */
+    .cube-ico { display: inline-block; width: 10px; height: 10px; margin: 0 6px 0 0; vertical-align: -1px; background: #00e5ff; box-shadow: 0 0 6px rgba(0,229,255,.8), inset -2px -2px 0 rgba(0,0,0,.35); }
+    #rhud .cubeln { margin-top: 2px; transition: text-shadow .15s; }
+    #rhud .cubeln b.g { color: #39ff14; } #rhud .cubeln b.l { color: #ff6b6b; }
+    #rhud .cubeln .wal { font-size: 11px; color: #8fa3ad; font-weight: 700; }
+    #rhud .cubeln.lit { text-shadow: 0 0 8px rgba(0,229,255,.95); }
+    #rhud .cubeln.lit .cube-ico { transform: scale(1.35); }
+    #rresults td.pos { color: #39ff14; } #rresults td.neg { color: #ff6b6b; }
+    #rr-cubes .rw-h { font: 700 11px/1 system-ui, sans-serif; letter-spacing: .14em; color: #00e5ff; margin-bottom: 6px; }
+    #rr-cubes table.rw { font-size: 13px; }
+    #rr-cubes table.rw td { padding: 3px 6px; border-bottom: 1px solid #1c252b; }
+    #rr-cubes table.rw td:last-child { text-align: right; }
+    #rr-cubes table.rw tr.tot td { color: #ffc400; border-bottom: 0; }
+    #ready b.cubes { color: #00e5ff; }
   </style>
 </head>
 <body>
@@ -308,6 +322,7 @@
     <h3>RACE RESULTS</h3>
     <div class="pad">
       <table id="rr-table"></table>
+      <div id="rr-cubes"></div>
       <div class="pick" style="margin:0"><label>NEXT TRACK <select id="tp-track2"></select></label><label>CAR <select id="tp-car2"></select></label></div>
       <div class="row"><span class="keys">R race again · B lab</span><span><button id="rr-again" type="button">RACE AGAIN ▶</button> <button id="rr-lab" type="button">◀ LAB</button></span></div>
     </div>

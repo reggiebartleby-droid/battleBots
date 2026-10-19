@@ -112,6 +112,36 @@ interface FloorArea { cx: number; cz: number; half: number; wallH: number }
 let FLOORS: FloorArea[] = [{ cx: 0, cz: 0, half: 8, wallH: 2.5 }];
 export function setDebrisFloors(areas: FloorArea[]) { FLOORS = areas; }
 
+// ---------------- v0.38 cube currency (race only) ----------------
+/** v0.38 (user): the cubes are the money. Every cube knocked off a bot costs its racer 1; loose cubes within LOOT.pullR
+ *  get vacuumed up by a nearby racer (+1, and it snaps back onto that bot as 1 cube of repair). Loose cubes fade after
+ *  LOOT.fadeS. A racer can't take back cubes knocked off its own bot until it has finished the lap it lost them on.
+ *  Values are in "8-bit (big) cubes": smaller cube sizes count each cube for less, so the cube size never changes the money.
+ *  main.ts switches it on for races (hooks below) and off everywhere else. */
+export interface LootCollector { id: BotId; bot: Bot; lap: number }
+export const LOOT = {
+  on: false,
+  fadeS: 20,            // loose cubes disappear after this ...
+  shrinkS: 2,           // ... shrinking away over the last this-many seconds
+  pullR: 2,             // m: the vacuum's reach (from the bot's centre)
+  minAgeS: 0.3,         // a cube has to fly this long before it can be vacuumed (you see it come off)
+  pullSpeed: [4, 26] as [number, number],   // m/s: the whoosh speeds up from this to this ...
+  pullAccel: 60,        // ... at this many m/s^2
+  grabR: 0.45,          // m: this close to the bot's centre = collected
+  /** who can vacuum right now (alive, racing, not finished) */
+  collectors: (): LootCollector[] => [],
+  /** laps the racer with this id has finished (cubes remember it when they come off) */
+  lapOf: (_id: BotId): number => 0,
+  /** a cube came off this racer's bot */
+  onLost: (_id: BotId, _value: number): void => {},
+  /** this racer vacuumed up a cube; repaired = it went back onto the bot as repair */
+  onCollect: (_id: BotId, _value: number, _repaired: boolean): void => {},
+};
+/** Skins whose bot is gone (wrecked + respawned) but whose loose cubes are still lying on the track. */
+const orphans = new Set<Skin>();
+/** v0.38 remove every loose cube (and the skins that only still exist for them) -- a new race, or leaving the race. */
+export function clearLoot() { for (const sk of [...orphans]) sk.dispose(true); }
+
 // ---------------- helpers ----------------
 const KEY = (i: number, j: number, k: number) => ((i + 512) * 1024 + (j + 512)) * 1024 + (k + 512);
 const KI = (key: number) => Math.floor(key / 1048576) - 512;
@@ -254,6 +284,15 @@ export class Skin {
   private debris!: Mesh; private dMats!: Float32Array; private dCols!: Float32Array;
   private dp!: Float32Array; private dv!: Float32Array; private dq!: Float32Array; private dw!: Float32Array;
   private yaw!: Float32Array; private calm!: Float32Array; private walled!: Uint8Array;
+  // v0.38 cube currency: seconds since the cube came off, the owner's laps then, the vacuum pulling it (st 5)
+  private age!: Float32Array; private lapOff!: Int16Array; private pullV!: Float32Array; private pullTo: (Bot | undefined)[] = [];
+  private pullBy: (BotId | undefined)[] = [];
+  private noLoot!: Uint8Array;   // v0.38 poof cubes (towed / off the track): cost nothing, can't be vacuumed, vanish fast
+  private freeLoss = false;
+  private orphan = false;
+  ownerId?: BotId;
+  /** v0.38 one cube's worth of money: 1 for an 8-bit (big) cube, less for smaller cubes */
+  readonly cubeValue: number;
   private active: number[] = [];
   private dDirtyM = false; private dDirtyC = false;
   // v0.29 HP = cubes: per part, its holders, cubes at the start, cubes still on
@@ -271,6 +310,7 @@ export class Skin {
 
   constructor(private scene: Scene, readonly root: Mesh, meshes: AbstractMesh[], paintHex: string, socketOf: (m: AbstractMesh) => string | null, shadows?: ShadowGenerator) {
     this.v = CUBE_SIZE[CUBES.size] ?? 0.08;
+    this.cubeValue = (this.v / CUBE_SIZE.big) ** 2;   // v0.38 the cube shell is ~3 cubes deep: cube count goes with 1 / size^2
     this.style = CUBES.style in STYLE ? CUBES.style : 'glow';
     const st = STYLE[this.style], v = this.v;
     // v0.31 armoured / weathered palette: team hue kept, paint darker and less saturated (industrial paint)
@@ -387,6 +427,8 @@ export class Skin {
     this.dp = new Float32Array(total * 3); this.dv = new Float32Array(total * 3);
     this.dq = new Float32Array(total * 4); this.dw = new Float32Array(total * 3);
     this.yaw = new Float32Array(total); this.calm = new Float32Array(total); this.walled = new Uint8Array(total);
+    this.age = new Float32Array(total); this.lapOff = new Int16Array(total); this.pullV = new Float32Array(total);
+    this.noLoot = new Uint8Array(total);
 
     if (shadows) castShadows(shadows, [...this.holders.map(h => h.mesh), this.debris]);
     this.follow();
@@ -397,6 +439,7 @@ export class Skin {
       scene.onBeforeRenderObservable.add(() => {
         const dt = Math.min(0.05, scene.getEngine().getDeltaTime() / 1000);
         for (const sk of skins.values()) if (sk.scene === scene) sk.update(dt);
+        for (const sk of [...orphans]) if (sk.scene === scene) sk.update(dt);   // v0.38 cubes of wrecked bots
       });
     }
   }
@@ -404,14 +447,25 @@ export class Skin {
   get count() { return this.n; }
   meshes(): Mesh[] { return [...this.holders.map(h => h.mesh), this.debris]; }
 
-  dispose() {
+  /** The bot is gone. v0.38 race (LOOT on): its loose cubes stay on the track (still collectable, still fading) until
+   *  the last one is gone -- the skin lives on as an orphan till then. final = remove everything now. */
+  dispose(final = false) {
     for (const r of this.rides) disposeRide(r);
     this.rides = [];
-    for (const h of this.holders) h.mesh.dispose();
+    for (const h of this.holders) if (!h.mesh.isDisposed()) h.mesh.dispose();
+    skins.delete(this.root);
+    if (!final && LOOT.on && this.looseLeft() > 0) {
+      for (let g = 0; g < this.n; g++) if (this.st[g] === 4) { this.st[g] = 3; this.hide(g); }   // riding a dead part's body: gone with it
+      this.orphan = true; this.bot = undefined;
+      orphans.add(this);
+      return;
+    }
+    orphans.delete(this);
     this.debris.dispose();
     this.mat.dispose();
-    skins.delete(this.root);
   }
+  /** loose cubes still out there (flying, lying, being vacuumed) */
+  private looseLeft(): number { let k = 0; for (let g = 0; g < this.n; g++) { const s = this.st[g]; if (s === 1 || s === 2 || s === 5) k++; } return k; }
 
   /** Move every holder onto its (hidden) source mesh. */
   private follow() {
@@ -430,6 +484,13 @@ export class Skin {
 
   update(dt: number) {
     this.t += dt;
+    if (this.orphan) {                                   // v0.38 just the loose cubes now
+      this.kick(); this.simDebris(dt); this.loot(dt);
+      if (this.dDirtyM) { this.debris.thinInstanceBufferUpdated('matrix'); this.dDirtyM = false; }
+      if (this.dDirtyC) { this.debris.thinInstanceBufferUpdated('color'); this.dDirtyC = false; }
+      if (this.looseLeft() === 0) this.dispose(true);
+      return;
+    }
     this.follow();
     const bot = this.bot;
     if (bot && !this.ko) {
@@ -462,6 +523,7 @@ export class Skin {
     this.ride(dt);
     this.kick();
     this.simDebris(dt);
+    this.loot(dt);   // v0.38
     for (const h of this.holders) {
       if (h.dirtyM) { h.mesh.thinInstanceBufferUpdated('matrix'); h.dirtyM = false; }
       if (h.dirtyC) { h.mesh.thinInstanceBufferUpdated('color'); h.dirtyC = false; }
@@ -709,11 +771,18 @@ export class Skin {
   }
 
   /** KO (v0.28: the whole bot, its collider goes too -- main.ts dropBot) or knocked out of the arena: every cube flies. */
-  knockout() {
+  /** v0.38 loot = false (towed when stuck, or off the track): the bot still bursts into cubes, but they cost its racer
+   *  nothing and nobody can vacuum them -- they're gone in a couple of seconds. A real wreck (KO) = every cube lost + loot. */
+  knockout(loot = true) {
     if (this.ko) return;
     this.ko = true;
     for (const h of this.holders) h.mesh.computeWorldMatrix();
-    for (let g = 0; g < this.n; g++) if (this.st[g] === 0) this.loosen(g, 2.4);
+    this.freeLoss = !loot;
+    for (let g = 0; g < this.n; g++) if (this.st[g] === 0) {
+      this.loosen(g, 2.4);
+      if (!loot) { this.noLoot[g] = 1; this.age[g] = Math.max(0, LOOT.fadeS - 1.6); }
+    }
+    this.freeLoss = false;
     this.flash = 0.3;
   }
 
@@ -732,6 +801,10 @@ export class Skin {
     this.dDirtyC = true;
     if (h.socket) this.sockAlive.set(h.socket, (this.sockAlive.get(h.socket) ?? 1) - 1);
     else this.chassisOff++;
+    // v0.38 cube currency: it cost its racer one cube; remember the lap it came off on (own cubes: next lap on)
+    this.age[g] = 0; this.pullTo[g] = undefined;
+    this.noLoot[g] = 0;
+    if (LOOT.on && this.ownerId && !this.freeLoss) { this.lapOff[g] = LOOT.lapOf(this.ownerId); LOOT.onLost(this.ownerId, this.cubeValue); }
   }
 
   /** Detach one cube: it becomes debris, flying out from the bot (or with the given velocity / spin). */
@@ -810,6 +883,110 @@ export class Skin {
     }
   }
 
+  // ---------------- v0.38 cube currency ----------------
+  /** 1 = full size; shrinks to 0 over the last LOOT.shrinkS of a loose cube's life (race only). */
+  private fadeK(g: number): number {
+    if (!LOOT.on) return 1;
+    return Math.max(0, Math.min(1, (LOOT.fadeS - this.age[g]) / LOOT.shrinkS));
+  }
+  private hide(g: number) { for (let k = 0; k < 16; k++) this.dMats[g * 16 + k] = 0; this.dDirtyM = true; }
+
+  /** Loose cubes: age + fade, the vacuum pull, collecting. */
+  private loot(dt: number) {
+    if (!LOOT.on) return;
+    const cols = LOOT.collectors().map(c => ({ ...c, p: c.bot.root.getAbsolutePosition() }));
+    const s0 = this.v * STYLE[this.style].gap, R2 = LOOT.pullR * LOOT.pullR;
+    const M = new Matrix(), q = new Quaternion(), pos = new Vector3(), scl = new Vector3();
+    for (let g = 0; g < this.n; g++) {
+      const st = this.st[g];
+      if (st !== 1 && st !== 2 && st !== 5) continue;
+      this.age[g] += dt;
+      const o = g * 3;
+      if (st === 5) {                                     // being vacuumed: whoosh into the bot
+        const b = this.pullTo[g];
+        if (!b || b.eliminated || b.root.isDisposed()) { this.st[g] = 1; this.pullTo[g] = undefined; this.dv[o] = 0; this.dv[o + 1] = 0; this.dv[o + 2] = 0; this.active.push(g); continue; }
+        const t = b.root.getAbsolutePosition();
+        const dx = t.x - this.dp[o], dy = t.y - this.dp[o + 1], dz = t.z - this.dp[o + 2], d = Math.hypot(dx, dy, dz);
+        const sp = Math.min(LOOT.pullSpeed[1], this.pullV[g] + LOOT.pullAccel * dt);
+        this.pullV[g] = sp;
+        if (d <= LOOT.grabR || d <= sp * dt) {               // got it
+          this.st[g] = 3; this.hide(g); this.pullTo[g] = undefined;
+          const by = this.pullBy[g];
+          const repaired = skins.get(b.root)?.repairOne() ?? false;
+          if (by) LOOT.onCollect(by, this.cubeValue, repaired);
+          continue;
+        }
+        const k = sp * dt / d;
+        this.dp[o] += dx * k; this.dp[o + 1] += dy * k; this.dp[o + 2] += dz * k;
+        q.set(this.dq[g * 4], this.dq[g * 4 + 1], this.dq[g * 4 + 2], this.dq[g * 4 + 3]);
+        const sz = s0 * Math.max(0.35, Math.min(1, d / LOOT.pullR)) * this.fadeK(g);
+        scl.set(sz, sz, sz); pos.set(this.dp[o], this.dp[o + 1], this.dp[o + 2]);
+        Matrix.ComposeToRef(scl, q, pos, M); M.copyToArray(this.dMats, g * 16); this.dDirtyM = true;
+        continue;
+      }
+      if (this.age[g] >= LOOT.fadeS) { this.st[g] = 3; this.hide(g); continue; }   // faded away
+      if (st === 2 && this.age[g] > LOOT.fadeS - LOOT.shrinkS) {                     // lying still: shrink it here
+        q.set(this.dq[g * 4], this.dq[g * 4 + 1], this.dq[g * 4 + 2], this.dq[g * 4 + 3]);
+        const sz = s0 * this.fadeK(g); scl.set(sz, sz, sz); pos.set(this.dp[o], this.dp[o + 1], this.dp[o + 2]);
+        Matrix.ComposeToRef(scl, q, pos, M); M.copyToArray(this.dMats, g * 16); this.dDirtyM = true;
+      }
+      if (this.age[g] < LOOT.minAgeS || !cols.length || this.noLoot[g]) continue;
+      // the vacuum: nearest racer in reach (not the owner until it has finished the lap these came off on)
+      let best: (typeof cols)[number] | undefined, bd = R2;
+      for (const c of cols) {
+        if (c.id === this.ownerId && c.lap <= this.lapOff[g]) continue;
+        const dx = c.p.x - this.dp[o], dy = c.p.y - this.dp[o + 1], dz = c.p.z - this.dp[o + 2];
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 < bd) { bd = d2; best = c; }
+      }
+      if (best) { this.st[g] = 5; this.pullTo[g] = best.bot; this.pullBy[g] = best.id; this.pullV[g] = LOOT.pullSpeed[0]; }
+    }
+  }
+
+  /** v0.38 a vacuumed cube snaps back on as repair: the most damaged living part gets one cube's share of its HP back
+   *  (and one of its missing cubes back on); undamaged parts but chipped chassis = a chassis cube back. false = nothing
+   *  to repair (it's money only then). */
+  repairOne(): boolean {
+    const bot = this.bot;
+    if (!bot || this.ko || this.orphan) return false;
+    let best: string | undefined, bf = 1;
+    for (const [sid, ps] of Object.entries(bot.state.parts)) {
+      if (ps.hp <= 0 || ps.hp >= ps.maxHp || this.deadSockets.has(sid)) continue;
+      const f = ps.hp / ps.maxHp;
+      if (f < bf) { bf = f; best = sid; }
+    }
+    if (best) {
+      const ps = bot.state.parts[best], init = this.sockInit.get(best) ?? 0;
+      ps.hp = Math.min(ps.maxHp, ps.hp + ps.maxHp / Math.max(1, init));
+      if (init > 0) { const g = this.missing(this.sockHolders.get(best) ?? []); if (g >= 0) this.restore(g); }
+      return true;
+    }
+    if (this.chassisOff > 0) {
+      const g = this.missing(this.holders.filter(h => !h.socket && h.mesh.isEnabled()));
+      if (g >= 0) { this.restore(g); return true; }
+    }
+    return false;
+  }
+  /** a cube missing from these holders: one that's gone for good first, else one still lying loose (it's taken away) */
+  private missing(hs: Holder[]): number {
+    let loose = -1;
+    for (const h of hs) for (const g of h.cubes) {
+      if (this.st[g] === 3) return g;
+      if (loose < 0 && (this.st[g] === 1 || this.st[g] === 2)) loose = g;
+    }
+    return loose;
+  }
+  private restore(g: number) {
+    if (this.st[g] === 1 || this.st[g] === 2) this.hide(g);
+    const h = this.holders[this.hOf[g]], o = this.slot[g] * 16, s = this.v * STYLE[this.style].gap;
+    for (let k = 0; k < 16; k++) h.mats[o + k] = 0;
+    h.mats[o] = s; h.mats[o + 5] = s; h.mats[o + 10] = s; h.mats[o + 15] = 1;
+    h.mats[o + 12] = this.lp[g * 3]; h.mats[o + 13] = this.lp[g * 3 + 1]; h.mats[o + 14] = this.lp[g * 3 + 2];
+    h.dirtyM = true;
+    this.st[g] = 0;
+    if (h.socket) this.sockAlive.set(h.socket, (this.sockAlive.get(h.socket) ?? 0) + 1); else this.chassisOff = Math.max(0, this.chassisOff - 1);
+  }
+
   private simDebris(dt: number) {
     if (!this.active.length) return;
     const s = this.v * STYLE[this.style].gap, half = s / 2;
@@ -817,6 +994,7 @@ export class Skin {
     const pos = new Vector3(), scl = new Vector3(s, s, s), M = new Matrix();
     const keep: number[] = [];
     for (const g of this.active) {
+      if (this.st[g] !== 1) continue;                      // v0.38 vacuumed / faded / back on a bot meanwhile
       const o = g * 3;
       let x = this.dp[o], y = this.dp[o + 1], z = this.dp[o + 2];
       let vx = this.dv[o], vy = this.dv[o + 1], vz = this.dv[o + 2];
@@ -862,6 +1040,7 @@ export class Skin {
         this.st[g] = 3;
       } else {
         pos.set(x, y, z);
+        const fk = this.fadeK(g); scl.set(s * fk, s * fk, s * fk);   // v0.38 shrinks away at the end of its life
         Matrix.ComposeToRef(scl, q, pos, M);
         M.copyToArray(this.dMats, g * 16);
         if (settled) this.st[g] = 2; else keep.push(g);
@@ -922,6 +1101,7 @@ export function skinBot(bot: Bot, shadows?: ShadowGenerator): Skin | null {
   };
   const sk = new Skin(scene, bot.root, botMeshes(bot), bot.build.cosmetics.paint ?? (bot.id === 'A' ? '#e63946' : '#1d7cf2'), socketOf, shadows);
   sk.bot = bot;
+  sk.ownerId = bot.id;   // v0.38 cube currency
   return sk;
 }
 
@@ -931,5 +1111,5 @@ function socketByAncestry(m: AbstractMesh, partMeshes: Record<string, Mesh>): st
 }
 
 export function cubeHit(bot: Bot, point: Vector3, dmg: number) { skins.get(bot.root)?.hit(point, dmg); }
-export function cubeKnockout(bot: Bot) { skins.get(bot.root)?.knockout(); }
+export function cubeKnockout(bot: Bot, loot = true) { skins.get(bot.root)?.knockout(loot); }
 export function cubeSkinOf(root: Node): Skin | undefined { return skins.get(root); }

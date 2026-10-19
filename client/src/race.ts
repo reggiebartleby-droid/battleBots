@@ -110,8 +110,12 @@ export interface TrackDef {
   theme: TrackTheme;
   look: 'neon' | 'raceway' | 'city';   // walls / edges / ground style (v0.36 city = Night City)
   wet?: WetDef;                   // v0.36
+  par: number;                    // v0.38 cube currency: par race time (3 laps), s, at the tester settings (drive boost x3, race speed x3)
 }
 const OVAL = { straight: 44, r: 16 };
+// v0.38 par times (3 laps, tester settings): estimates from sandbox autopilot laps (Flip Side ~10 m/s round the Grand Prix,
+// ~12.5 m/s round the Oval; 146.5 m / 188.5 m a lap). The sandbox only manages ~3 fps, so tune these after a real playtest.
+const PAR_GP = 45, PAR_OVAL = 45;
 /** v0.36 Night City tunnel over the start straight (local x range; dry inside, roof collider). */
 export const CITY_TUNNEL = { x0: 7, x1: 25, roof: 4.6, halfW: 4.4 };
 export const TRACKS: Record<TrackId, TrackDef> = {
@@ -129,7 +133,7 @@ export const TRACKS: Record<TrackId, TrackDef> = {
       { tag: 'hairpin', r: 5, deg: 180, sign: 1 },
     ],
     startX: XE - START_LEN, finishS: START_LEN - XE,
-    friction: 0.8, sideGrip: 10, draft: false, aiCorner: 0.6,
+    friction: 0.8, sideGrip: 10, draft: false, aiCorner: 0.6, par: PAR_GP,
     theme: { sky: ['#05030c', '#2b1636'], hemi: 0.3, sun: 0.5, fog: { color: '#1a1226', density: 0.0055 } }, look: 'city',
     wet: {
       rainGrip: 0.6, patchGrip: 0.05, rainSlide: 5, patchSlide: 0.6,
@@ -154,7 +158,7 @@ export const TRACKS: Record<TrackId, TrackDef> = {
       { tag: 'bank', r: OVAL.r, deg: 180, sign: 1 },
     ],
     startX: -OVAL.straight / 2, finishS: OVAL.straight / 2,
-    friction: 1.0, sideGrip: 16, draft: true, aiCorner: 0.85,
+    friction: 1.0, sideGrip: 16, draft: true, aiCorner: 0.85, par: PAR_OVAL,
     theme: { sky: ['#0b2a4a', '#6f9cc4'], hemi: 0.85, sun: 1.5 }, look: 'raceway',
   },
 };
@@ -852,7 +856,7 @@ export class Race {
     const b = r.bot;
     r.down = { at: now, why }; r.offSince = undefined; r.stuckSince = undefined; r.wrecks[why]++;
     const pos = b.root.position.clone();
-    if (cubeSkinOf(b.root)) { cubeKnockout(b); dropBot(b); }
+    if (cubeSkinOf(b.root)) { cubeKnockout(b, why === 'ko'); dropBot(b); }   // v0.38 towed / off: a poof, no cubes lost
     else { this.fx.explode(b, pos, why === 'ko' ? 'WRECKED!' : why === 'off' ? 'OFF!' : 'TOWED!'); freezeBot(b); }
     if (!b.eliminated) b.eliminated = { t: now, pos, vel: Vector3.Zero(), reason: why === 'off' ? 'out' : 'ko' };
     if (r.human) this.hooks.sign(why === 'ko' ? 'WRECKED! — BACK TO THE CHECKPOINT' : why === 'off' ? 'OFF THE TRACK!' : 'IMMOBILIZED — BACK TO THE CHECKPOINT', 1500, '#ff4d4d');
