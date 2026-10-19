@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -p tsconfig.json --noEmit && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "bake:oval": "node scripts/bake-oval.mjs"
   },
   "dependencies": {
     "@babylonjs/core": "^9.30.0",

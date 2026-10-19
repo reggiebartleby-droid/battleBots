@@ -23,7 +23,7 @@ import { SURFACE_BIT, WALL_BIT } from './arena.js';
 import { buildBot, disposeBot, dropBot, forward, freezeBot, upVector, raceTurn, DRIVE, REST_Y, type Bot, type BotId } from './bot.js';
 import { cubeKnockout, cubeSkinOf } from './cubes.js';
 import { DIFFICULTY, type Difficulty } from './ai.js';
-import { Raceway } from './raceway.js';
+import { CubeOval } from './cubeoval.js';   // v0.44 cube Oval (falls back to raceway.ts itself)
 import { NightCity } from './city.js';
 import type { Drive } from './input.js';
 import type { Combat } from './combat.js';
@@ -159,7 +159,8 @@ export const TRACKS: Record<TrackId, TrackDef> = {
     ],
     startX: -OVAL.straight / 2, finishS: OVAL.straight / 2,
     friction: 1.0, sideGrip: 16, draft: true, aiCorner: 0.85, par: PAR_OVAL,
-    theme: { sky: ['#0b2a4a', '#6f9cc4'], hemi: 0.85, sun: 1.5 }, look: 'raceway',
+    // v0.44 cube Oval: daytime sky + a light haze (Cube Oval Speedway mockup)
+    theme: { sky: ['#3f86d6', '#d6ebf7'], hemi: 0.85, sun: 1.5, fog: { color: '#d6ebf7', density: 0.0035 } }, look: 'raceway',
   },
 };
 export const TRACK_IDS = Object.keys(TRACKS) as TrackId[];
@@ -262,7 +263,7 @@ export class Race {
   playerFinishedAt = -1;
 
   readonly def: TrackDef;
-  private raceway: Raceway | null = null;
+  private raceway: CubeOval | null = null;   // v0.44 cube Oval scenery (raceway.ts is its fallback)
   private city: NightCity | null = null;
   /** v0.36 lightning flash 0..1 (main.ts adds it to the light) */
   get flash() { return this.city?.flash ?? 0; }
@@ -288,7 +289,7 @@ export class Race {
     this.buildMarkings();
     if (this.has('hazard')) this.buildHazards();
     if (track === 'gp') this.buildIsland();
-    if (this.def.look === 'raceway') this.raceway = new Raceway(scene, this);   // v0.35b detailed scenery (raceway.ts)
+    if (this.def.look === 'raceway') this.raceway = new CubeOval(scene, this);   // v0.35b detailed scenery; v0.44 the cube world (cubeoval.ts)
     if (this.def.look === 'city') { this.buildTunnelRoof(); this.city = new NightCity(scene, this); }   // v0.36 (city.ts)
     this.pickCheckpoints();
     this.setVisible(false);
@@ -299,6 +300,9 @@ export class Race {
     const b = this.bounds, half = Math.max(b.x1 - b.x0, b.z1 - b.z0) / 2;
     return { cx: this.origin.x + (b.x0 + b.x1) / 2, cz: this.origin.z + (b.z0 + b.z1) / 2, half, wallH: 0 };
   }
+
+  /** v0.44 cube Oval: the baked cube world draws the road, banks, walls, kerbs and lines, so hide ours (colliders stay). */
+  hideTrackLook() { for (const m of this.meshes) m.isVisible = false; }
 
   setVisible(on: boolean) {
     for (const m of this.meshes) m.setEnabled(on);

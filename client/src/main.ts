@@ -10,6 +10,7 @@ import { catalog } from './catalog.js';
 import { buildArena, WALL_H, ARENA_SIZE, ARENA_COLOURS, FLOOR_GRIDS, type ArenaStyle } from './arena.js';
 import { buildBot, forward, upVector, driveSpinner, spinOmega, applyGyro, disposeBot, freezeBot, snapSpinner, driveArm, armBefore, armAfter, applyMagnets, driveFlipper, driveControl, hingesBefore, driveWheels, wheelsBefore, carryWheels, botMeshes, dropBot, DRIVE, type Bot } from './bot.js';
 import { applyEnvironment, castShadows, makeShadows } from './look.js';
+import { setupPerf } from './perf.js';   // v0.44 FPS / triangles / draw calls readout
 import { readDrive, isDown, KEYS, type Drive, padConnected, onPadButton, onPadChange, pressKey } from './input.js';   // v0.43 controller
 import { Combat } from './combat.js';
 import { Hud } from './hud.js';
@@ -81,6 +82,7 @@ async function main() {
   // ---- Match scene (arena + physics) ----
   const scene = new Scene(engine);
   scene.clearColor = new Color4(0, 0, 0, 1);           // v0.18: black all around
+  setupPerf(engine, scene);                           // v0.44 SETTINGS > PERF READOUT (or ?perf=1)
   const havok = await HavokPhysics();
   const havokPlugin = new HavokPlugin(true, havok);
   scene.enablePhysics(new Vector3(0, -9.81, 0), havokPlugin);

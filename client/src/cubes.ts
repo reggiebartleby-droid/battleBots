@@ -58,14 +58,14 @@ const STYLE: Record<CubeStyle, { emissive: number; spec: number; gap: number; gl
 };
 /** v0.31 cube palettes per part role. Armoured = weathered industrial; neon = same roles, lit up. */
 type Pal = { paint: (h: number, s: number, v: number) => Color3; dark: Color3; darkMix: number; steel: string; rubber: string; chrome: string;
-  can: string; core: string; wear: number; rust: number; scorch: number; scratch: number; scratchCol: string };
+  can: string; core: string; wear: number; scratch: number; scratchCol: string };
 const PAL: Record<'armor' | 'neon', Pal> = {
   armor: { paint: (h, s, v) => hsv(h, s * 0.72, Math.min(1, v) * 0.62), dark: Color3.FromHexString('#2b2e33'), darkMix: 0.85,
     steel: '#8c9198', rubber: '#1d1d1f', chrome: '#9ba3aa', can: '#a8683a', core: '#ff6a1a',
-    wear: 0.32, rust: 0.045, scorch: 0.035, scratch: 0.04, scratchCol: '#c8ccd1' },
+    wear: 0.32, scratch: 0.04, scratchCol: '#c8ccd1' },
   neon:  { paint: (h, s) => hsv(h, Math.max(s, 0.88), 1), dark: Color3.FromHexString('#141826'), darkMix: 0.6,
     steel: '#9ec2f2', rubber: '#24202e', chrome: '#b6c6da', can: '#ff8a2e', core: '#ff4a10',
-    wear: 0.2, rust: 0, scorch: 0.05, scratch: 0.05, scratchCol: '#e2eeff' },
+    wear: 0.2, scratch: 0.05, scratchCol: '#e2eeff' },
 };
 const KEEP_DEPTH = 3;
 const CHIP = {
@@ -322,7 +322,7 @@ export class Skin {
     const paint = P.paint(hsvP.r, hsvP.g, hsvP.b);
     const accent = Color3.FromHexString(P.can);                       // motor cans: copper / brass
     const coreCol = Color3.FromHexString(P.core).scale(1.15);         // inner core: hot molten metal under the armour
-    const RUST = Color3.FromHexString('#5e3a24'), SCORCH = Color3.FromHexString('#232120'), SCRATCH = Color3.FromHexString(P.scratchCol);
+    const SCRATCH = Color3.FromHexString(P.scratchCol);
 
     root.computeWorldMatrix(true);
     const rootW = root.getWorldMatrix().clone();
@@ -386,13 +386,13 @@ export class Skin {
       keys.forEach((key, slot) => {
         const x = KI(key) * v, y = KJ(key) * v, z = KK(key) * v;
         const isCore = depth.get(key)! >= 2;
-        // v0.31 wear: brightness mostly drops (grime); some paint cubes rust / scorch, some steel cubes scratched bright
+        // v0.31 wear: brightness mostly drops (grime); some steel cubes scratched bright.
+        // 2026-10-19: no near-black scorch / rust cubes in colour blocks (looked like dead bulbs on a light string)
         let c = isCore ? coreCol : src.col;
         const j = isCore ? 1 : 1.02 - Math.pow(Math.random(), 1.5) * P.wear;
         if (!isCore) {
           const r = Math.random();
-          if (src.role.startsWith('paint') && r < P.rust + P.scorch) c = r < P.rust ? RUST : SCORCH;
-          else if (src.role.startsWith('steel') && r < P.scratch) c = SCRATCH;
+          if (src.role.startsWith('steel') && r < P.scratch) c = SCRATCH;
         }
         this.hOf[g] = this.holders.length; this.slot[g] = slot;
         this.lp[g * 3] = x; this.lp[g * 3 + 1] = y; this.lp[g * 3 + 2] = z;
