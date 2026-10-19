@@ -25,6 +25,9 @@ import { cubeKnockout, cubeSkinOf } from './cubes.js';
 import { DIFFICULTY, type Difficulty } from './ai.js';
 import { CubeOval } from './cubeoval.js';   // v0.44 cube Oval (falls back to raceway.ts itself)
 import { NightCity } from './city.js';
+import { buildLine3, surf3, extent3, normal3, nrm as nrm3, STUNT, STUNT_GEO, RALLY_GEO, LIP_H, type Geo3, type Edge, type Shortcut, type Tag3 } from './trackgeo.js';   // v0.45
+import { StuntPark } from './stuntpark.js';   // v0.45 Junkyard Scrap Pit scenery + rolling tires
+import { DinoLava } from './dinolava.js';     // v0.45 Dinosaur Lava scenery + dino herd + volcano
 import type { Drive } from './input.js';
 import type { Combat } from './combat.js';
 import type { Fx } from './fx.js';
@@ -69,9 +72,14 @@ const HAZ = {
   hammerHitR: 1.7, hammerDmg: 16, hammerShove: 2.6,
 };
 
-type Tag = 'start' | 'bank' | 'jump' | 'sbend' | 'hazard' | 'hairpin' | 'straight';
+type Tag = 'start' | 'bank' | 'jump' | 'sbend' | 'hazard' | 'hairpin' | 'straight' | Tag3;
 interface Seg { tag: Tag; len?: number; r?: number; deg?: number; sign?: 1 | -1 }
-export interface Sample { x: number; z: number; h: number; s: number; tag: Tag; q: number; bank: number; arcR: number; arcSign: number }
+export interface Sample {
+  x: number; z: number; h: number; s: number; tag: Tag; q: number; bank: number; arcR: number; arcSign: number;
+  // v0.45 3D tracks (trackgeo.ts): road height, grade, half-pipe walls, gap, boost pad, what's past each edge
+  y?: number; grade?: number; pipeL?: number; pipeR?: number; gap?: boolean; kick?: boolean; edgeL?: Edge; edgeR?: Edge;
+  mouthL?: boolean; mouthR?: boolean; seg?: number; lipL?: boolean; lipR?: boolean;
+}
 
 const XE = 30;                                            // x where the start straight ends (bank begins)
 // v0.33c S-bends: +th then -th shifts the road 2r(1 - cos th) = 10 m sideways (v0.33 used +th, -2th, +th: a chicane with
@@ -80,7 +88,7 @@ const SB = { r: 7, theta: Math.acos(1 - 10 / 14) };
 const START_LEN = 20 + 2 * SB.r * Math.sin(SB.theta) + 14;   // closes the loop
 
 /** v0.35 race tracks. Each one is its own floor far from the others (origin), built once at load; the race picks one. */
-export type TrackId = 'gp' | 'oval';
+export type TrackId = 'gp' | 'oval' | 'stunt' | 'rally';
 export interface TrackTheme {
   sky: [string, string] | null;   // sky dome colours (top, horizon); null = the black night of the arena
   hemi: number; sun: number;      // light intensities while racing here
@@ -108,7 +116,8 @@ export interface TrackDef {
   draft: boolean;                 // slipstream boost behind another bot
   aiCorner: number;               // AI throttle cap going into a corner
   theme: TrackTheme;
-  look: 'neon' | 'raceway' | 'city';   // walls / edges / ground style (v0.36 city = Night City)
+  look: 'neon' | 'raceway' | 'city' | 'junk' | 'dino';   // walls / edges / ground style (v0.36 city = Night City; v0.45 junk = Stunt Park, dino = Rally)
+  geo?: Geo3;                     // v0.45 3D track (trackgeo.ts): segs unused, the line comes from here
   wet?: WetDef;                   // v0.36
   par: number;                    // v0.38 cube currency: par race time (3 laps), s, at the tester settings (drive boost x3, race speed x3)
 }
@@ -116,6 +125,8 @@ const OVAL = { straight: 44, r: 16 };
 // v0.38 par times (3 laps, tester settings): estimates from sandbox autopilot laps (Flip Side ~10 m/s round the Grand Prix,
 // ~12.5 m/s round the Oval; 146.5 m / 188.5 m a lap). The sandbox only manages ~3 fps, so tune these after a real playtest.
 const PAR_GP = 45, PAR_OVAL = 45;
+// v0.45 estimates from the lap lengths (242 m / 266 m) at Oval-ish speeds minus the slow bits; tune after a playtest
+const PAR_STUNT = 62, PAR_RALLY = 66;
 /** v0.36 Night City tunnel over the start straight (local x range; dry inside, roof collider). */
 export const CITY_TUNNEL = { x0: 7, x1: 25, roof: 4.6, halfW: 4.4 };
 export const TRACKS: Record<TrackId, TrackDef> = {
@@ -161,6 +172,25 @@ export const TRACKS: Record<TrackId, TrackDef> = {
     friction: 1.0, sideGrip: 16, draft: true, aiCorner: 0.85, par: PAR_OVAL,
     // v0.44 cube Oval: daytime sky + a light haze (Cube Oval Speedway mockup)
     theme: { sky: ['#3f86d6', '#d6ebf7'], hemi: 0.85, sun: 1.5, fog: { color: '#d6ebf7', density: 0.0035 } }, look: 'raceway',
+  },
+  // v0.45 (user): Stunt Park -- Junkyard Scrap Pit. Figure-8: corkscrew climb, gap jump over the crossing, half-pipe turn,
+  // rolling tires, a risky crushed-car tunnel shortcut. Dusk, steampunk orange / brown / red, gritty.
+  stunt: {
+    id: 'stunt', name: 'Stunt Park', desc: 'Junkyard figure-8 · corkscrew climb · GAP JUMP over the crossing (boost pad gets you across) · half-pipe turn · rolling tires · risky tunnel shortcut',
+    origin: new Vector3(-300, 0, -620), width: STUNT_GEO.width, bankDeg: 20, segs: [], startX: 0, finishS: 0,
+    friction: 0.9, sideGrip: 12, draft: false, aiCorner: 0.7, par: PAR_STUNT,
+    theme: { sky: ['#2a1622', '#e0703a'], hemi: 0.62, sun: 1.0, fog: { color: '#7a4630', density: 0.0075 } }, look: 'junk', geo: STUNT_GEO,
+  },
+  // v0.45 (user): Rally Dirt -- Dinosaur Lava. Loose dirt round a volcano; lava on the outside of most of it (first fall
+  // in = back to the start line, after that the last checkpoint); a dino herd crossing; the volcano erupts when the
+  // leader starts the last lap and drops a slow lava crust in front of them.
+  rally: {
+    id: 'rally', name: 'Rally Dirt', desc: 'Loose dirt (you slide) · LAVA off the edge (1st fall: back to the start line) · dino herd crossing · the volcano erupts on the leader\'s last lap',
+    origin: new Vector3(300, 0, -620), width: RALLY_GEO.width, bankDeg: 8, segs: [], startX: 0, finishS: 0,
+    friction: 0.85, sideGrip: 10, draft: false, aiCorner: 0.5, par: PAR_RALLY,
+    theme: { sky: ['#0c0304', '#6a1a0c'], hemi: 0.6, sun: 1.05, fog: { color: '#3a1410', density: 0.006 } }, look: 'dino', geo: RALLY_GEO,
+    // dirt: the whole track slides a little (same mechanism as Night City's rain), no patches
+    wet: { rainGrip: 0.62, patchGrip: 0.62, rainSlide: 3.2, patchSlide: 3.2, dry: [], patches: [] },
   },
 };
 export const TRACK_IDS = Object.keys(TRACKS) as TrackId[];
@@ -228,8 +258,12 @@ export interface Racer {
   stuckSince?: number;   // v0.34 immobilized / barely moving since
   draft?: number;        // v0.35 in a slipstream: the flat speed of the bot ahead (undefined = not drafting)
   wet?: WetKind;         // v0.36 what's under it (Night City): dry / rain / a wet patch
+  burn?: boolean;        // v0.45 this wreck was a fall into the lava (Rally Dirt)
+  burns?: number;        // v0.45 lava falls this race (1st: back to the start line, after that the last checkpoint)
+  inShort?: boolean;     // v0.45 in the Stunt Park tunnel shortcut right now
+  air?: number;          // v0.45 3D tracks: seconds airborne (landing assist)
   wrecks: { ko: number; off: number; stuck: number };
-  ai: { stuckT: number; escapeT: number; escapeTurn: number; nextThink: number; last: Drive; brawler: boolean };   // v0.34 brawler: leans into rivals
+  ai: { stuckT: number; escapeT: number; escapeTurn: number; nextThink: number; last: Drive; brawler: boolean; short?: boolean; shortLap?: number };   // v0.34 brawler: leans into rivals; v0.45 short: takes the tunnel this lap
 }
 
 export interface RaceHooks {
@@ -239,6 +273,16 @@ export interface RaceHooks {
 }
 
 interface Saw { mesh: Mesh; slot: Mesh; pos: Vector3; row: number; up: boolean; last: Map<Bot, number> }
+
+/** v0.45 a 3D track's scenery module (stuntpark.ts, dinolava.ts): cube world + live parts + its own hazards. */
+export interface TrackScenery {
+  setVisible(on: boolean): void;
+  update(dt: number, go: boolean): void;
+  begin?(): void;                          // a new race on this track (clear tires, reset the volcano)
+  hazards?(dt: number, now: number): void; // while racing
+  dragAt?(x: number, z: number): number;   // 1/s extra drag here (the eruption's lava crust); 0 = none
+  burnAt?(pos: Vector3): void;             // a kart fell into the lava here
+}
 
 export class Race {
   readonly samples: Sample[];
@@ -265,6 +309,10 @@ export class Race {
   readonly def: TrackDef;
   private raceway: CubeOval | null = null;   // v0.44 cube Oval scenery (raceway.ts is its fallback)
   private city: NightCity | null = null;
+  /** v0.45 3D tracks (Stunt Park, Rally Dirt): trackgeo.ts line + the scenery module */
+  readonly is3d: boolean;
+  shortcut?: Shortcut;
+  private scenery: TrackScenery | null = null;
   /** v0.36 lightning flash 0..1 (main.ts adds it to the light) */
   get flash() { return this.city?.flash ?? 0; }
   get laps() { return RACE.laps; }
@@ -274,13 +322,17 @@ export class Race {
 
   constructor(private scene: Scene, private fx: Fx, track: TrackId = 'gp') {
     this.def = TRACKS[track]; this.origin = this.def.origin; this.width = this.def.width;
-    const line = buildLine(this.def);
+    this.is3d = !!this.def.geo;
+    let line: { samples: Sample[]; length: number };
+    if (this.def.geo) { const l3 = buildLine3(this.def.geo); line = { samples: l3.samples as Sample[], length: l3.length }; this.shortcut = l3.shortcut; }
+    else line = buildLine(this.def);
     this.samples = line.samples; this.length = line.length;
     const xs = this.samples.map(p => p.x), zs = this.samples.map(p => p.z);
     const pad = this.width / 2 + (this.def.look === 'raceway' ? 16 : this.def.look === 'city' ? 9 : 5);   // v0.35 oval: room round the track for stands + pit lane
     this.bounds = { x0: Math.min(...xs) - pad, x1: Math.max(...xs) + pad, z0: Math.min(...zs) - pad, z1: Math.max(...zs) + pad };
     this.wallNode = new TransformNode('race_walls_' + track, scene);
     this.makeMats();
+    if (this.is3d) { this.build3d(); this.pickCheckpoints(); this.setVisible(false); return; }   // v0.45
     this.buildFloor();
     this.buildRoad();
     this.buildBank();
@@ -298,7 +350,20 @@ export class Race {
   /** Debris floor for loose cubes (cubes.ts): the track's square footprint. */
   get debrisFloor() {
     const b = this.bounds, half = Math.max(b.x1 - b.x0, b.z1 - b.z0) / 2;
-    return { cx: this.origin.x + (b.x0 + b.x1) / 2, cz: this.origin.z + (b.z0 + b.z1) / 2, half, wallH: 0 };
+    const heightAt = this.is3d ? (x: number, z: number, y: number) => this.debrisHeight(x, z, y) : undefined;   // v0.45
+    return { cx: this.origin.x + (b.x0 + b.x1) / 2, cz: this.origin.z + (b.z0 + b.z1) / 2, half: half + (this.is3d ? 30 : 0), wallH: 0, heightAt };
+  }
+  /** v0.45 where a loose cube comes to rest (world y): the road under it (decks too), the ground, or null over lava. */
+  private debrisHeight(x: number, z: number, y: number): number | null {
+    const lx = x - this.origin.x, lz = z - this.origin.z, i = this.nearestS(lx, lz), p = this.samples[i], n = nrm(p.h);
+    const u = (lx - p.x) * n.x + (lz - p.z) * n.z, side = u >= 0 ? 1 : -1;
+    if (Math.abs(u) <= this.ext(p, side) + Race.SHOULDER && !p.gap) {
+      const sy = this.surfaceY(p, u) + this.origin.y;
+      if (sy <= y + 0.6) return sy;
+    }
+    const floor = this.def.geo!.floorY;
+    if (floor < -0.1) return (side > 0 ? p.edgeL : p.edgeR) === 'lava' && Math.abs(u) > this.width / 2 + 1 ? null : this.origin.y;
+    return this.origin.y;
   }
 
   /** v0.44 cube Oval: the baked cube world draws the road, banks, walls, kerbs and lines, so hide ours (colliders stay). */
@@ -309,6 +374,7 @@ export class Race {
     this.hammer?.pivot.setEnabled(on);
     this.raceway?.setVisible(on);
     this.city?.setVisible(on);
+    this.scenery?.setVisible(on);   // v0.45
   }
 
   // ------------------------------------------------------------------------------------------------- geometry
@@ -332,6 +398,7 @@ export class Race {
     m('edge', '#00e5ff', true); m('white', '#f2f2f2', true); m('black', '#0a0a0a', false); m('kerbR', '#d92b2b', false); m('kerbW', '#e8e8e8', false);
     m('yellow', '#ffc400', true); m('red', '#ff2a2a', true); m('pit', '#3a0000', true); m('steel', '#8d969e', false); m('slot', '#120404', false);
     m('hammer', '#5c6670', false); m('warn', '#ff3b1f', true); m('grid', '#0b3a44', true);
+    m('lava', '#ff3b1f', true);   // v0.45 Rally fallback look
     // v0.35 raceway look (Oval Speedway): grass, asphalt, concrete, dark stands with Neon Energy cube trim + crowd
     m('grass', '#1d3a1b', false); m('asphalt', '#33373d', false).backFaceCulling = false; m('bankAsphalt', '#3a3f46', false).backFaceCulling = false;
     m('concrete', '#aeb4ba', false); m('stand', '#141a26', false); m('pitlane', '#2a2d33', false); m('garage', '#1b2130', false);
@@ -481,6 +548,7 @@ export class Race {
 
   /** Bank surface height at a sample and sideways offset (0 off the bank). */
   surfaceY(p: Sample, u: number) {
+    if (this.is3d) return surf3(p as never, Math.max(-this.ext(p, -1), Math.min(this.ext(p, 1), u)), this.width);   // v0.45
     if (p.tag === 'bank') return Math.max(0, this.width / 2 - u) * Math.tan(p.bank);
     if (p.tag === 'jump') {
       const q = p.q;
@@ -678,6 +746,249 @@ export class Race {
     this.slab('tunnelroof', this.w((T.x0 + T.x1) / 2, T.roof + 0.3, 0), Vector3.Right(), Vector3.Up(), Vector3.Forward(), { w: T.x1 - T.x0, h: 0.6, d: T.halfW * 2 }, 'ground', false, 0.3).isVisible = false;
   }
 
+  // ------------------------------------------------------------------------------------------------- v0.45 3D tracks
+  /** Drivable reach from the centre line on one side (+1 left), half-pipe walls included. */
+  ext(p: Sample, side: number) { return this.is3d ? extent3(p as never, side, this.width) : this.width / 2; }
+  /** Surface normal (world = local directions) at sample p, u. */
+  normalAt(p: Sample, u: number): Vector3 {
+    if (!this.is3d) return Vector3.Up();
+    const n = normal3(p as never, Math.max(-this.ext(p, -1), Math.min(this.ext(p, 1), u)), this.width);
+    return new Vector3(n.x, n.y, n.z);
+  }
+  /** Track direction at p, with the grade (up / down hill). */
+  tangentAt(p: Sample): Vector3 { return new Vector3(Math.cos(p.h), p.grade ?? 0, Math.sin(p.h)).normalize(); }
+  private static SHOULDER = 0.3;
+
+  private build3d() {
+    const g = this.def.geo!;
+    // the floor: Stunt Park = the junkyard ground; Rally = the lava sea (+ the jungle / island ground, own boxes)
+    const b = this.bounds, P = 40, T = 0.5;
+    this.slab('floor', this.w((b.x0 + b.x1) / 2, g.floorY - T / 2, (b.z0 + b.z1) / 2), Vector3.Right(), Vector3.Up(), Vector3.Forward(),
+      { w: b.x1 - b.x0 + 2 * P, h: T, d: b.z1 - b.z0 + 2 * P }, this.def.look === 'dino' ? 'lava' : 'ground', true, this.def.friction);
+    if (g.floorY < -0.1) this.buildGround3d();
+    this.buildRoad3d();
+    this.buildWalls3d();
+    if (this.shortcut) this.buildShortcut3d();
+    this.buildMarkings3d();
+    if (this.def.look === 'junk') this.scenery = new StuntPark(this.scene, this);
+    if (this.def.look === 'dino') this.scenery = new DinoLava(this.scene, this);
+  }
+
+  /** Is this local point solid jungle / island ground (Rally): inside the loop, or outside where the edge is no lava. */
+  groundAt3(x: number, z: number): boolean {
+    let best = 0, bd = Infinity;
+    for (let i = 0; i < this.samples.length; i += 2) { const p = this.samples[i], d = (p.x - x) ** 2 + (p.z - z) ** 2; if (d < bd) { bd = d; best = i; } }
+    const p = this.samples[best], n = nrm(p.h), u = (x - p.x) * n.x + (z - p.z) * n.z, half = this.width / 2 + Race.SHOULDER + 0.15;
+    if (Math.abs(u) <= half) return false;   // the road itself (its own collider)
+    return u > 0 ? p.edgeL !== 'lava' : p.edgeR !== 'lava';
+  }
+  /** Rally: the island + jungle ground (top y = 0) as rows of boxes on a 1 m grid, one static body. */
+  private buildGround3d() {
+    const b = this.bounds, C = 1, P = 30;
+    const shape = new PhysicsShapeContainer(this.scene);
+    const node = new TransformNode('race_ground_' + this.def.id, this.scene);
+    node.position = this.origin.clone();
+    let boxes = 0;
+    for (let z = b.z0 - P; z < b.z1 + P; z += C) {
+      let run0: number | null = null;
+      for (let x = b.x0 - P; x <= b.x1 + P; x += C) {
+        const on = x < b.x1 + P && this.groundAt3(x + C / 2, z + C / 2);
+        if (on && run0 === null) run0 = x;
+        if (!on && run0 !== null) {
+          const child = new PhysicsShapeBox(new Vector3((run0 + x) / 2, -1, z + C / 2), Quaternion.Identity(), new Vector3(x - run0, 2, C), this.scene);
+          child.filterMembershipMask = SURFACE_BIT; child.material = { friction: this.def.friction, restitution: 0.1 };
+          shape.addChild(child); boxes++; run0 = null;
+        }
+      }
+    }
+    shape.filterMembershipMask = SURFACE_BIT;
+    const body = new PhysicsBody(node, PhysicsMotionType.STATIC, false, this.scene);
+    body.shape = shape;
+    console.info(`[race ${this.def.id}] ground: ${boxes} boxes`);
+  }
+
+  /** Cross-section u values for a row: pipe walls by angle (smooth up to near vertical), the road, shoulders. */
+  private rowUs(p: Sample): number[] {
+    const half = this.width / 2, K = 8, us: number[] = [];
+    const side = (sd: number) => {
+      const R = sd > 0 ? p.pipeL ?? 0 : p.pipeR ?? 0, out: number[] = [];
+      for (let k = 1; k <= K; k++) out.push(R > 0.05 ? half + R * Math.sin(Math.asin(0.985) * k / K) : half + Race.SHOULDER * k / K);
+      return out;
+    };
+    us.push(...side(-1).reverse().map(u => -u));
+    for (let k = 0; k <= 4; k++) us.push(-half + this.width * k / 4);
+    us.push(...side(1));
+    return us;
+  }
+  /** Height of the drivable surface at u (pipe walls / shoulders included; shoulders continue the road edge). */
+  private rowY(p: Sample, u: number) {
+    const half = this.width / 2;
+    const uc = (p.pipeL ?? 0) > 0.05 || (p.pipeR ?? 0) > 0.05 ? u : Math.max(-half, Math.min(half, u));
+    return surf3(p as never, uc, this.width);
+  }
+
+  /** Road surface: one smooth ribbon per run of road (the gap splits it), visual + mesh collider. */
+  private buildRoad3d() {
+    const n = this.samples.length, S = this.samples;
+    const runs: Sample[][] = [];
+    const g0 = S.findIndex(p => p.gap);
+    if (g0 < 0) runs.push([...S, S[0]]);
+    else {
+      let cur: Sample[] = [];
+      for (let k = 0; k <= n; k++) {
+        const p = S[(g0 + k) % n];
+        if (p.gap) { if (cur.length > 1) runs.push(cur); cur = []; } else cur.push(p);
+      }
+      if (cur.length > 1) runs.push(cur);
+    }
+    for (const run of runs) {
+      const cols = this.rowUs(run[0]).length, paths: Vector3[][] = [];
+      for (let j = 0; j < cols; j++) paths.push(run.map(p => { const u = this.rowUs(p)[j]; return this.at(p, u, this.rowY(p, u) + 0.004); }));
+      const rib = MeshBuilder.CreateRibbon('race_road3', { pathArray: paths }, this.scene);
+      rib.receiveShadows = true;
+      this.keep(rib, 'road');
+    }
+    this.buildRoadSolid3d();
+  }
+
+  /** Road colliders. A thin triangle mesh lets a hard landing punch through and get spat out (a sandbox bot went 30 m
+   *  up over the Rally lava), so the road is a chain of solid 1.2 m-thick blocks, each tilted to the bank + grade.
+   *  Only the half-pipe keeps a mesh (its curved walls); it's at ground level with the floor right under it. */
+  private buildRoadSolid3d() {
+    const S = this.samples, n = S.length, half = this.width / 2, TH = 1.2;
+    const shape = new PhysicsShapeContainer(this.scene);
+    const node = new TransformNode('race_road_' + this.def.id, this.scene);
+    node.position = this.origin.clone();
+    const pipe = (p: Sample) => (p.pipeL ?? 0) > 0.05 || (p.pipeR ?? 0) > 0.05;
+    let blocks = 0;
+    for (let i = 0; i < n; i += 2) {
+      const a = S[i], b = S[(i + 2) % n];
+      if (a.gap || b.gap || pipe(a) || pipe(b)) continue;
+      const extL = this.ext(a, 1) + Race.SHOULDER, extR = this.ext(a, -1) + Race.SHOULDER;
+      const uc = (extL - extR) / 2;
+      // top plane from the row's surface: left / right edge points of a and b
+      const P = (p: Sample, u: number) => this.at(p, u, this.rowY(p, u)).subtract(this.origin);
+      const aL = P(a, half), aR = P(a, -half), bL = P(b, half), bR = P(b, -half);
+      const side = aL.add(bL).subtract(aR).subtract(bR).normalize();                  // +u (left), with the bank
+      const fwd = bL.add(bR).subtract(aL).subtract(aR).normalize();                  // along, with the grade
+      const up = Vector3.Cross(side, fwd).normalize();                               // (left x forward = up)
+      const f2 = Vector3.Cross(up, side).normalize();                                // forward, square to both
+      const mid = aL.add(aR).add(bL).add(bR).scale(0.25);
+      const r = a.arcR || 0, len = (r ? 1.0 * (r + Math.max(extL, extR)) / r : 1.0) + 0.12;
+      // over a ground floor (Stunt Park): flat ground-level road = the floor itself; raised blocks stop at the floor
+      // (a block buried in the floor slab gave bots wild launches in the sandbox)
+      let th = TH;
+      if (this.def.geo!.floorY > -0.1) {
+        const lo = Math.min(aL.y, aR.y, bL.y, bR.y), hi = Math.max(aL.y, aR.y, bL.y, bR.y);
+        if (hi < 0.03) continue;
+        th = Math.min(TH, Math.max(0.1, lo - this.def.geo!.floorY + 0.02));
+      }
+      const c = mid.add(side.scale(uc)).subtract(up.scale(th / 2 - 0.004));
+      const q = Quaternion.RotationQuaternionFromAxis(f2, up, side);                 // right-handed: f2 x up = side
+      const box = new PhysicsShapeBox(c, q, new Vector3(len, th, extL + extR), this.scene);
+      box.filterMembershipMask = SURFACE_BIT; box.material = { friction: this.def.friction, restitution: 0.05 };
+      shape.addChild(box); blocks++;
+    }
+    shape.filterMembershipMask = SURFACE_BIT;
+    const body = new PhysicsBody(node, PhysicsMotionType.STATIC, false, this.scene);
+    body.shape = shape;
+    // the half-pipe: its own mesh collider (curved walls)
+    const runs: Sample[][] = [];
+    let cur: Sample[] = [];
+    const g0 = S.findIndex(p => !pipe(p));
+    for (let k = 0; k <= n; k++) { const p = S[(g0 + k) % n]; if (pipe(p)) cur.push(p); else { if (cur.length) { cur.push(p); runs.push(cur); } cur = []; } }
+    for (const run of runs) {
+      const prev = S[(S.indexOf(run[0]) - 1 + n) % n];
+      const rows = [prev, ...run], cols = this.rowUs(rows[0]).length, paths: Vector3[][] = [];
+      for (let j = 0; j < cols; j++) paths.push(rows.map(p => { const u = this.rowUs(p)[j]; return this.at(p, u, this.rowY(p, u) + 0.004); }));
+      const rib = MeshBuilder.CreateRibbon('race_pipecol', { pathArray: paths }, this.scene);
+      rib.isVisible = false; this.keep(rib);
+      const agg = new PhysicsAggregate(rib, PhysicsShapeType.MESH, { mass: 0, friction: this.def.friction, restitution: 0.05 }, this.scene);
+      agg.shape.filterMembershipMask = SURFACE_BIT;
+      this.aggs.push(agg);
+    }
+    console.info(`[race ${this.def.id}] road: ${blocks} solid blocks, ${runs.length} half-pipe mesh run(s)`);
+  }
+
+  /** Barriers on 'wall' edges (not over the gap, not in the shortcut mouths): from below the edge to wallH above it. */
+  private buildWalls3d() {
+    const th = 0.3, n = this.samples.length;
+    const shape = new PhysicsShapeContainer(this.scene);
+    const vis: Mesh[] = [];
+    const wallH = this.def.look === 'dino' ? 0.9 : RACE.wallH;
+    for (const side of [1, -1]) {
+      for (let i = 0; i < n; i += 2) {
+        const a = this.samples[i], b = this.samples[(i + 2) % n];
+        const edge = side > 0 ? a.edgeL : a.edgeR, mouth = side > 0 ? a.mouthL || b.mouthL : a.mouthR || b.mouthR;
+        const lip = edge === 'lava' && (side > 0 ? a.lipL && b.lipL : a.lipR && b.lipR);   // v0.45 lava curb
+        if ((edge === 'lava' && !lip) || a.gap || b.gap || mouth) continue;
+        const ua = side * (this.ext(a, side) + Race.SHOULDER + th / 2), ub = side * (this.ext(b, side) + Race.SHOULDER + th / 2);
+        const A = this.at(a, ua), B = this.at(b, ub);
+        const len = Vector3.Distance(A, B);
+        if (len < 1e-3) continue;
+        const ya = this.rowY(a, ua - side * th), yb = this.rowY(b, ub - side * th);
+        // v0.45 taller where bots get flung out: the half-pipe lip, the corkscrew's outer (high) side
+        const pipeLip = (side > 0 ? a.pipeL ?? 0 : a.pipeR ?? 0) > 0.5, corkOut = a.tag === 'corkscrew' && side === -a.arcSign;
+        const bot = Math.min(ya, yb) - 0.8, top = lip ? Math.max(ya, yb) + LIP_H : Math.max(ya, yb) + wallH + (pipeLip ? 0.7 : corkOut ? 0.6 : 0);
+        const z = B.subtract(A).normalize(), y = Vector3.Up(), x = Vector3.Cross(y, z);
+        const c = A.add(B).scale(0.5); c.y = this.origin.y + (bot + top) / 2;
+        const q = Quaternion.RotationQuaternionFromAxis(x, y, z);
+        const child = new PhysicsShapeBox(c.subtract(this.origin), q, new Vector3(th, top - bot, len + 0.25), this.scene);
+        child.filterMembershipMask = WALL_BIT; child.material = { friction: 0.3, restitution: 0.35 };
+        shape.addChild(child);
+        const box = MeshBuilder.CreateBox('race_wall3', { width: th, height: top - bot, depth: len + 0.02 }, this.scene);
+        box.position = c; box.rotationQuaternion = q; vis.push(box);
+      }
+    }
+    shape.filterMembershipMask = WALL_BIT;
+    this.wallNode.position = this.origin.clone();
+    const body = new PhysicsBody(this.wallNode, PhysicsMotionType.STATIC, false, this.scene);
+    body.shape = shape;
+    this.wallBody = body;
+    this.merge(vis, 'race_walls3', 'steel');
+  }
+
+  /** Stunt Park tunnel: walls both sides of the chord between the mouths, a roof, two humps (it's the risky way). */
+  private buildShortcut3d() {
+    const c = this.shortcut!, A = new Vector3(c.a.x, 0, c.a.z), B = new Vector3(c.b.x, 0, c.b.z);
+    const dir = B.subtract(A), len = dir.length(); dir.normalize();
+    const side = Vector3.Cross(Vector3.Up(), dir), mid = A.add(B).scale(0.5);   // v0.45b: (side, up, dir) must be right-handed -- the mirrored version left the colliders along world z, across the half-pipe
+    for (const sd of [1, -1]) {
+      const cen = this.w(mid.x + side.x * sd * (c.width / 2 + 0.2), c.roof / 2, mid.z + side.z * sd * (c.width / 2 + 0.2));
+      this.slab('tunnelwall', cen, side, Vector3.Up(), dir, { w: 0.4, h: c.roof, d: len - 1.0 }, 'steel', false, 0.3);
+    }
+    this.slab('tunnelroof', this.w(mid.x, c.roof + 0.25, mid.z), side, Vector3.Up(), dir, { w: c.width + 0.8, h: 0.5, d: len - 1.0 }, 'steel', false, 0.3);   // v0.45b: as wide as the walls, not over the road
+    // humps: crushed-car bumps across the floor (they can bounce a bot into the wall or flip it)
+    for (const t of [0.36, 0.64]) {
+      const p = A.add(dir.scale(len * t));
+      this.slab('tunnelhump', this.w(p.x, 0.0, p.z), side, Vector3.Up(), dir, { w: c.width, h: 0.36, d: 1.4 }, 'ramp', true, this.def.friction);
+    }
+  }
+
+  /** Is local (x, z, y) inside the tunnel? -> t along it (0 at mouth A .. 1 at mouth B). */
+  shortcutT(x: number, z: number, y: number): number | null {
+    const c = this.shortcut; if (!c) return null;
+    const dx = c.b.x - c.a.x, dz = c.b.z - c.a.z, L2 = dx * dx + dz * dz;
+    const t = ((x - c.a.x) * dx + (z - c.a.z) * dz) / L2;
+    if (t < 0 || t > 1 || y > c.roof + 0.6) return null;
+    const px = c.a.x + dx * t, pz = c.a.z + dz * t;
+    return Math.hypot(x - px, z - pz) <= c.width / 2 + 0.6 ? t : null;
+  }
+
+  /** Fallback look (no cube world): finish line + grid boxes. */
+  private buildMarkings3d() {
+    const half = this.width / 2, f = this.samples[0], t = this.dir(f.h);
+    const blacks: Mesh[] = [], whites: Mesh[] = [];
+    const nChk = Math.round(this.width / 0.5);
+    for (let row = 0; row < 2; row++) for (let i = 0; i < nChk; i++) {
+      const u0 = -half + i * 0.5, c = this.at(f, u0 + 0.25, this.surfaceY(f, u0) + 0.012).add(t.scale((row - 0.5) * 0.5));
+      const sq = MeshBuilder.CreateBox('race_chk', { width: 0.5, height: 0.01, depth: 0.5 }, this.scene);
+      sq.position = c; sq.rotation.y = Math.atan2(t.x, t.z);
+      ((i + row) % 2 ? whites : blacks).push(sq);
+    }
+    this.merge(blacks, 'race_chk_b', 'black'); this.merge(whites, 'race_chk_w', 'white');
+  }
+
   /** v0.36 what's under a racer: dry (tunnel / no rain), rain, or a wet patch. */
   wetAt(s: number, u: number): WetKind {
     const W = this.def.wet;
@@ -689,6 +1000,14 @@ export class Race {
 
   private pickCheckpoints() {
     const L = this.length;
+    if (this.is3d) {   // v0.45: every ~12 m, never on the take-off / gap / landing, a half-pipe wall or a lava turn's outside
+      const ok = (p: Sample) => !p.gap && !p.kick && !p.mouthL && !p.mouthR   // half-pipe floor is fine (respawn at u ~0)
+        && !(p.tag === 'jump' && p.q > 7 && p.q < 28) && !(p.tag === 'crest' && p.q > 4 && p.q < 20);
+      const cps: number[] = [];
+      for (const p of this.samples) if (ok(p) && (!cps.length || p.s - cps[cps.length - 1] >= 12)) cps.push(p.s);
+      this.checkpoints = cps.sort((a, b) => a - b);
+      return;
+    }
     if (this.def.id !== 'gp') {   // v0.35 no hazards: a checkpoint every ~10 m on the flat (never on a banked turn)
       const flat = this.samples.filter(p => p.tag !== 'bank');
       const cps: number[] = [];
@@ -709,7 +1028,7 @@ export class Race {
     const n = this.samples.length;
     const spot = (back: number, u: number) => {
       const p = this.samples[(n - Math.round(back / SAMPLE)) % n];
-      return { pos: this.at(p, u, 0.6), h: p.h };
+      return { pos: this.at(p, u, this.surfaceY(p, u) + 0.6), h: p.h };   // v0.45 on the road surface
     };
     return [spot(3, 1.6), spot(3, -1.6), spot(7.5, 1.6), spot(7.5, -1.6)];
   }
@@ -738,6 +1057,7 @@ export class Race {
     // v0.34 (user): two AI race first, one (random) leans into rivals like v0.33 did
     const ai = this.racers.filter(r => !r.human);
     if (ai.length) ai[Math.floor(Math.random() * ai.length)].ai.brawler = true;
+    this.scenery?.begin?.();   // v0.45 tires cleared, volcano reset
   }
 
   bots(): Bot[] { return this.racers.map(r => r.bot); }
@@ -756,7 +1076,9 @@ export class Race {
     for (let k = -span; k <= span; k++) {
       const i = hint < 0 ? k + span : ((hint + k) % n + n) % n;
       if (i < 0 || i >= n) continue;
-      const p = this.samples[i], d = (p.x - lx) ** 2 + (p.z - lz) ** 2;
+      const p = this.samples[i];
+      let d = (p.x - lx) ** 2 + (p.z - lz) ** 2;
+      if (this.is3d) d += 4 * (pos.y - this.origin.y - (p.y ?? 0)) ** 2;   // v0.45 the figure-8 crossing: pick the right level
       if (d < bd) { bd = d; best = i; }
     }
     return best;
@@ -788,7 +1110,11 @@ export class Race {
         continue;
       }
       // progress along the centre line (window search round the last sample: no shortcuts across walls)
-      const idx = this.nearestIdx(b.root.position, r.idx);
+      // v0.45 Stunt Park tunnel: inside it, progress runs along the main line between the two mouths
+      const lx = b.root.position.x - this.origin.x, lz = b.root.position.z - this.origin.z, ly = b.root.position.y - this.origin.y;
+      const tS = this.shortcut ? this.shortcutT(lx, lz, ly) : null;
+      r.inShort = tS !== null;
+      const idx = tS !== null ? this.idxAtS(this.shortcut!.s0 + tS * (this.shortcut!.s1 - this.shortcut!.s0)) : this.nearestIdx(b.root.position, r.idx);
       const s0 = this.samples[r.idx].s, s1 = this.samples[idx].s;
       let ds = s1 - s0; if (ds > L / 2) ds -= L; if (ds < -L / 2) ds += L;
       r.idx = idx;
@@ -813,9 +1139,22 @@ export class Race {
       // KO (every part gone): wrecked
       if (isDestroyed(b.state)) { this.wreck(r, now, 'ko'); continue; }
       // off the track: fell (pit / over the edge) or knocked over a wall
+      if (this.is3d) {   // v0.45: over the edge / off a deck / into the gap; lava edges = burned up
+        if (r.inShort) { r.u = 0; r.offSince = undefined; }
+        else {
+          const side = r.u >= 0 ? 1 : -1, ext = this.ext(p, side) + Race.SHOULDER;
+          const sy = this.surfaceY(p, r.u), lava = (side > 0 ? p.edgeL : p.edgeR) === 'lava';
+          if (lava && Math.abs(r.u) > ext - 0.2 && ly < sy - 0.45) { this.wreck(r, now, 'off', true); continue; }
+          if (ly < this.def.geo!.floorY + 0.6 && this.def.geo!.floorY < -0.1) { this.wreck(r, now, 'off', true); continue; }   // in the lava sea
+          const off = ly < sy - 1.6 || Math.abs(r.u) > ext + RACE.offTrackU || ly < this.def.geo!.floorY - 4;
+          if (off) { r.offSince ??= now; if (now - r.offSince >= RACE.offTrackMs) this.wreck(r, now, 'off'); }
+          else r.offSince = undefined;
+        }
+      } else {
       const off = b.root.position.y < RACE.fallY || Math.abs(r.u) > this.width / 2 + RACE.offTrackU;
       if (off) { r.offSince ??= now; if (now - r.offSince >= RACE.offTrackMs || b.root.position.y < RACE.fallY - 3) this.wreck(r, now, 'off'); }
       else r.offSince = undefined;
+      }
       // v0.34 immobilized (drive destroyed) or barely moving (upside down, wedged, pinned) for RACE.stuckMs: recovered
       if (go && r.finished === undefined) {
         const v = b.body.getLinearVelocity();
@@ -825,8 +1164,9 @@ export class Race {
         } else r.stuckSince = undefined;
       } else r.stuckSince = undefined;
     }
-    if (go) this.hazards(dt, now);
+    if (go) { this.hazards(dt, now); this.scenery?.hazards?.(dt, now); }   // v0.45 tires, dinos, the volcano
     else this.idleHazards(dt);
+    this.scenery?.update(dt, go);
     this.findDrafts(go);
     this.raceway?.update(dt, go);   // v0.35b crowd, flags, blimp, start lights, jumbotron
     this.city?.update(dt, go);      // v0.36 rain, traffic, crowd, lightning, neon
@@ -856,15 +1196,20 @@ export class Race {
     }
   }
 
-  /** Wrecked: blow it up, hide it, respawn later. */
-  private wreck(r: Racer, now: number, why: 'ko' | 'off' | 'stuck') {
+  /** Wrecked: blow it up, hide it, respawn later. v0.45 burn = fell into the lava (Rally Dirt). */
+  private wreck(r: Racer, now: number, why: 'ko' | 'off' | 'stuck', burn = false) {
     const b = r.bot;
     r.down = { at: now, why }; r.offSince = undefined; r.stuckSince = undefined; r.wrecks[why]++;
+    if (burn) {
+      r.burn = true;
+      this.scenery?.burnAt?.(b.root.position.clone());
+      if (r.human) this.hooks.sign((r.burns ?? 0) === 0 ? 'BURNED UP! — BACK TO THE START LINE' : 'BURNED UP! — BACK TO THE CHECKPOINT', 1800, '#ff6a1f');
+    }
     const pos = b.root.position.clone();
     if (cubeSkinOf(b.root)) { cubeKnockout(b, why === 'ko'); dropBot(b); }   // v0.38 towed / off: a poof, no cubes lost
     else { this.fx.explode(b, pos, why === 'ko' ? 'WRECKED!' : why === 'off' ? 'OFF!' : 'TOWED!'); freezeBot(b); }
     if (!b.eliminated) b.eliminated = { t: now, pos, vel: Vector3.Zero(), reason: why === 'off' ? 'out' : 'ko' };
-    if (r.human) this.hooks.sign(why === 'ko' ? 'WRECKED! — BACK TO THE CHECKPOINT' : why === 'off' ? 'OFF THE TRACK!' : 'IMMOBILIZED — BACK TO THE CHECKPOINT', 1500, '#ff4d4d');
+    if (r.human && !burn) this.hooks.sign(why === 'ko' ? 'WRECKED! — BACK TO THE CHECKPOINT' : why === 'off' ? 'OFF THE TRACK!' : 'IMMOBILIZED — BACK TO THE CHECKPOINT', 1500, '#ff4d4d');
   }
 
   /** Back at the last checkpoint passed, a fresh bot (fully repaired). */
@@ -875,6 +1220,11 @@ export class Race {
     let prog: number;
     if (cp === undefined) { cp = this.checkpoints[this.checkpoints.length - 1]; prog = lapBase - L + cp; } else prog = lapBase + cp;
     if (r.prog < 0) { cp = 0; prog = -0.01; }
+    // v0.45 (user) lava: the first fall in a race sends you back to the start line (laps kept), after that the checkpoint
+    if (r.burn) {
+      r.burn = false; r.burns = (r.burns ?? 0) + 1;
+      if (r.burns === 1) { cp = 0; prog = r.prog < 0 ? -0.01 : lapBase + 0.01; }
+    }
     const p = this.sampleAt(cp);
     // spread racers sideways so two respawns don't land on each other
     let u = (r.slot - 1.5) * 1.3;
@@ -887,14 +1237,34 @@ export class Race {
     this.combat?.replaceBot(old, bot);
     if (bot.weapon.mode === 'spinner') bot.weapon.spinning = true;
     r.bot = bot; r.prog = prog; r.idx = this.nearestIdx(bot.root.position, -1); r.down = undefined; r.offSince = undefined; r.stuckSince = undefined;
-    r.ai.stuckT = 0; r.ai.escapeT = 0;
+    r.ai.stuckT = 0; r.ai.escapeT = 0; r.air = 0; r.inShort = false;
   }
+  /** v0.45 world point t along the tunnel (0 = mouth A, 1 = mouth B; past 1 = back out on the road). */
+  shortcutPoint(t: number): Vector3 {
+    const c = this.shortcut!;
+    return this.w(c.a.x + (c.b.x - c.a.x) * t, 0, c.a.z + (c.b.z - c.a.z) * t);
+  }
+  /** v0.45 nearest sample to local (x, z), every 2nd sample (scenery: dino ground, crust drag). */
+  nearestS(x: number, z: number) {
+    let best = 0, bd = Infinity;
+    for (let i = 0; i < this.samples.length; i += 2) { const p = this.samples[i], d = (p.x - x) ** 2 + (p.z - z) ** 2; if (d < bd) { bd = d; best = i; } }
+    return best;
+  }
+  /** v0.45 sample index at track distance s. */
+  idxAtS(s: number) { const n = this.samples.length; return Math.round((((s % this.length) + this.length) % this.length) / this.length * n) % n; }
+  /** v0.45 for the scenery modules: an environment hit (counts as hazard damage) + a sign for the player. */
+  envHit(b: Bot, point: Vector3, dmg: number, color: string, sign?: string) {
+    this.combat?.environmentHit(b, point, dmg, color);
+    if (sign && this.racers.find(r => r.bot === b)?.human) this.hooks.sign(sign, 900, color);
+  }
+  signAll(text: string, ms: number, color: string) { this.hooks?.sign(text, ms, color); }
 
   // ------------------------------------------------------------------------------------------------- v0.34 race physics
   private spinPrev = new Map<Bot, number>();
   private latPrev = new Map<Bot, number>();   // v0.36 wet slide
   /** Every physics sub-step, before the step: stabilizer + note each spinner's speed. */
   beforePhysics(dt: number) {
+    if (this.is3d) { this.physics3d(dt); return; }   // v0.45
     const free = Math.max(RACE.stabFreeDeg, this.def.bankDeg + 6) * Math.PI / 180;   // v0.35 never fights a steeper bank
     for (const r of this.racers) {
       const b = r.bot;
@@ -949,6 +1319,97 @@ export class Race {
       b.body.setAngularVelocity(new Vector3(wx, yaw, wz));
     }
   }
+  /** v0.45 race physics on the 3D tracks (arcade, race only). Everything is relative to the surface under the bot
+   *  (its normal n), so the same handling works on the flat, the corkscrew's bank and up a half-pipe wall:
+   *   - stabilizer: roll / pitch damped, pulled back to n when tilted past a few degrees
+   *   - landing assist (user): in the air, roll / pitch damped hard and turned to match the surface below, so a bot
+   *     lands wheels-down and stays stable; a hard landing's bounce is soaked up
+   *   - grip: gravity's slope part is swapped for a push into the surface on pipes / steep banks (karts stick)
+   *   - steering: the turn rate about n follows the stick, sideways sliding soaked up (dirt: some slide kept)
+   *   - boost pad: on the take-off ramp, speed along the track is raised to STUNT.kickSpeed, sideways speed removed
+   *   - the eruption's lava crust (scenery dragAt): drag while driving over it */
+  private physics3d(dt: number) {
+    const G = 9.81, W = this.def.wet;
+    for (const r of this.racers) {
+      const b = r.bot;
+      if (r.down || b.eliminated) continue;
+      if (b.spinner && b.spinner.parentBody === b.body) this.spinPrev.set(b, worldSpin(b.spinner));
+      if (b.inverted || b.rightingUntil) continue;
+      const pos = b.root.position, ly = pos.y - this.origin.y;
+      const p = this.samples[r.idx], u = r.inShort ? 0 : r.u;
+      const sy = r.inShort ? 0 : this.surfaceY(p, u);
+      const nS = r.inShort ? Vector3.Up() : this.normalAt(p, u);
+      const up = upVector(b);
+      const hgt = (ly - sy) * nS.y;   // distance from the surface along its normal (about)
+      const grounded = !p.gap && Vector3.Dot(up, nS) > 0.55 && hgt < REST_Y + RACE.groundGap + 0.12 && hgt > -0.6;
+      r.air = grounded ? 0 : (r.air ?? 0) + dt;
+      let w = b.body.getAngularVelocity();
+      let v = b.body.getLinearVelocity();
+      const dv = Vector3.Zero();
+      // ---- orientation: rate about n kept (steering), the rest damped + pulled toward n
+      const wn = Vector3.Dot(w, nS);
+      let wt = w.subtract(nS.scale(wn));
+      const tiltCos = Math.max(-1, Math.min(1, Vector3.Dot(up, nS))), tilt = Math.acos(tiltCos);
+      const airborne = !grounded && (r.air ?? 0) > 0.05;
+      const damp = airborne ? 7 : RACE.stabDamp, free = airborne ? 0.05 : 12 * Math.PI / 180, pull = airborne ? RACE.stabPull * 1.6 : RACE.stabPull;
+      wt = wt.scale(Math.max(0, 1 - damp * dt));
+      if (tilt > free && tilt < Math.PI * 0.75) {
+        const ax = Vector3.Cross(up, nS), l = ax.length();
+        if (l > 1e-4) wt.addInPlace(ax.scale(pull * (tilt - free) * dt / l));
+      }
+      let yaw = wn;
+      if (airborne) yaw *= Math.max(0, 1 - 2 * dt);   // no wild spins in the air
+      if (grounded && DRIVE.raceArcade) {
+        const target = (raceTurn.get(b) ?? 0) * RACE.turnRate;
+        yaw += (target - yaw) * Math.min(1, RACE.turnResp * dt);
+        // stick to steep surfaces: swap gravity's slope part for a push into the surface
+        if (nS.y < 0.985) dv.subtractInPlace(Vector3.Up().subtract(nS).scale(G * dt));   // (dv is taken off v)
+        // hard landing: soak up the bounce off the surface
+        const vn = Vector3.Dot(v, nS);
+        if (vn > 1.2) dv.addInPlace(nS.scale((vn - 1.2) * 0.6));
+        // sideways grip, in the surface plane
+        const q = b.root.rotationQuaternion ?? Quaternion.Identity();
+        let right = new Vector3(1, 0, 0).applyRotationQuaternion(q);
+        right = right.subtract(nS.scale(Vector3.Dot(right, nS)));
+        if (right.lengthSquared() > 1e-4) {
+          right.normalize();
+          const wk = r.wet ?? 'dry', wet = !!W && wk !== 'dry';
+          const lat = Vector3.Dot(v, right);
+          let latOut = lat * (1 - Math.min(1, this.def.sideGrip * (wet ? (wk === 'patch' ? W!.patchGrip : W!.rainGrip) : 1) * dt));
+          const prev = this.latPrev.get(b);
+          if (wet && prev !== undefined && prev * lat >= 0) {
+            const keep = prev * Math.exp(-(wk === 'patch' ? W!.patchSlide : W!.rainSlide) * dt);
+            if (Math.abs(keep) > Math.abs(latOut)) latOut = keep;
+          }
+          if (wet) this.latPrev.set(b, latOut); else this.latPrev.delete(b);
+          dv.addInPlace(right.scale(lat - latOut));
+        }
+        // boost pad (gap jump take-off): a speed floor along the track, sideways speed gone
+        if (p.kick && this.def.look === 'junk') {
+          const T = this.tangentAt(p), along = Vector3.Dot(v, T);
+          if (along > 2) {
+            const want = Math.max(along, STUNT.kickSpeed);
+            const side = v.subtract(T.scale(along)).subtract(nS.scale(Vector3.Dot(v, nS)));
+            dv.subtractInPlace(T.scale(want - along)).addInPlace(side);
+          }
+        }
+        // the eruption's lava crust: drag (not below a crawl)
+        const k = this.scenery?.dragAt?.(pos.x - this.origin.x, pos.z - this.origin.z) ?? 0;
+        if (k > 0) {
+          const flat = Math.hypot(v.x, v.z);
+          if (flat > 3) { const f = Math.max(3 / flat, Math.exp(-k * dt)); dv.addInPlace(new Vector3(v.x * (1 - f), 0, v.z * (1 - f))); }
+        }
+      } else this.latPrev.delete(b);
+      if (dv.lengthSquared() > 0) {
+        v = v.subtract(dv);
+        b.body.setLinearVelocity(v);
+        for (const wh of b.wheels ?? []) if (!wh.released) wh.body.setLinearVelocity(wh.body.getLinearVelocity().subtract(dv));
+      }
+      w = wt.add(nS.scale(yaw));
+      b.body.setAngularVelocity(w);
+    }
+  }
+
   /** v0.34g: the spinner's own spin in the world about its axis (NOT relative to the chassis). Measuring it relative to
    *  the chassis counted every change to the chassis's yaw (countdown yaw lock, arcade steering) as spin-up, so the
    *  give-back below fed on itself: x ~6 per step with Shell Shock's heavy shell -> base at 400 rad/s, bot launched. */
@@ -1092,6 +1553,9 @@ export class Race {
     const ahead = this.sampleAt(r.prog + look);
     const tight = ahead.tag === 'hairpin' || ahead.tag === 'sbend' || ahead.tag === 'jump';
     let lane = (r.slot - 1.5) * (tight ? 0.4 : 1.1) * this.width / 7;   // v0.35 wider road = wider lanes
+    // v0.45 Rally: keep away from a lava edge (it's never on both sides)
+    if (ahead.edgeR === 'lava') lane = Math.min(this.width / 2 - 1.3, lane + (ahead.lipR ? 1.2 : 2.0));
+    if (ahead.edgeL === 'lava') lane = Math.max(-this.width / 2 + 1.3, lane - (ahead.lipL ? 1.2 : 2.0));
     // v0.33b racing first: steer round a bot in the way (the weapon fires anyway if it's in reach); only a helpless bot
     // (upside down / stopped) right in front gets rammed -- knocking it out of the race is worth a place.
     // NOTE (user, 2026-10-18): the v0.33 "lean into any rival" may come back -- it was funny. It was:
@@ -1106,6 +1570,16 @@ export class Race {
       if (blocker) lane = Math.max(-edge, Math.min(edge, lane + (blocker.side >= 0 ? 2.0 : -2.0)));   // it's on our right -> pass on the left (+u = left)
       aim = this.at(ahead, lane);
     }
+    // v0.45 Stunt Park: some laps an AI takes the risky tunnel (the brawler more often)
+    let inTunnel = false;
+    if (this.shortcut) {
+      const sc = this.shortcut, L = this.length, sNow = ((r.prog % L) + L) % L, lapNo = Math.floor(r.prog / L);
+      if (m.shortLap !== lapNo) { m.shortLap = lapNo; m.short = Math.random() < (m.brawler ? 0.55 : 0.3); }
+      const lp = pos.subtract(this.origin);
+      const t = this.shortcutT(lp.x, lp.z, lp.y);
+      if (t !== null) { aim = this.shortcutPoint(Math.min(1.15, t + 0.2)); inTunnel = true; }
+      else if (m.short && sNow > sc.s0 - 8 && sNow < sc.s0 + 0.3) aim = this.shortcutPoint(0.08);
+    }
     const dir = aim.subtract(pos); dir.y = 0; dir.normalize();
     const angle = Math.atan2(Vector3.Cross(fwd, dir).y, Vector3.Dot(fwd, dir));
     const turn = Math.abs(angle) < 0.06 ? 0 : Math.sign(angle) * Math.min(1, Math.abs(angle) * 2.2 + 0.15);
@@ -1116,6 +1590,7 @@ export class Race {
     if (Math.abs(dh) > 1.0 && speed > 5) throttle = Math.min(throttle, this.def.aiCorner);   // v0.35 per track (oval: high grip)
     // the jump: straight and fast
     if (ahead.tag === 'jump' && Math.abs(angle) < 0.3) throttle = 1;
+    if (inTunnel) throttle = Math.min(throttle, 0.75);   // v0.45 the tunnel: careful over the humps
 
     // stuck: back off and turn
     if (throttle > 0.5 && speed < 0.35 && this.running) m.stuckT += Math.max(dt, D.reactMs / 1000); else m.stuckT = 0;

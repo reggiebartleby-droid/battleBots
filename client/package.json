@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc -p tsconfig.json --noEmit && vite build",
     "preview": "vite preview",
-    "bake:oval": "node scripts/bake-oval.mjs"
+    "bake:oval": "node scripts/bake-oval.mjs",
+    "bake:stunt": "node --experimental-strip-types scripts/bake-stunt.mjs",
+    "bake:rally": "node --experimental-strip-types scripts/bake-rally.mjs"
   },
   "dependencies": {
     "@babylonjs/core": "^9.30.0",

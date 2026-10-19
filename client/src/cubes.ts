@@ -108,7 +108,7 @@ const G = 9.81;
 const SKIP_NAMES = ['_caparrow', '_cap', '_post', '_floorarrow'];   // v0.25 shell aids stay as they are
 
 /** Floors debris lands on (arena, test course). Set by main. Outside them cubes fall away. */
-interface FloorArea { cx: number; cz: number; half: number; wallH: number }
+interface FloorArea { cx: number; cz: number; half: number; wallH: number; heightAt?: (x: number, z: number, y: number) => number | null }   // v0.45 heightAt: 3D race tracks (decks, lava = null: falls away)
 let FLOORS: FloorArea[] = [{ cx: 0, cz: 0, half: 8, wallH: 2.5 }];
 export function setDebrisFloors(areas: FloorArea[]) { FLOORS = areas; }
 
@@ -1038,8 +1038,9 @@ export class Skin {
       }
       const onArea = area && Math.abs(x - area.cx) <= area.half && Math.abs(z - area.cz) <= area.half;
       let grounded = false;
-      if (onArea && y < half && y > -1) {
-        y = half; grounded = true;
+      const fy = onArea && area.heightAt ? area.heightAt(x, z, y) : 0;   // v0.45
+      if (onArea && fy !== null && y < fy + half && y > fy - 1) {
+        y = fy + half; grounded = true;
         if (vy < 0) {
           vy *= -0.3; vx *= 0.7; vz *= 0.7;
           for (let k = 0; k < 3; k++) this.dw[o + k] *= 0.55;
