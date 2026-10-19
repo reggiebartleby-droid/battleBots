@@ -22,7 +22,7 @@ import { Course, STATIONS, COURSE_ORIGIN, COURSE, type StationId, type RunResult
 import { aiDrive, type Difficulty } from './ai.js';
 import { MOBILE, MobileMenu, setupTouchControls } from './mobile.js';
 import { CUBES } from './cubes.js';
-import { Race, RACE, RACE_ORIGIN, ordinal, fmtTime, type Racer } from './race.js';
+import { Race, RACE, TRACK_IDS, ordinal, fmtTime, type Racer, type TrackId } from './race.js';
 
 const MATCH_SECONDS = 180;
 const RACE_TEST = { autopilot: false };
@@ -69,7 +69,8 @@ async function main() {
   const havokPlugin = new HavokPlugin(true, havok);
   scene.enablePhysics(new Vector3(0, -9.81, 0), havokPlugin);
 
-  new HemisphericLight('hemi', new Vector3(0, 1, 0), scene).intensity = 0.5;
+  const hemi = new HemisphericLight('hemi', new Vector3(0, 1, 0), scene);
+  hemi.intensity = 0.5;
   const sun = new DirectionalLight('sun', new Vector3(-0.4, -1, 0.3), scene);
   sun.intensity = 1.1;
   sun.position = new Vector3(8, 20, -6);            // v0.16: shadows need a light position (opposite the direction)
@@ -92,9 +93,11 @@ async function main() {
   const course = new Course(scene);                  // v0.23 test course (own floor, far from the arena)
   const SUN_OFFSET = sun.position.clone();
   const fx = new Fx(scene, document.getElementById('fxlayer')!);
-  const race = new Race(scene, fx);                  // v0.33 race track (own floor too, far from the arena and the course)
+  // v0.33 race track (own floor too, far from the arena and the course); v0.35 one per track, the race picks one
+  const races = Object.fromEntries(TRACK_IDS.map(id => [id, new Race(scene, fx, id)])) as Record<TrackId, Race>;
+  let race = races.gp;
   // v0.27 loose cubes land on the arena floor (walls bounce them) and on the test course floor
-  setDebrisFloors([{ cx: 0, cz: 0, half: ARENA_SIZE / 2, wallH: WALL_H }, { cx: COURSE_ORIGIN.x, cz: COURSE_ORIGIN.z, half: COURSE.size / 2, wallH: 0 }, race.debrisFloor]);
+  setDebrisFloors([{ cx: 0, cz: 0, half: ARENA_SIZE / 2, wallH: WALL_H }, { cx: COURSE_ORIGIN.x, cz: COURSE_ORIGIN.z, half: COURSE.size / 2, wallH: 0 }, ...TRACK_IDS.map(id => races[id].debrisFloor)]);
 
   // ---- Lab scene (builder preview, no physics) ----
   const lab = new Lab(engine, catalog);
@@ -227,7 +230,7 @@ async function main() {
       b => lab.setBuild(b),
       ({ player, opponent, difficulty: d, breakableWeapons: bw, driveBoost }) => { buildA = player; buildB = opponent; difficulty = d; breakableWeapons = bw; DRIVE.boost = driveBoost; start(); },   // v0.22 test boost (both bots)
       ({ player, driveBoost }) => { courseBuild = player; DRIVE.boost = driveBoost; showCourseMenu(); },   // v0.23 test course
-      ({ player, difficulty: d, driveBoost, raceSpeed }) => { raceBuild = player; raceDiff = d; DRIVE.boost = driveBoost; raceSpeedMul = raceSpeed; startRace(); },   // v0.33 race
+      ({ player, difficulty: d, driveBoost, raceSpeed, track }) => { raceBuild = player; raceDiff = d; DRIVE.boost = driveBoost; raceSpeedMul = raceSpeed; raceTrack = track; startRace(); },   // v0.33 race; v0.35 track
     );
   };
 
@@ -370,15 +373,28 @@ async function main() {
   rr.lab.onclick = () => { leaveRace(); openLab(); };
   const RIVAL_IDS = ['B', 'C', 'D'] as const;
   let raceSpeedMul = 1;   // v0.34d lab RACE SPEED slider: x1 = the v0.34 race pace, up to x3
+  let raceTrack: TrackId | 'random' = 'gp';   // v0.35 lab TRACK picker (Random = a new pick every race)
+  /** v0.35 track look: sky (clear colour) + light levels while racing there; back to the arena's on the way out. */
+  const ARENA_LIGHT = { clear: scene.clearColor.clone(), hemi: hemi.intensity, sun: sun.intensity };
+  function applyTrackTheme(r: Race | null) {
+    const th = r?.def.theme;
+    scene.clearColor = th?.sky ? Color4.FromHexString(th.sky[1] + 'ff') : ARENA_LIGHT.clear.clone();
+    hemi.intensity = th?.hemi ?? ARENA_LIGHT.hemi;
+    sun.intensity = th?.sun ?? ARENA_LIGHT.sun;
+  }
 
   function startRace() {
     if (!raceBuild) return;
     leaveCourse();
     if (mode === 'race') { race.dispose(); bots = []; fx.clear(); } else clearBots();
+    race.setVisible(false);
+    race = races[raceTrack === 'random' ? TRACK_IDS[Math.floor(Math.random() * TRACK_IDS.length)] : raceTrack] ?? races.gp;   // v0.35
+    mapOutline = race.outline();
+    applyTrackTheme(race);
     mode = 'race';
     document.body.classList.add('inrace');
     rr.box.classList.remove('on'); raceShown = -1;
-    hud.hideWinner();
+    hud.hideWinner(); hud.clearSign();   // v0.34i no leftover sign from the last race
     setArenaVisible(false); course.setVisible(false); race.setVisible(true);
     // three different AI rivals from the presets
     const names = Object.keys(PRESETS).sort(() => Math.random() - 0.5).slice(0, 3);
@@ -412,18 +428,19 @@ async function main() {
     DRIVE.raceSteer = false;
     DRIVE.raceArcade = false;
     if (mode !== 'race') return;
-    race.dispose(); bots = []; fx.clear(); fx.focus = null;
+    race.dispose(); bots = []; fx.clear(); fx.focus = null; hud.clearSign();   // v0.34i
     mode = 'match';
     document.body.classList.remove('inrace');
     rr.box.classList.remove('on'); raceShown = -1;
     rd.box.classList.remove('on'); rd.count.className = '';
     race.setVisible(false); setArenaVisible(true);
+    applyTrackTheme(null);   // v0.35
     sun.position = SUN_OFFSET.clone();
     cam.target = new Vector3(0, 0.5, 0); cam.radius = camCtl.radius(16);
   }
   function showRaceReady() {
     const p = race.player()!.bot;
-    rd.title.innerHTML = `RACE <span class="vs">${RACE.laps} LAPS · 4 BOTS</span>`;
+    rd.title.innerHTML = `${race.def.name.toUpperCase()} <span class="vs">${RACE.laps} LAPS · 4 BOTS</span>`;   // v0.35 track name
     const rows: [string, string][] = [
       ['DRIVE', 'W A S D (or gamepad left stick)'],
       ['WEAPON', p.weapon.hint('SPACE') + ' — weapons are on'],
@@ -431,7 +448,7 @@ async function main() {
       ['WRECKED', 'Destroyed, or off the track (into the pit, over a wall): back at the last checkpoint in 2 s, repaired.'],
       ['STUCK', 'Can\'t drive, or barely moving for 4 s (upside down, wedged, pinned): towed back to the last checkpoint, repaired.'],
       ['DAMAGE', 'Your damage score (DMG) counts every point of damage you deal to the other bots.'],
-      ['TRACK', 'Banked turn · ramp jump over a pit · kill saws · hammer · hairpin'],
+      ['TRACK', race.def.desc],   // v0.35
       ['KEYS', 'R: restart · B: lab · Q: camera'],
     ];
     rd.table.innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
@@ -496,7 +513,7 @@ async function main() {
   }
 
   /** Race HUD (position, lap, times, order) + minimap. Redrawn ~10x a second. */
-  const mapOutline = race.outline();
+  let mapOutline = race.outline();   // v0.35 redone when the track changes (startRace)
   function drawRaceHud(now: number, force = false) {
     if (!force && now - raceHudAt < 90) return;
     raceHudAt = now;
@@ -511,6 +528,7 @@ async function main() {
     rr.hud.innerHTML = `<div class="pos">${ordinal(pos)}<span> / ${st.length}</span></div>`
       + `<div>LAP <b>${pr.finished !== undefined ? RACE.laps : race.lap(pr)} / ${RACE.laps}</b> &nbsp; TIME <b>${fmtTime(pr.finished ?? race.t)}</b></div>`
       + `<div>LAST <b>${last}</b> &nbsp; BEST <b>${best}</b> &nbsp; DMG <b>${dmg(pr)}</b></div>`
+      + (pr.draft !== undefined ? `<div class="draft">SLIPSTREAM ▲ BOOST</div>` : '')   // v0.35 oval
       + `<ol>${st.map(r => `<li style="color:${r.paint}">${r.name}${r.human ? ' <b>(YOU)</b>' : ''} <span class="dmg">${dmg(r)}</span>${tag(r)}</li>`).join('')}</ol>`;
     // minimap
     const cv = rr.map, g = cv.getContext('2d');
@@ -518,7 +536,7 @@ async function main() {
     const b = race.bounds, pad = 8, sx = (cv.width - pad * 2) / (b.x1 - b.x0), sz = (cv.height - pad * 2) / (b.z1 - b.z0), k = Math.min(sx, sz);
     const X = (x: number) => pad + (x - b.x0) * k, Y = (z: number) => cv.height - pad - (z - b.z0) * k;
     g.clearRect(0, 0, cv.width, cv.height);
-    g.lineWidth = RACE.width * k; g.lineJoin = 'round'; g.strokeStyle = 'rgba(60,72,82,.9)';
+    g.lineWidth = race.width * k; g.lineJoin = 'round'; g.strokeStyle = 'rgba(60,72,82,.9)';
     g.beginPath(); mapOutline.forEach((p, i) => i ? g.lineTo(X(p.x), Y(p.z)) : g.moveTo(X(p.x), Y(p.z))); g.closePath(); g.stroke();
     g.lineWidth = 1; g.strokeStyle = 'rgba(0,229,255,.6)'; g.stroke();
     const f = race.samples[0];
@@ -527,7 +545,7 @@ async function main() {
     for (const r of [...race.racers].sort((a, c) => Number(a.human) - Number(c.human))) {
       if (r.down) continue;
       const p = r.bot.root.position;
-      g.fillStyle = r.paint; g.beginPath(); g.arc(X(p.x - RACE_ORIGIN.x), Y(p.z - RACE_ORIGIN.z), r.human ? 5 : 3.5, 0, Math.PI * 2); g.fill();
+      g.fillStyle = r.paint; g.beginPath(); g.arc(X(p.x - race.origin.x), Y(p.z - race.origin.z), r.human ? 5 : 3.5, 0, Math.PI * 2); g.fill();
       if (r.human) { g.strokeStyle = '#fff'; g.lineWidth = 1.5; g.stroke(); }
     }
   }
@@ -551,9 +569,10 @@ async function main() {
   if (qs.get('race') && PRESETS[qs.get('race')!]) {
     builder.hide();
     raceBuild = JSON.parse(JSON.stringify(PRESETS[qs.get('race')!])); raceDiff = (qs.get('ai') as Difficulty) ?? 'normal'; DRIVE.boost = Number(qs.get('boost') ?? 3); raceSpeedMul = Number(qs.get('racespeed') ?? 1);
+    const qt = qs.get('track') as TrackId | 'random' | null; if (qt && (qt === 'random' || TRACK_IDS.includes(qt))) raceTrack = qt;   // v0.35 &track=oval
     raceSeen = true; startRace();
   }
-  (window as unknown as { __bb: unknown }).__bb = { race, get phase() { return phase; } };
+  (window as unknown as { __bb: unknown }).__bb = { get race() { return race; }, get phase() { return phase; }, scene, cam };   // v0.35b scene + cam for sandbox screenshots   // v0.35 race changes with the track
 
   // v0.8 real spinner damage: weapon energy measured around every physics step
   scene.onBeforePhysicsObservable.add(() => {

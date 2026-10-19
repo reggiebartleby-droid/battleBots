@@ -23,6 +23,7 @@ export class Hud {
   private controlsUntil = 0;
   private signEl = document.getElementById('sign')!;
   private signUntil = 0;
+  private signTimer = 0;   // v0.34i the sign clears itself (race mode never runs update(), so signs stuck on screen)
   view: HudView = 'top';
   details = false;
 
@@ -67,7 +68,11 @@ export class Hud {
     this.signEl.style.color = color;
     this.signEl.classList.add('on');
     this.signUntil = performance.now() + ms;
+    clearTimeout(this.signTimer);
+    this.signTimer = window.setTimeout(() => this.clearSign(), ms);
   }
+  /** v0.34i hide the sign now (also used when a race starts/ends). */
+  clearSign() { clearTimeout(this.signTimer); this.signEl.classList.remove('on'); this.signUntil = 0; }
 
   /** Show the controls card for a few seconds (match start). */
   showControls(lines: string[], ms = 6000) {

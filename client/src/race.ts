@@ -14,7 +14,7 @@
  * Track distance s is measured from the finish line. A racer's progress (prog) is unwrapped: lap = prog / length.
  */
 import {
-  Color3, Constants, Mesh, MeshBuilder, PhysicsAggregate, PhysicsBody, PhysicsMotionType, PhysicsShapeBox, PhysicsShapeContainer,
+  Color3, Constants, GlowLayer, Mesh, MeshBuilder, PhysicsAggregate, PhysicsBody, PhysicsMotionType, PhysicsShapeBox, PhysicsShapeContainer,
   PhysicsShapeType, Quaternion, Scene, StandardMaterial, TransformNode, Vector3,
 } from '@babylonjs/core';
 import type { BotBuild, Catalog } from '../../src/core/types.js';
@@ -23,11 +23,12 @@ import { SURFACE_BIT, WALL_BIT } from './arena.js';
 import { buildBot, disposeBot, dropBot, forward, freezeBot, upVector, raceTurn, DRIVE, REST_Y, type Bot, type BotId } from './bot.js';
 import { cubeKnockout, cubeSkinOf } from './cubes.js';
 import { DIFFICULTY, type Difficulty } from './ai.js';
+import { Raceway } from './raceway.js';
 import type { Drive } from './input.js';
 import type { Combat } from './combat.js';
 import type { Fx } from './fx.js';
 
-export const RACE_ORIGIN = new Vector3(0, 0, -260);
+export const RACE_ORIGIN = new Vector3(0, 0, -260);   // Grand Prix (v0.35: each track has its own origin, TRACKS below)
 export const RACE = {
   laps: 3,
   width: 7,              // road width, m
@@ -50,7 +51,6 @@ export const RACE = {
   offTrackU: 0.6,        // m past the road edge (centre of the bot) before it counts as off -- i.e. beyond the wall (v0.33b: was 1.4, a bot
                          // knocked into the gap between the start straight and the hazard alley stayed there)
   fallY: -1.5,           // centre below this = fell into the pit / off the world
-  bankDeg: 15,           // banked turn: full bank angle
   look: 4,               // AI: look-ahead on the centre line, m (+ speed x lookPerMps)
   lookPerMps: 0.55,
 };
@@ -68,7 +68,7 @@ const HAZ = {
   hammerHitR: 1.7, hammerDmg: 16, hammerShove: 2.6,
 };
 
-type Tag = 'start' | 'bank' | 'jump' | 'sbend' | 'hazard' | 'hairpin';
+type Tag = 'start' | 'bank' | 'jump' | 'sbend' | 'hazard' | 'hairpin' | 'straight';
 interface Seg { tag: Tag; len?: number; r?: number; deg?: number; sign?: 1 | -1 }
 export interface Sample { x: number; z: number; h: number; s: number; tag: Tag; q: number; bank: number; arcR: number; arcSign: number }
 
@@ -77,30 +77,80 @@ const XE = 30;                                            // x where the start s
 // NO sideways shift, so the loop didn't close -- the hairpin came out 10 m off the start straight and left a dead-end channel)
 const SB = { r: 7, theta: Math.acos(1 - 10 / 14) };
 const START_LEN = 20 + 2 * SB.r * Math.sin(SB.theta) + 14;   // closes the loop
-const SEGS: Seg[] = [
-  { tag: 'start', len: START_LEN },
-  { tag: 'bank', r: 10, deg: 180, sign: 1 },
-  { tag: 'jump', len: 20 },
-  { tag: 'sbend', r: SB.r, deg: SB.theta * 180 / Math.PI, sign: 1 },
-  { tag: 'sbend', r: SB.r, deg: SB.theta * 180 / Math.PI, sign: -1 },
-  { tag: 'hazard', len: 14 },
-  { tag: 'hairpin', r: 5, deg: 180, sign: 1 },
-];
+
+/** v0.35 race tracks. Each one is its own floor far from the others (origin), built once at load; the race picks one. */
+export type TrackId = 'gp' | 'oval';
+export interface TrackTheme {
+  sky: [string, string] | null;   // sky dome colours (top, horizon); null = the black night of the arena
+  hemi: number; sun: number;      // light intensities while racing here
+}
+export interface TrackDef {
+  id: TrackId; name: string; desc: string;
+  origin: Vector3;
+  width: number;                  // road width, m
+  bankDeg: number;                // banked turns: full bank angle
+  segs: Seg[];
+  startX: number;                 // local x where the first segment starts (z = 0, heading +x)
+  finishS: number;                // distance into the first segment of the finish line
+  friction: number;               // road friction
+  sideGrip: number;               // arcade sideways grip, 1/s (RACE.sideGrip on the Grand Prix)
+  draft: boolean;                 // slipstream boost behind another bot
+  aiCorner: number;               // AI throttle cap going into a corner
+  theme: TrackTheme;
+  look: 'neon' | 'raceway';       // walls / edges / ground style
+}
+const OVAL = { straight: 44, r: 16 };
+export const TRACKS: Record<TrackId, TrackDef> = {
+  gp: {
+    id: 'gp', name: 'Grand Prix', desc: 'Banked turn · ramp jump over a pit · kill saws · hammer · hairpin',
+    origin: RACE_ORIGIN, width: 7, bankDeg: 15,
+    segs: [
+      { tag: 'start', len: START_LEN },
+      { tag: 'bank', r: 10, deg: 180, sign: 1 },
+      { tag: 'jump', len: 20 },
+      { tag: 'sbend', r: SB.r, deg: SB.theta * 180 / Math.PI, sign: 1 },
+      { tag: 'sbend', r: SB.r, deg: SB.theta * 180 / Math.PI, sign: -1 },
+      { tag: 'hazard', len: 14 },
+      { tag: 'hairpin', r: 5, deg: 180, sign: 1 },
+    ],
+    startX: XE - START_LEN, finishS: START_LEN - XE,
+    friction: 0.8, sideGrip: 10, draft: false, aiCorner: 0.6,
+    theme: { sky: null, hemi: 0.5, sun: 1.1 }, look: 'neon',
+  },
+  // v0.35 (user): wide banked oval, raceway look (asphalt, kerbs, grandstands, pit wall, checkered gantry), daytime;
+  // high grip + slipstream boost. Props in the Neon Energy cube look.
+  oval: {
+    id: 'oval', name: 'Oval Speedway', desc: 'Wide banked oval · high grip · tuck in behind a bot for a slipstream boost',
+    origin: new Vector3(260, 0, -260), width: 10, bankDeg: 18,
+    segs: [
+      { tag: 'start', len: OVAL.straight },
+      { tag: 'bank', r: OVAL.r, deg: 180, sign: 1 },
+      { tag: 'straight', len: OVAL.straight },
+      { tag: 'bank', r: OVAL.r, deg: 180, sign: 1 },
+    ],
+    startX: -OVAL.straight / 2, finishS: OVAL.straight / 2,
+    friction: 1.0, sideGrip: 16, draft: true, aiCorner: 0.85,
+    theme: { sky: ['#0b2a4a', '#6f9cc4'], hemi: 0.85, sun: 1.5 }, look: 'raceway',
+  },
+};
+export const TRACK_IDS = Object.keys(TRACKS) as TrackId[];
+/** v0.35 slipstream: right behind another bot (in its wake) = extra push forward, up to a bit faster than it. */
+const DRAFT = { min: 1.2, range: 9, side: 1.1, minSpeed: 3, accel: 4.5, over: 1.3, overAdd: 1.5 };
 
 const nrm = (h: number) => ({ x: -Math.sin(h), z: Math.cos(h) });   // left normal
 
-/** Bank angle along the banked turn (rad): eases in over the first 40 deg, out over the last 40. */
-function bankAt(phiDeg: number, totalDeg: number) {
+/** Bank angle along a banked turn (rad): eases in over the first 40 deg, out over the last 40. */
+function bankAt(phiDeg: number, totalDeg: number, bankDeg: number) {
   const ease = (t: number) => t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t);
   const k = Math.min(ease(phiDeg / 40), ease((totalDeg - phiDeg) / 40));
-  return k * RACE.bankDeg * Math.PI / 180;
+  return k * bankDeg * Math.PI / 180;
 }
 
 /** Build the sampled centre line. */
-function buildLine(): { samples: Sample[]; length: number; finishS: number } {
+function buildLine(def: TrackDef): { samples: Sample[]; length: number } {
   const out: Sample[] = [];
-  let x = XE - START_LEN, z = 0, h = 0, s = 0;
-  for (const g of SEGS) {
+  let x = def.startX, z = 0, h = 0, s = 0;
+  for (const g of def.segs) {
     if (g.len !== undefined) {
       const n = Math.round(g.len / SAMPLE);
       for (let i = 0; i < n; i++) {
@@ -115,18 +165,17 @@ function buildLine(): { samples: Sample[]; length: number; finishS: number } {
       for (let i = 0; i < n; i++) {
         const phi = i * tot / n, hh = h + sg * phi, nn = nrm(hh);
         out.push({ x: cx - sg * r * nn.x, z: cz - sg * r * nn.z, h: hh, s: s + phi * r, tag: g.tag, q: phi * r,
-          bank: g.tag === 'bank' ? bankAt(phi * 180 / Math.PI, g.deg!) : 0, arcR: r, arcSign: sg });
+          bank: g.tag === 'bank' ? bankAt(phi * 180 / Math.PI, g.deg!, def.bankDeg) : 0, arcR: r, arcSign: sg });
       }
       h += sg * tot; const ne = nrm(h);
       x = cx - sg * r * ne.x; z = cz - sg * r * ne.z; s += len;
     }
   }
-  if (Math.hypot(x - (XE - START_LEN), z) > 0.05) throw new Error(`race track does not close (${x.toFixed(2)}, ${z.toFixed(2)})`);
-  const finishS = START_LEN - XE;                        // the finish line is at local x = 0 on the start straight
-  for (const p of out) p.s = (p.s - finishS + s) % s;
+  if (Math.hypot(x - def.startX, z) > 0.05) throw new Error(`race track ${def.id} does not close (${x.toFixed(2)}, ${z.toFixed(2)})`);
+  for (const p of out) p.s = (p.s - def.finishS + s) % s;
   // re-order so sample 0 is at the finish line
   out.sort((a, b) => a.s - b.s);
-  return { samples: out, length: s, finishS };
+  return { samples: out, length: s };
 }
 
 export interface Racer {
@@ -147,6 +196,7 @@ export interface Racer {
   down?: { at: number; why: 'ko' | 'off' | 'stuck' };   // wrecked: respawns RACE.respawnMs after `at` (stuck: RACE.stuckRespawnMs)
   offSince?: number;
   stuckSince?: number;   // v0.34 immobilized / barely moving since
+  draft?: number;        // v0.35 in a slipstream: the flat speed of the bot ahead (undefined = not drafting)
   wrecks: { ko: number; off: number; stuck: number };
   ai: { stuckT: number; escapeT: number; escapeTurn: number; nextThink: number; last: Drive; brawler: boolean };   // v0.34 brawler: leans into rivals
 }
@@ -181,22 +231,31 @@ export class Race {
   private hooks!: RaceHooks;
   playerFinishedAt = -1;
 
-  constructor(private scene: Scene, private fx: Fx) {
-    const line = buildLine();
+  readonly def: TrackDef;
+  private raceway: Raceway | null = null;
+  get laps() { return RACE.laps; }
+  readonly origin: Vector3;
+  readonly width: number;
+  private has = (tag: Tag) => this.samples.some(p => p.tag === tag);
+
+  constructor(private scene: Scene, private fx: Fx, track: TrackId = 'gp') {
+    this.def = TRACKS[track]; this.origin = this.def.origin; this.width = this.def.width;
+    const line = buildLine(this.def);
     this.samples = line.samples; this.length = line.length;
     const xs = this.samples.map(p => p.x), zs = this.samples.map(p => p.z);
-    const pad = RACE.width / 2 + 5;
+    const pad = this.width / 2 + (this.def.look === 'raceway' ? 16 : 5);   // v0.35 oval: room round the track for stands + pit lane
     this.bounds = { x0: Math.min(...xs) - pad, x1: Math.max(...xs) + pad, z0: Math.min(...zs) - pad, z1: Math.max(...zs) + pad };
-    this.wallNode = new TransformNode('race_walls', scene);
+    this.wallNode = new TransformNode('race_walls_' + track, scene);
     this.makeMats();
     this.buildFloor();
     this.buildRoad();
     this.buildBank();
-    this.buildJump();
+    if (this.has('jump')) this.buildJump();
     this.buildWalls();
     this.buildMarkings();
-    this.buildHazards();
-    this.buildIsland();
+    if (this.has('hazard')) this.buildHazards();
+    if (track === 'gp') this.buildIsland();
+    if (this.def.look === 'raceway') this.raceway = new Raceway(scene, this);   // v0.35b detailed scenery (raceway.ts)
     this.pickCheckpoints();
     this.setVisible(false);
   }
@@ -204,16 +263,17 @@ export class Race {
   /** Debris floor for loose cubes (cubes.ts): the track's square footprint. */
   get debrisFloor() {
     const b = this.bounds, half = Math.max(b.x1 - b.x0, b.z1 - b.z0) / 2;
-    return { cx: RACE_ORIGIN.x + (b.x0 + b.x1) / 2, cz: RACE_ORIGIN.z + (b.z0 + b.z1) / 2, half, wallH: 0 };
+    return { cx: this.origin.x + (b.x0 + b.x1) / 2, cz: this.origin.z + (b.z0 + b.z1) / 2, half, wallH: 0 };
   }
 
   setVisible(on: boolean) {
     for (const m of this.meshes) m.setEnabled(on);
     this.hammer?.pivot.setEnabled(on);
+    this.raceway?.setVisible(on);
   }
 
   // ------------------------------------------------------------------------------------------------- geometry
-  private w(x: number, y: number, z: number) { return new Vector3(RACE_ORIGIN.x + x, RACE_ORIGIN.y + y, RACE_ORIGIN.z + z); }
+  private w(x: number, y: number, z: number) { return new Vector3(this.origin.x + x, this.origin.y + y, this.origin.z + z); }
   /** world point at sample p, sideways u, height y */
   private at(p: Sample, u: number, y = 0) { const n = nrm(p.h); return this.w(p.x + n.x * u, y, p.z + n.z * u); }
   private dir(h: number) { return new Vector3(Math.cos(h), 0, Math.sin(h)); }
@@ -232,6 +292,10 @@ export class Race {
     m('edge', '#00e5ff', true); m('white', '#f2f2f2', true); m('black', '#0a0a0a', false); m('kerbR', '#d92b2b', false); m('kerbW', '#e8e8e8', false);
     m('yellow', '#ffc400', true); m('red', '#ff2a2a', true); m('pit', '#3a0000', true); m('steel', '#8d969e', false); m('slot', '#120404', false);
     m('hammer', '#5c6670', false); m('warn', '#ff3b1f', true); m('grid', '#0b3a44', true);
+    // v0.35 raceway look (Oval Speedway): grass, asphalt, concrete, dark stands with Neon Energy cube trim + crowd
+    m('grass', '#1d3a1b', false); m('asphalt', '#33373d', false).backFaceCulling = false; m('bankAsphalt', '#3a3f46', false).backFaceCulling = false;
+    m('concrete', '#aeb4ba', false); m('stand', '#141a26', false); m('pitlane', '#2a2d33', false); m('garage', '#1b2130', false);
+    m('cyan', '#4dd2ff', true); m('pink', '#ff2bd6', true); m('lime', '#39ff14', true); m('violet', '#b88cff', true); m('orange', '#ff9f1c', true);
     const glass = new StandardMaterial('race_glass', this.scene);
     glass.disableLighting = true; glass.alpha = 0.45; glass.alphaMode = Constants.ALPHA_ADD; glass.backFaceCulling = false;
     glass.emissiveColor = Color3.FromHexString('#00e5ff').scale(0.07);
@@ -256,10 +320,15 @@ export class Race {
   /** Floor under everything, with the pit cut out under the jump gap. */
   private buildFloor() {
     const b = this.bounds, T = 0.5;
+    const ground = this.def.look === 'raceway' ? 'grass' : 'ground';
+    if (!this.has('jump')) {   // v0.35 no pit to cut out: one slab (v0.35b hidden: raceway.ts draws the ground)
+      this.slab('floor', this.w((b.x0 + b.x1) / 2, -T / 2, (b.z0 + b.z1) / 2), Vector3.Right(), Vector3.Up(), Vector3.Forward(), { w: b.x1 - b.x0, h: T, d: b.z1 - b.z0 }, ground, true, this.def.friction).isVisible = this.def.look !== 'raceway';
+      return;
+    }
     const js = this.samples.filter(p => p.tag === 'jump');
     const g0 = js.find(p => p.q >= JUMP.deck1)!, g1 = js.find(p => p.q >= JUMP.gap1)!;
     // jump straight runs along -x at constant z (heading pi)
-    const hx0 = Math.min(g0.x, g1.x), hx1 = Math.max(g0.x, g1.x), hz = g0.z, hw = RACE.width / 2 + 0.4;
+    const hx0 = Math.min(g0.x, g1.x), hx1 = Math.max(g0.x, g1.x), hz = g0.z, hw = this.width / 2 + 0.4;
     const rects = [
       [b.x0, hx0, b.z0, b.z1], [hx1, b.x1, b.z0, b.z1],
       [hx0, hx1, b.z0, hz - hw], [hx0, hx1, hz + hw, b.z1],
@@ -303,25 +372,42 @@ export class Race {
       if (skip(p)) { if (cur.length > 1) runs.push(cur); cur = []; } else cur.push(p);
     }
     if (cur.length > 1) runs.push(cur);
-    const half = RACE.width / 2;
+    const half = this.width / 2;
     for (const run of runs) {
       const L = run.map(p => this.at(p, half, 0.006)), R = run.map(p => this.at(p, -half, 0.006));
-      const rib = MeshBuilder.CreateRibbon('race_road', { pathArray: [R, L] }, this.scene);
+      // v0.35 raceway: paths the other way round so the surface faces up (lit asphalt); the Grand Prix keeps its dark road
+      const rib = MeshBuilder.CreateRibbon('race_road', { pathArray: this.def.look === 'raceway' ? [L, R] : [R, L] }, this.scene);
       rib.receiveShadows = true;
-      this.keep(rib, 'road');
+      this.keep(rib, this.def.look === 'raceway' ? 'asphalt' : 'road');
     }
   }
 
   /** Banked turn: a smooth triangle-mesh surface (visual + collider), inner edge on the floor, outer edge up. */
   private buildBank() {
-    const bs = this.samples.filter(p => p.tag === 'bank');
-    const prev = this.samples[this.samples.indexOf(bs[0]) - 1], next = this.samples[(this.samples.indexOf(bs[bs.length - 1]) + 1) % this.samples.length];
+    for (const bs of this.runs('bank')) this.buildBankRun(bs);
+  }
+  /** v0.35 runs of consecutive samples with this tag (the oval has two banked turns). */
+  private runs(tag: Tag): Sample[][] {
+    const n = this.samples.length, out: Sample[][] = [];
+    let i0 = this.samples.findIndex(p => p.tag !== tag);
+    if (i0 < 0) return [this.samples];
+    let cur: Sample[] = [];
+    for (let k = 1; k <= n; k++) {
+      const p = this.samples[(i0 + k) % n];
+      if (p.tag === tag) cur.push(p); else if (cur.length) { out.push(cur); cur = []; }
+    }
+    if (cur.length) out.push(cur);
+    return out;
+  }
+  private buildBankRun(bs: Sample[]) {
+    const n = this.samples.length;
+    const prev = this.samples[(this.samples.indexOf(bs[0]) - 1 + n) % n], next = this.samples[(this.samples.indexOf(bs[bs.length - 1]) + 1) % n];
     const rows = [prev, ...bs, next];
-    const half = RACE.width / 2, cols = 7;
+    const half = this.width / 2, cols = 7;
     const paths: Vector3[][] = [];
     for (let j = 0; j < cols; j++) {
       // u from the inner edge (+half: the bank turns left, so inside = +u) to the outer edge (-half) and a bit past
-      const u = half + 0.4 - (j / (cols - 1)) * (RACE.width + 0.8);
+      const u = half + 0.4 - (j / (cols - 1)) * (this.width + 0.8);
       paths.push(rows.map(p => {
         const hgt = Math.max(0, half - u) * Math.tan(p.bank);
         return this.at(p, u, hgt + 0.006);
@@ -329,13 +415,14 @@ export class Race {
     }
     const rib = MeshBuilder.CreateRibbon('race_bank', { pathArray: paths }, this.scene);
     rib.receiveShadows = true;
-    this.keep(rib, 'bank');
-    const agg = new PhysicsAggregate(rib, PhysicsShapeType.MESH, { mass: 0, friction: 0.8, restitution: 0.1 }, this.scene);
+    this.keep(rib, this.def.look === 'raceway' ? 'bankAsphalt' : 'bank');
+    const agg = new PhysicsAggregate(rib, PhysicsShapeType.MESH, { mass: 0, friction: this.def.friction, restitution: 0.1 }, this.scene);
     agg.shape.filterMembershipMask = SURFACE_BIT;
     this.aggs.push(agg);
     // banking stripes (visual): lines along the turn every metre of width
     const lines: Mesh[] = [];
-    for (const u of [-1.75, 0, 1.75]) for (let i = 0; i < rows.length - 1; i += 2) {
+    const stripes = this.def.look === 'raceway' ? [] : [-1.75, 0, 1.75];   // v0.35 raceway: plain asphalt (kerbs + lines in buildMarkings)
+    for (const u of stripes) for (let i = 0; i < rows.length - 1; i += 2) {
       const a = rows[i], b = rows[Math.min(i + 2, rows.length - 1)];
       const ya = Math.max(0, half - u) * Math.tan(a.bank), yb = Math.max(0, half - u) * Math.tan(b.bank);
       lines.push(this.bar(this.at(a, u, ya + 0.02), this.at(b, u, yb + 0.02), 0.05));
@@ -345,7 +432,7 @@ export class Race {
 
   /** Bank surface height at a sample and sideways offset (0 off the bank). */
   surfaceY(p: Sample, u: number) {
-    if (p.tag === 'bank') return Math.max(0, RACE.width / 2 - u) * Math.tan(p.bank);
+    if (p.tag === 'bank') return Math.max(0, this.width / 2 - u) * Math.tan(p.bank);
     if (p.tag === 'jump') {
       const q = p.q;
       if (q >= JUMP.up0 && q <= JUMP.up1) return JUMP.top * (q - JUMP.up0) / (JUMP.up1 - JUMP.up0);
@@ -362,7 +449,7 @@ export class Race {
     const p0 = js[0];
     const t = this.dir(p0.h), n3 = (() => { const n = nrm(p0.h); return new Vector3(n.x, 0, n.z); })();
     const pt = (q: number, y: number) => this.w(p0.x + Math.cos(p0.h) * q, y, p0.z + Math.sin(p0.h) * q);
-    const W = RACE.width + 0.2, T = 0.3;
+    const W = this.width + 0.2, T = 0.3;
     const ramp = (name: string, qa: number, ya: number, qb: number, yb: number) => {
       const A = pt(qa, ya), B = pt(qb, yb);
       const z = B.subtract(A).normalize();
@@ -391,12 +478,12 @@ export class Race {
 
   /** Glass walls both sides (one static body, many box children), neon strip on top. */
   private buildWalls() {
-    const half = RACE.width / 2, th = 0.3;
+    const half = this.width / 2, th = 0.3;
     const shape = new PhysicsShapeContainer(this.scene);
     const vis: Mesh[] = [], tops: Mesh[] = [];
     const topAt = (p: Sample, side: number) => {
       let y = RACE.wallH;
-      if (p.tag === 'bank' && side < 0) y += RACE.width * Math.tan(p.bank);           // outer wall of the bank: above the high edge
+      if (p.tag === 'bank' && side < 0) y += this.width * Math.tan(p.bank);           // outer wall of the bank: above the high edge
       if (p.tag === 'jump' && p.q > JUMP.up0 - 1 && p.q < JUMP.down1 + 1) y += JUMP.top;   // along the jump: above the decks
       return y;
     };
@@ -412,7 +499,7 @@ export class Race {
         const c = A.add(B).scale(0.5); c.y = hgt / 2;
         const q = Quaternion.RotationQuaternionFromAxis(x, y, z);
         const ext = new Vector3(th, hgt, len + 0.25);
-        const child = new PhysicsShapeBox(c.subtract(RACE_ORIGIN), q, ext, this.scene);
+        const child = new PhysicsShapeBox(c.subtract(this.origin), q, ext, this.scene);
         child.filterMembershipMask = WALL_BIT;
         child.material = { friction: 0.3, restitution: 0.4 };
         shape.addChild(child);
@@ -423,22 +510,24 @@ export class Race {
       }
     }
     shape.filterMembershipMask = WALL_BIT;
-    this.wallNode.position = RACE_ORIGIN.clone();
+    this.wallNode.position = this.origin.clone();
     const body = new PhysicsBody(this.wallNode, PhysicsMotionType.STATIC, false, this.scene);
     body.shape = shape;
     this.wallBody = body;
-    this.merge(vis, 'race_walls_glass', 'glass');
-    this.merge(tops, 'race_walls_top', 'edge');
+    const raceway = this.def.look === 'raceway';   // v0.35 raceway: concrete barriers, yellow top strip
+    this.merge(vis, 'race_walls_glass', raceway ? 'concrete' : 'glass');
+    this.merge(tops, 'race_walls_top', raceway ? 'yellow' : 'edge');
   }
 
   /** Finish line, start grid boxes, kerbs on the inside of the turns, road edge lines. */
   private buildMarkings() {
-    const half = RACE.width / 2;
+    const half = this.width / 2;
     const f = this.samples[0];
     const t = this.dir(f.h);
     // checkered finish line
     const blacks: Mesh[] = [], whites: Mesh[] = [];
-    for (let row = 0; row < 2; row++) for (let i = 0; i < 14; i++) {
+    const nChk = Math.round(this.width / 0.5);   // v0.35 any road width
+    for (let row = 0; row < 2; row++) for (let i = 0; i < nChk; i++) {
       const u0 = -half + i * 0.5, c = this.at(f, u0 + 0.25, 0.012).add(t.scale((row - 0.5) * 0.5));
       const sq = MeshBuilder.CreateBox('race_chk', { width: 0.5, height: 0.01, depth: 0.5 }, this.scene);
       sq.position = c; sq.rotation.y = Math.atan2(t.x, t.z);
@@ -458,20 +547,23 @@ export class Race {
     this.merge(grid, 'race_grid', 'white');
     // road edge lines + kerbs (inside of turns)
     const edges: Mesh[] = [], kr: Mesh[] = [], kw: Mesh[] = [];
-    const skipEdge = (p: Sample) => p.tag === 'bank' || (p.tag === 'jump' && p.q > JUMP.up0 - 0.5 && p.q < JUMP.down1 + 0.5);
+    // v0.35 raceway: white edge lines + kerbs on the banked turns too (laid on the bank surface)
+    const raceway = this.def.look === 'raceway';
+    const skipEdge = (p: Sample) => (p.tag === 'bank' && !raceway) || (p.tag === 'jump' && p.q > JUMP.up0 - 0.5 && p.q < JUMP.down1 + 0.5);
+    const on = (p: Sample, u: number, y: number) => this.at(p, u, this.surfaceY(p, u) + y);
     for (let i = 0; i < this.samples.length; i += 2) {
       const a = this.samples[i], b = this.samples[(i + 2) % this.samples.length];
       for (const side of [1, -1]) {
         if (skipEdge(a) || skipEdge(b)) continue;
-        edges.push(this.bar(this.at(a, side * (half - 0.15), 0.011), this.at(b, side * (half - 0.15), 0.011), 0.08));
+        edges.push(this.bar(on(a, side * (half - 0.15), 0.011), on(b, side * (half - 0.15), 0.011), 0.08));
       }
-      if (a.arcSign && b.arcSign && a.tag !== 'bank') {
+      if (a.arcSign && b.arcSign && (a.tag !== 'bank' || raceway)) {
         const inside = a.arcSign;   // +turn: inside is +u
-        const k = this.bar(this.at(a, inside * (half - 0.45), 0.014), this.at(b, inside * (half - 0.45), 0.014), 0.5, 0.03);
+        const k = this.bar(on(a, inside * (half - 0.45), 0.014), on(b, inside * (half - 0.45), 0.014), 0.5, 0.03);
         (Math.floor(i / 2) % 2 ? kr : kw).push(k);
       }
     }
-    this.merge(edges, 'race_edges', 'edge');
+    this.merge(edges, 'race_edges', raceway ? 'white' : 'edge');
     this.merge(kr, 'race_kerb_r', 'kerbR'); this.merge(kw, 'race_kerb_w', 'kerbW');
   }
 
@@ -479,7 +571,7 @@ export class Race {
   private buildIsland() {
     const al = this.samples.filter(p => p.tag === 'hazard'), st = this.samples.filter(p => p.tag === 'start');
     const x0 = Math.min(...st.map(p => p.x)), x1 = Math.max(...al.map(p => p.x));          // hairpin end -> end of the alley
-    const zLo = st[0].z + RACE.width / 2 + 0.3, zHi = al[0].z - RACE.width / 2 - 0.3;      // between the two walls
+    const zLo = st[0].z + this.width / 2 + 0.3, zHi = al[0].z - this.width / 2 - 0.3;      // between the two walls
     if (zHi - zLo < 0.2) return;
     const hgt = RACE.wallH;
     this.slab('island', this.w((x0 + x1) / 2, hgt / 2, (zLo + zHi) / 2), Vector3.Right(), Vector3.Up(), Vector3.Forward(), { w: x1 - x0, h: hgt, d: zHi - zLo }, 'black', false, 0.3);
@@ -533,6 +625,13 @@ export class Race {
 
   private pickCheckpoints() {
     const L = this.length;
+    if (this.def.id !== 'gp') {   // v0.35 no hazards: a checkpoint every ~10 m on the flat (never on a banked turn)
+      const flat = this.samples.filter(p => p.tag !== 'bank');
+      const cps: number[] = [];
+      for (const p of flat) if (!cps.length || p.s - cps[cps.length - 1] >= 10) cps.push(p.s);
+      this.checkpoints = cps.sort((a, b) => a - b);
+      return;
+    }
     const sOf = (tag: Tag, q: number) => this.samples.filter(p => p.tag === tag).reduce((a, b) => Math.abs(b.q - q) < Math.abs(a.q - q) ? b : a).s;
     this.checkpoints = [
       2, 14, XE - 3,                     // start straight (the finish line is at x = 0, the straight ends at x = XE)
@@ -587,7 +686,7 @@ export class Race {
 
   /** Nearest centre-line sample: around `hint` (+-24 m) or everywhere (hint < 0). */
   private nearestIdx(pos: Vector3, hint: number): number {
-    const n = this.samples.length, lx = pos.x - RACE_ORIGIN.x, lz = pos.z - RACE_ORIGIN.z;
+    const n = this.samples.length, lx = pos.x - this.origin.x, lz = pos.z - this.origin.z;
     let best = 0, bd = Infinity;
     const span = hint < 0 ? n : Math.round(24 / SAMPLE);
     for (let k = -span; k <= span; k++) {
@@ -631,7 +730,7 @@ export class Race {
       r.idx = idx;
       r.prog += ds;
       const p = this.samples[idx], n = nrm(p.h);
-      r.u = (b.root.position.x - RACE_ORIGIN.x - p.x) * n.x + (b.root.position.z - RACE_ORIGIN.z - p.z) * n.z;
+      r.u = (b.root.position.x - this.origin.x - p.x) * n.x + (b.root.position.z - this.origin.z - p.z) * n.z;
       // lap line
       if (go && r.finished === undefined) {
         const lapsNow = Math.floor(r.prog / L);
@@ -649,7 +748,7 @@ export class Race {
       // KO (every part gone): wrecked
       if (isDestroyed(b.state)) { this.wreck(r, now, 'ko'); continue; }
       // off the track: fell (pit / over the edge) or knocked over a wall
-      const off = b.root.position.y < RACE.fallY || Math.abs(r.u) > RACE.width / 2 + RACE.offTrackU;
+      const off = b.root.position.y < RACE.fallY || Math.abs(r.u) > this.width / 2 + RACE.offTrackU;
       if (off) { r.offSince ??= now; if (now - r.offSince >= RACE.offTrackMs || b.root.position.y < RACE.fallY - 3) this.wreck(r, now, 'off'); }
       else r.offSince = undefined;
       // v0.34 immobilized (drive destroyed) or barely moving (upside down, wedged, pinned) for RACE.stuckMs: recovered
@@ -663,6 +762,32 @@ export class Race {
     }
     if (go) this.hazards(dt, now);
     else this.idleHazards(dt);
+    this.findDrafts(go);
+    this.raceway?.update(dt, go);   // v0.35b crowd, flags, blimp, start lights, jumbotron
+  }
+
+  /** v0.35 slipstream (tracks with draft on): who is right behind whom. The push itself is in beforePhysics. */
+  private findDrafts(go: boolean) {
+    for (const r of this.racers) r.draft = undefined;
+    if (!this.def.draft || !go) return;
+    for (const r of this.racers) {
+      if (r.down || r.bot.eliminated || r.finished !== undefined) continue;
+      const pos = r.bot.root.position, v = r.bot.body.getLinearVelocity();
+      const fwd = forward(r.bot); fwd.y = 0;
+      if (fwd.lengthSquared() < 1e-4) continue;
+      fwd.normalize();
+      if (Vector3.Dot(v, fwd) < DRAFT.minSpeed) continue;
+      const right = Vector3.Cross(Vector3.Up(), fwd);
+      for (const o of this.racers) {
+        if (o === r || o.down || o.bot.eliminated) continue;
+        const to = o.bot.root.position.subtract(pos); to.y = 0;
+        const ahead = Vector3.Dot(fwd, to), side = Math.abs(Vector3.Dot(right, to));
+        if (ahead < DRAFT.min || ahead > DRAFT.range || side > DRAFT.side) continue;
+        const ov = o.bot.body.getLinearVelocity(), os = Math.hypot(ov.x, ov.z);
+        if (os < DRAFT.minSpeed) continue;
+        r.draft = Math.max(r.draft ?? 0, os);
+      }
+    }
   }
 
   /** Wrecked: blow it up, hide it, respawn later. */
@@ -687,11 +812,11 @@ export class Race {
     const p = this.sampleAt(cp);
     // spread racers sideways so two respawns don't land on each other
     let u = (r.slot - 1.5) * 1.3;
-    const pos = this.at(p, u, 0.7);
+    const pos = this.at(p, u, this.surfaceY(p, u) + 0.7);   // v0.35 on the road surface (banks / ramps), not the floor
     for (const o of this.racers) if (o !== r && !o.down && Vector3.Distance(o.bot.root.position, pos) < 1.6) { u = -u; break; }
     const old = r.bot;
     disposeBot(old);
-    const bot = buildBot(r.id, r.build, this.catalog, this.scene, this.at(p, u, 0.7), Math.atan2(Math.cos(p.h), Math.sin(p.h)), { breakableWeapons: false });
+    const bot = buildBot(r.id, r.build, this.catalog, this.scene, this.at(p, u, this.surfaceY(p, u) + 0.7), Math.atan2(Math.cos(p.h), Math.sin(p.h)), { breakableWeapons: false });
     this.hooks.onSpawn(bot);
     this.combat?.replaceBot(old, bot);
     if (bot.weapon.mode === 'spinner') bot.weapon.spinning = true;
@@ -703,7 +828,7 @@ export class Race {
   private spinPrev = new Map<Bot, number>();
   /** Every physics sub-step, before the step: stabilizer + note each spinner's speed. */
   beforePhysics(dt: number) {
-    const free = RACE.stabFreeDeg * Math.PI / 180;
+    const free = Math.max(RACE.stabFreeDeg, this.def.bankDeg + 6) * Math.PI / 180;   // v0.35 never fights a steeper bank
     for (const r of this.racers) {
       const b = r.bot;
       if (r.down || b.eliminated) continue;
@@ -721,7 +846,7 @@ export class Race {
       // v0.34f arcade handling: wheels on the road -> the stick sets the turn rate, sideways sliding is soaked up
       const arcade = DRIVE.raceArcade;
       const p = this.samples[r.idx];
-      const grounded = arcade && up.y > 0.6 && b.root.position.y - RACE_ORIGIN.y - this.surfaceY(p, r.u) < REST_Y + RACE.groundGap;
+      const grounded = arcade && up.y > 0.6 && b.root.position.y - this.origin.y - this.surfaceY(p, r.u) < REST_Y + RACE.groundGap;
       if (grounded) {
         const target = (raceTurn.get(b) ?? 0) * RACE.turnRate;
         yaw += (target - yaw) * Math.min(1, RACE.turnResp * dt);
@@ -730,7 +855,12 @@ export class Race {
         if (right.lengthSquared() > 1e-4) {
           right.normalize();
           const v = b.body.getLinearVelocity();
-          const dv = right.scale(Vector3.Dot(v, right) * Math.min(1, RACE.sideGrip * dt));
+          const dv = right.scale(Vector3.Dot(v, right) * Math.min(1, this.def.sideGrip * dt));
+          // v0.35 slipstream: a push forward while tucked in behind a bot, up to a bit faster than it
+          if (r.draft !== undefined) {
+            const f = Vector3.Cross(right, Vector3.Up());   // forward, flat
+            if (Math.hypot(v.x, v.z) < r.draft * DRAFT.over + DRAFT.overAdd) dv.subtractInPlace(f.scale(DRAFT.accel * dt));
+          }
           b.body.setLinearVelocity(v.subtract(dv));
           for (const wh of b.wheels ?? []) if (!wh.released) wh.body.setLinearVelocity(wh.body.getLinearVelocity().subtract(dv));
         }
@@ -767,8 +897,8 @@ export class Race {
     return { y: -HAZ.sawR - 0.2 + k * (HAZ.sawR + 0.45), warn, up: k > 0.6 };
   }
   private idleHazards(dt: number) {
-    for (const s of this.saws) { s.mesh.position.y = RACE_ORIGIN.y - HAZ.sawR - 0.2; s.slot.material = this.mats.slot; }
-    this.setHammer(-1.75, false);
+    for (const s of this.saws) { s.mesh.position.y = this.origin.y - HAZ.sawR - 0.2; s.slot.material = this.mats.slot; }
+    if (this.hammer) this.setHammer(-1.75, false);
     void dt;
   }
   /** angle: 0 = head on the floor, more negative = raised. */
@@ -787,7 +917,7 @@ export class Race {
     // kill saws
     for (const s of this.saws) {
       const st = this.sawHeight(s.row);
-      s.mesh.position.y = RACE_ORIGIN.y + st.y;
+      s.mesh.position.y = this.origin.y + st.y;
       s.mesh.addRotation(0, 40 * dt, 0);
       s.slot.material = st.warn || st.up ? this.mats.warn : this.mats.slot;
       if (!st.up) continue;
@@ -802,6 +932,7 @@ export class Race {
         b.body.applyImpulse(new Vector3(side.x, HAZ.sawKick, side.z).scale(m), b.body.getObjectCenterWorld().add(new Vector3(0.15, 0, 0.1)));
       }
     }
+    if (!this.hammer) return;   // v0.35 tracks without the hammer
     // hammer: wind up, warn, slam, recover
     const ph = this.t % HAZ.hammerPeriod;
     const slamAt = HAZ.hammerPeriod - HAZ.hammerSlam - 0.5;
@@ -879,7 +1010,7 @@ export class Race {
     const look = RACE.look + speed * RACE.lookPerMps;
     const ahead = this.sampleAt(r.prog + look);
     const tight = ahead.tag === 'hairpin' || ahead.tag === 'sbend' || ahead.tag === 'jump';
-    let lane = (r.slot - 1.5) * (tight ? 0.4 : 1.1);
+    let lane = (r.slot - 1.5) * (tight ? 0.4 : 1.1) * this.width / 7;   // v0.35 wider road = wider lanes
     // v0.33b racing first: steer round a bot in the way (the weapon fires anyway if it's in reach); only a helpless bot
     // (upside down / stopped) right in front gets rammed -- knocking it out of the race is worth a place.
     // NOTE (user, 2026-10-18): the v0.33 "lean into any rival" may come back -- it was funny. It was:
@@ -890,7 +1021,8 @@ export class Race {
       if (rival && rd < 3.5 && w.mode !== 'none') aim = Vector3.Lerp(aim, rival.root.position, 0.4);
     } else if (blocker && blocker.helpless && w.mode !== 'none' && bd < 2.5) aim = blocker.bot.root.position.clone();
     else {
-      if (blocker) lane = Math.max(-2.3, Math.min(2.3, lane + (blocker.side >= 0 ? 2.0 : -2.0)));   // it's on our right -> pass on the left (+u = left)
+      const edge = this.width / 2 - 1.2;
+      if (blocker) lane = Math.max(-edge, Math.min(edge, lane + (blocker.side >= 0 ? 2.0 : -2.0)));   // it's on our right -> pass on the left (+u = left)
       aim = this.at(ahead, lane);
     }
     const dir = aim.subtract(pos); dir.y = 0; dir.normalize();
@@ -900,7 +1032,7 @@ export class Race {
     const far = this.sampleAt(r.prog + look + 6);
     let dh = far.h - this.sampleAt(r.prog).h; dh = Math.atan2(Math.sin(dh), Math.cos(dh));
     let throttle = Math.abs(angle) > 1.3 ? 0.15 : Math.abs(angle) > 0.7 ? 0.55 : 1;
-    if (Math.abs(dh) > 1.0 && speed > 5) throttle = Math.min(throttle, 0.6);
+    if (Math.abs(dh) > 1.0 && speed > 5) throttle = Math.min(throttle, this.def.aiCorner);   // v0.35 per track (oval: high grip)
     // the jump: straight and fast
     if (ahead.tag === 'jump' && Math.abs(angle) < 0.3) throttle = 1;
 

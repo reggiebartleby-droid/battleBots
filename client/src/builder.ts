@@ -9,10 +9,11 @@ import { partWeight } from '../../src/core/weight.js';
 import { DIFFICULTY, type Difficulty } from './ai.js';
 import { SHELL_AIDS, saveShellAids } from './bot.js';
 import { CUBES, saveCubes, type CubeSize, type CubeStyle } from './cubes.js';
+import { TRACKS, TRACK_IDS, type TrackId } from './race.js';
 
 const STORAGE_KEY = 'battlebots.builder.v1';
 /** v0.30 shared tester defaults (settings.ts): the lab starts with these when nothing is saved. */
-const DEFAULT = { preset: 'Noisy Cricket', opponent: 'Hammer Time', boost: 3, raceSpeed: 1 };
+const DEFAULT = { preset: 'Noisy Cricket', opponent: 'Hammer Time', boost: 3, raceSpeed: 1, racer: 'Flip Side', track: 'gp' as TrackId | 'random' };   // v0.34i racer; v0.35 track
 
 export const PRESETS: Record<string, BotBuild> = {
   'Red Disc': {
@@ -88,7 +89,7 @@ function socketLabel(body: BodyDef, s: SocketDef): string {
 
 export interface DeployArgs { player: BotBuild; opponent: BotBuild; opponentName: string; difficulty: Difficulty; breakableWeapons: boolean; driveBoost: number }
 /** v0.33 race track */
-export interface RaceArgs { player: BotBuild; difficulty: Difficulty; driveBoost: number; raceSpeed: number }   // v0.34d raceSpeed: x1 = the v0.34 race pace
+export interface RaceArgs { player: BotBuild; difficulty: Difficulty; driveBoost: number; raceSpeed: number; track: TrackId | 'random' }   // v0.35 track   // v0.34d raceSpeed: x1 = the v0.34 race pace
 
 export class Builder {
   build: BotBuild;
@@ -120,6 +121,8 @@ export class Builder {
     deploy: document.getElementById('bb-deploy') as HTMLButtonElement,
     course: document.getElementById('bb-course') as HTMLButtonElement,   // v0.23 test course
     race: document.getElementById('bb-race') as HTMLButtonElement,       // v0.33 race track
+    racer: document.getElementById('bb-racer') as HTMLSelectElement,     // v0.34i RACER: a preset or '' = my lab build
+    track: document.getElementById('bb-track') as HTMLSelectElement,     // v0.35 TRACK: a track id or 'random'
     shellAids: document.getElementById('bb-shellaids')!,                // v0.25 shell spinner nose aids
     cap: document.getElementById('bb-cap') as HTMLInputElement,
     arrow: document.getElementById('bb-arrow') as HTMLInputElement,
@@ -153,6 +156,16 @@ export class Builder {
       this.el.presets.value = '';
     };
     this.el.opponent.value = saved?.opponent && PRESETS[saved.opponent] ? saved.opponent : DEFAULT.opponent;
+    // v0.34i RACER dropdown (race mode only): starts on Flip Side; 'My lab build' races the bot on the turntable
+    this.el.racer.add(new Option('My lab build', ''));
+    for (const name of Object.keys(PRESETS)) this.el.racer.add(new Option(name, name));
+    this.el.racer.value = saved?.racer !== undefined && (saved.racer === '' || PRESETS[saved.racer]) ? saved.racer : DEFAULT.racer;
+    this.el.racer.onchange = () => { this.save(); this.render(); };
+    // v0.35 TRACK dropdown (race mode only)
+    for (const id of TRACK_IDS) this.el.track.add(new Option(TRACKS[id].name, id));
+    this.el.track.add(new Option('Random', 'random'));
+    this.el.track.value = saved?.track && (saved.track === 'random' || TRACKS[saved.track as TrackId]) ? saved.track : DEFAULT.track;
+    this.el.track.onchange = () => this.save();
     this.el.difficulty.value = saved?.difficulty && DIFFICULTY[saved.difficulty] ? saved.difficulty : 'normal';
     this.el.breakable.checked = saved?.breakableWeapons ?? false;   // v0.17: off by default
     // v0.25 re-gear doubled the real drive power: a boost saved before it starts at the default; v0.30 default x3
@@ -199,10 +212,11 @@ export class Builder {
 
     // v0.33 race: your build vs 3 AI presets, same AI level + drive boost
     this.el.race.onclick = () => {
-      if (!this.validation.ok) return;
+      if (!this.validation.ok && !this.el.racer.value) return;   // v0.34i a preset racer doesn't need the lab build to be valid
       this.save();
       this.hide();
-      this.onRace({ player: clone(this.build), difficulty: this.el.difficulty.value as Difficulty, driveBoost: Number(this.el.boost.value), raceSpeed: Number(this.el.raceSpeed.value) });
+      const racer = this.el.racer.value;
+      this.onRace({ player: racer && PRESETS[racer] ? clone(PRESETS[racer]) : clone(this.build), difficulty: this.el.difficulty.value as Difficulty, driveBoost: Number(this.el.boost.value), raceSpeed: Number(this.el.raceSpeed.value), track: this.el.track.value as TrackId | 'random' });
     };
 
     this.render();
@@ -290,13 +304,13 @@ export class Builder {
     this.el.errors.innerHTML = v.errors.map(e => `<li>${e}</li>`).join('');
     this.el.deploy.disabled = !v.ok;
     this.el.course.disabled = !v.ok;
-    this.el.race.disabled = !v.ok;
+    this.el.race.disabled = !v.ok && !this.el.racer.value;   // v0.34i
   }
 
   private save() {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ build: this.build, opponent: this.el.opponent.value, difficulty: this.el.difficulty.value, breakableWeapons: this.el.breakable.checked, driveBoost: Number(this.el.boost.value), raceSpeed: Number(this.el.raceSpeed.value), gear: 'v0.25' })); } catch { /* ignore */ }
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ build: this.build, opponent: this.el.opponent.value, difficulty: this.el.difficulty.value, breakableWeapons: this.el.breakable.checked, driveBoost: Number(this.el.boost.value), raceSpeed: Number(this.el.raceSpeed.value), racer: this.el.racer.value, track: this.el.track.value, gear: 'v0.25' })); } catch { /* ignore */ }
   }
-  private load(): { build: BotBuild; opponent?: string; difficulty?: Difficulty; breakableWeapons?: boolean; driveBoost?: number; raceSpeed?: number; gear?: string } | null {
+  private load(): { build: BotBuild; opponent?: string; difficulty?: Difficulty; breakableWeapons?: boolean; driveBoost?: number; raceSpeed?: number; racer?: string; track?: string; gear?: string } | null {
     try { const s = localStorage.getItem(STORAGE_KEY); return s ? JSON.parse(s) : null; } catch { return null; }
   }
 }
