@@ -229,6 +229,7 @@
     body.mobile.inrace #m-left, body.mobile.inrace #m-right { display: block; position: absolute; bottom: 22px; width: 116px; height: 116px; border-radius: 50%; border: 3px solid #3ee6c4; background: rgba(62,230,196,.18); color: #fff; font: 900 40px/1 system-ui, sans-serif; pointer-events: auto; touch-action: none; }
     body.mobile.inrace #m-left { left: max(20px, env(safe-area-inset-left)); }
     body.mobile.inrace #m-right { right: max(20px, env(safe-area-inset-right)); }
+    body.mobile.pad.inrace #m-left, body.mobile.pad.inrace #m-right, body.mobile.pad.inrace #m-brake { display: none; }   /* v0.43 controller connected */
     body.mobile.inrace #m-left.down, body.mobile.inrace #m-right.down { background: rgba(62,230,196,.6); box-shadow: 0 0 20px #3ee6c4; }
     body.mobile #m-menu { display: none; }
     body.mobile #rresults.on ~ #m-controls { display: none; }

@@ -10,7 +10,7 @@ import { catalog } from './catalog.js';
 import { buildArena, WALL_H, ARENA_SIZE, ARENA_COLOURS, FLOOR_GRIDS, type ArenaStyle } from './arena.js';
 import { buildBot, forward, upVector, driveSpinner, spinOmega, applyGyro, disposeBot, freezeBot, snapSpinner, driveArm, armBefore, armAfter, applyMagnets, driveFlipper, driveControl, hingesBefore, driveWheels, wheelsBefore, carryWheels, botMeshes, dropBot, DRIVE, type Bot } from './bot.js';
 import { applyEnvironment, castShadows, makeShadows } from './look.js';
-import { readDrive, isDown, KEYS, type Drive } from './input.js';
+import { readDrive, isDown, KEYS, type Drive, padConnected, onPadButton, onPadChange, pressKey } from './input.js';   // v0.43 controller
 import { Combat } from './combat.js';
 import { Hud } from './hud.js';
 import { Fx } from './fx.js';
@@ -21,7 +21,7 @@ import { CamControl } from './cam.js';
 import { Builder, PRESETS } from './builder.js';
 import { Course, STATIONS, COURSE_ORIGIN, COURSE, type StationId, type RunResult } from './course.js';
 import { aiDrive, type Difficulty } from './ai.js';
-import { MOBILE, MobileMenu, setupTouchControls, goFullscreen, TOUCH } from './mobile.js';
+import { MOBILE, MobileMenu, setupTouchControls, goFullscreen, TOUCH, tapKey } from './mobile.js';
 import { CUBES } from './cubes.js';
 import { Upgrades } from './upgrades.js';   // v0.40 race upgrades (SCRAP meter)
 import { Race, RACE, TRACK_IDS, ordinal, fmtTime, type Racer, type TrackId } from './race.js';
@@ -451,6 +451,28 @@ async function main() {
     rr.again.textContent = 'START ▶';
     (rr.box.querySelector('.keys') as HTMLElement).textContent = MOBILE ? 'START: next race' : 'Enter or START: next race · R: restart';
   }
+  // ---------------- v0.43 controller (user): menus + buttons. A / Start = START, Y = camera, Back / View = restart,
+  // LB / RB = track, D-pad left / right = car (start card + results). Phone: a controller hides the touch buttons.
+  const cardUp = () => rd.box.classList.contains('on') || rr.box.classList.contains('on');
+  function padPick(kind: 'track' | 'car', dir: number) {
+    if (!TESTER || mode !== 'race' || !cardUp()) return;
+    const sel = (kind === 'track' ? tp.track : tp.car)[rd.box.classList.contains('on') ? 0 : 1];
+    const n = sel.options.length; if (!n) return;
+    sel.selectedIndex = (sel.selectedIndex + dir + n) % n;
+    sel.dispatchEvent(new Event('change'));
+  }
+  onPadButton(btn => {
+    if (btn === 0 || btn === 9) { if (btn === 9 || cardUp()) pressKey('Enter'); }   // A only on a card (A is the weapon in a race)
+    else if (btn === 3) pressKey('KeyQ');
+    else if (btn === 8) tapKey('KeyR');
+    else if (btn === 4 || btn === 5) padPick('track', btn === 5 ? 1 : -1);
+    else if (btn === 14 || btn === 15) padPick('car', btn === 15 ? 1 : -1);
+  });
+  onPadChange(on => {
+    document.body.classList.toggle('pad', on);
+    if (mode === 'race' && rd.box.classList.contains('on')) showRaceReady();   // swap the card's controls text
+  });
+
   /** v0.35 track look: sky (clear colour) + light levels while racing there; back to the arena's on the way out. */
   const ARENA_LIGHT = { clear: scene.clearColor.clone(), hemi: hemi.intensity, sun: sun.intensity };
   function applyTrackTheme(r: Race | null) {
@@ -527,10 +549,11 @@ async function main() {
   }
   function showRaceReady() {
     const p = race.player()!.bot;
+    const pad = padConnected();   // v0.43 controller connected: its layout on the card
     rd.title.innerHTML = `${race.def.name.toUpperCase()} <span class="vs">${RACE.laps} LAPS · 4 BOTS</span>`;   // v0.35 track name
     const rows: [string, string][] = [
-      ['DRIVE', MOBILE ? 'It drives itself forward: ◀ ▶ steer (tap = small turn, hold = full turn) · BRAKE held = slow down, then reverse' : 'W A S D (or gamepad left stick)'],   // v0.39 phone; v0.41 ◀ ▶
-      ['WEAPON', MOBILE ? 'Fires on its own when a bot is close in front of you' : p.weapon.hint('SPACE') + ' — weapons are on'],   // v0.41 phone auto-fire
+      ['DRIVE', pad ? 'Controller: RT gas · LT brake, then reverse · left stick steers' : MOBILE ? 'It drives itself forward: ◀ ▶ steer (tap = small turn, hold = full turn) · BRAKE held = slow down, then reverse' : 'W A S D (or gamepad left stick)'],   // v0.39 phone; v0.41 ◀ ▶
+      ['WEAPON', pad ? p.weapon.hint('A') + ' — weapons are on' : MOBILE ? 'Fires on its own when a bot is close in front of you' : p.weapon.hint('SPACE') + ' — weapons are on'],   // v0.41 phone auto-fire
       ['TO WIN', `First across the line after ${RACE.laps} laps. Hit, flip and wreck the others on the way.`],
       ['WRECKED', 'Destroyed, or off the track (into the pit, over a wall): back at the last checkpoint in 2 s, repaired.'],
       ['STUCK', 'Can\'t drive, or barely moving for 4 s (upside down, wedged, pinned): towed back to the last checkpoint, repaired.'],
@@ -539,7 +562,7 @@ async function main() {
       ['UPGRADES', 'Vacuumed cubes, laps (more for the back of the pack), damage and the gold SCRAP boxes fill your SCRAP meter: 25 = MOTOR, 60 = ARMOR plating, 100 = WEAPON power, 150 = a spiked RAM on your back that punches the first bot to get close behind you (once). Upgrades are cubes: hits knock them off. 25 more scrap rebuilds a lost one. Wrecked = all lost.'],   // v0.40
       ['TRACK', race.def.desc],   // v0.35
       ['WALLET', `${CUBE_ICON}<b class="cubes">${walletCubes()}</b> cubes · par ${fmtTime(parFor())}`],   // v0.38
-      MOBILE ? ['BUTTONS', 'CAM: change the view · RESTART: start over'] : ['KEYS', TESTER ? 'R: restart · Q: camera' : 'R: restart · B: lab · Q: camera'],
+      pad ? ['BUTTONS', 'Y: camera · Back / View: restart'] : MOBILE ? ['BUTTONS', 'CAM: change the view · RESTART: start over'] : ['KEYS', TESTER ? 'R: restart · Q: camera' : 'R: restart · B: lab · Q: camera'],
     ];
     // v0.37 tester: full card on the first race; after that just the track line (the pickers are what matter)
     // v0.39 phone: a short card that fits a landscape phone (pickers, how to drive, wallet)
@@ -547,7 +570,7 @@ async function main() {
       : TESTER && raceSeen ? rows.filter(([k]) => k === 'TRACK' || k === 'WALLET') : rows;
     rd.table.innerHTML = shown.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
     rd.start.style.display = '';
-    rd.small.textContent = MOBILE ? 'Pick a track and a car · tap START' : TESTER ? 'Pick a track and a car · Enter or click START' : 'Enter or click START · B: back to the lab';
+    rd.small.textContent = pad ? (TESTER ? 'LB / RB: track · D-pad ◀ ▶: car · A or Start: START · Y: camera · Back: restart' : 'A or Start: START · Y: camera · Back: restart') : MOBILE ? 'Pick a track and a car · tap START' : TESTER ? 'Pick a track and a car · Enter or click START' : 'Enter or click START · B: back to the lab';
     rd.box.classList.add('on');
   }
   /** v0.41 phone race camera distance (11 = the desktop race camera). */
@@ -556,6 +579,7 @@ async function main() {
    *  v0.41 (user): ◀ ▶ buttons steer (with the keyboard steering ramp: tap = small turn, hold = full turn);
    *  no FIRE button -- the weapon fires on its own when a bot is close in front (race.autoFire). */
   function phoneDrive(r: Racer, dt: number): Drive {
+    if (padConnected()) return steerRamp(readDrive('A', true), dt);   // v0.43 controller on a phone: no auto-gas / auto-fire
     const d = steerRamp(readDrive('A'), dt);
     return { throttle: TOUCH.brake ? -1 : 1, turn: d.turn, fire: d.fire || race.autoFire(r) };
   }
@@ -597,7 +621,7 @@ async function main() {
     scene.getPhysicsEngine()?.setTimeStep(PHYS_STEP);
     for (const r of race.racers) {
       if (r.down || r.bot.eliminated) continue;
-      const d: Drive = waiting ? { throttle: 0, turn: 0, fire: false } : r.human && !RACE_TEST.autopilot ? (MOBILE ? phoneDrive(r, dt) : steerRamp(readDrive('A'), dt)) : race.aiDrive(r, dt);
+      const d: Drive = waiting ? { throttle: 0, turn: 0, fire: false } : r.human && !RACE_TEST.autopilot ? (MOBILE ? phoneDrive(r, dt) : steerRamp(readDrive('A', true), dt))   /* v0.43 race: RT gas / LT brake */ : race.aiDrive(r, dt);
       runBot(r.bot, d, dt, now, waiting, false, phase === 'countdown');
     }
     race.update(dt, now, !waiting);
