@@ -25,6 +25,15 @@ import { CUBES } from './cubes.js';
 import { Race, RACE, TRACK_IDS, ordinal, fmtTime, type Racer, type TrackId } from './race.js';
 
 const MATCH_SECONDS = 180;
+/** v0.37 tester version: the page opens straight into a race (no lab, no arena battle). Track + car are picked on the
+ *  start card and on the results screen. Your lab: add ?lab=1 to the link (npm run dev always has the lab; ?tester=1
+ *  shows the tester version there). Phones keep the v0.32 phone menu (race is desktop only). */
+const QS0 = new URLSearchParams(location.search);
+const TESTER = !MOBILE && QS0.get('lab') !== '1' && (!import.meta.env.DEV || QS0.get('tester') === '1');
+/** Fixed tester settings (the user's own race settings, 2026-10-19): drive boost x3, race speed x3, AI Normal,
+ *  Cube Bots look, Neon Energy cubes, 8-bit (big). Not saved, so they never change the lab's own settings. */
+const TESTER_SET = { boost: 3, raceSpeed: 3, ai: 'normal' as Difficulty, track: 'oval' as TrackId | 'random', car: 'Flip Side' };
+const TESTER_KEY = 'bb.tester.v1';   // last track + car picked, remembered in this browser
 const RACE_TEST = { autopilot: false };
 /** v0.21: the drive is real wheels now -- see DRIVE / driveWheels in bot.ts. */
 const PHYS_STEP = 1 / 60;
@@ -187,6 +196,7 @@ async function main() {
   rd.start.addEventListener('click', beginCountdown);
   window.addEventListener('keydown', e => {
     if ((e.code === 'Enter' || e.code === 'NumpadEnter') && !e.repeat && phase === 'ready' && !inMenu() && mode !== 'course') { e.preventDefault(); beginCountdown(); }
+    else if ((e.code === 'Enter' || e.code === 'NumpadEnter') && !e.repeat && TESTER && mode === 'race' && rr.box.classList.contains('on')) { e.preventDefault(); startRace(true); }   // v0.37
   });
   /** Countdown display; returns true once FIGHT! is reached. */
   const tickCountdown = (now: number): boolean => {
@@ -369,11 +379,46 @@ async function main() {
     box: document.getElementById('rresults')!, table: document.getElementById('rr-table')!,
     again: document.getElementById('rr-again') as HTMLButtonElement, lab: document.getElementById('rr-lab') as HTMLButtonElement,
   };
-  rr.again.onclick = () => startRace();
+  rr.again.onclick = () => startRace(TESTER);   // v0.37 tester: the pickers are on the results screen, so straight to 3-2-1
   rr.lab.onclick = () => { leaveRace(); openLab(); };
   const RIVAL_IDS = ['B', 'C', 'D'] as const;
   let raceSpeedMul = 1;   // v0.34d lab RACE SPEED slider: x1 = the v0.34 race pace, up to x3
   let raceTrack: TrackId | 'random' = 'gp';   // v0.35 lab TRACK picker (Random = a new pick every race)
+
+  // ---------------- v0.37 TESTER pickers (track + car) ----------------
+  const tp = {
+    track: [document.getElementById('tp-track') as HTMLSelectElement, document.getElementById('tp-track2') as HTMLSelectElement],
+    car: [document.getElementById('tp-car') as HTMLSelectElement, document.getElementById('tp-car2') as HTMLSelectElement],
+  };
+  let testerCar = TESTER_SET.car;
+  if (TESTER) {
+    document.body.classList.add('tester');
+    let saved: { track?: string; car?: string } = {};
+    try { saved = JSON.parse(localStorage.getItem(TESTER_KEY) ?? '{}'); } catch { /* ignore */ }
+    raceTrack = saved.track === 'random' || TRACK_IDS.includes(saved.track as TrackId) ? saved.track as TrackId | 'random' : TESTER_SET.track;
+    testerCar = saved.car && PRESETS[saved.car] ? saved.car : TESTER_SET.car;
+    DRIVE.boost = TESTER_SET.boost; raceSpeedMul = TESTER_SET.raceSpeed; raceDiff = TESTER_SET.ai;
+    CUBES.on = true; CUBES.style = 'neonEnergy'; CUBES.size = 'big';
+    raceBuild = JSON.parse(JSON.stringify(PRESETS[testerCar]));
+    for (const sel of tp.track) sel.innerHTML = TRACK_IDS.map(id => `<option value="${id}">${races[id].def.name}</option>`).join('') + '<option value="random">Random</option>';
+    for (const sel of tp.car) sel.innerHTML = Object.keys(PRESETS).map(n => `<option value="${n}">${PRESETS[n].cosmetics.name}</option>`).join('');
+    const sync = () => { for (const sel of tp.track) sel.value = raceTrack; for (const sel of tp.car) sel.value = testerCar; };
+    sync();
+    const pick = (sel: HTMLSelectElement, rebuild: boolean) => {
+      if (tp.track.includes(sel)) raceTrack = sel.value as TrackId | 'random'; else testerCar = sel.value;
+      raceBuild = JSON.parse(JSON.stringify(PRESETS[testerCar]));
+      sync();
+      try { localStorage.setItem(TESTER_KEY, JSON.stringify({ track: raceTrack, car: testerCar })); } catch { /* ignore */ }
+      sel.blur(); canvas.focus();
+      if (rebuild) startRace();   // start card: rebuild the grid behind it with the new pick, card stays up
+    };
+    for (const sel of [...tp.track, ...tp.car]) {
+      sel.addEventListener('keydown', e => e.preventDefault());   // mouse only: R / Enter / WASD never change the pick by accident
+      sel.addEventListener('change', () => pick(sel, sel === tp.track[0] || sel === tp.car[0]));
+    }
+    rr.again.textContent = 'START ▶';
+    (rr.box.querySelector('.keys') as HTMLElement).textContent = 'Enter or START: next race · R: restart';
+  }
   /** v0.35 track look: sky (clear colour) + light levels while racing there; back to the arena's on the way out. */
   const ARENA_LIGHT = { clear: scene.clearColor.clone(), hemi: hemi.intensity, sun: sun.intensity };
   function applyTrackTheme(r: Race | null) {
@@ -386,7 +431,8 @@ async function main() {
     else scene.fogMode = Scene.FOGMODE_NONE;
   }
 
-  function startRace() {
+  /** skipCard (v0.37 tester): started from the results screen's START -- straight to 3-2-1. */
+  function startRace(skipCard = false) {
     if (!raceBuild) return;
     leaveCourse();
     if (mode === 'race') { race.dispose(); bots = []; fx.clear(); } else clearBots();
@@ -422,7 +468,8 @@ async function main() {
     cam.target = p.root.position.clone(); cam.radius = camCtl.radius(11);
     sun.position = p.root.position.add(SUN_OFFSET);
     drawRaceHud(performance.now(), true);
-    if (!raceSeen) showRaceReady(); else goCountdown();
+    if (TESTER && !skipCard) showRaceReady();   // v0.37 tester: track + car pickers before every START (first load, R)
+    else if (!raceSeen) showRaceReady(); else goCountdown();
     canvas.focus();
   }
   function leaveRace() {
@@ -452,11 +499,13 @@ async function main() {
       ['STUCK', 'Can\'t drive, or barely moving for 4 s (upside down, wedged, pinned): towed back to the last checkpoint, repaired.'],
       ['DAMAGE', 'Your damage score (DMG) counts every point of damage you deal to the other bots.'],
       ['TRACK', race.def.desc],   // v0.35
-      ['KEYS', 'R: restart · B: lab · Q: camera'],
+      ['KEYS', TESTER ? 'R: restart · Q: camera' : 'R: restart · B: lab · Q: camera'],
     ];
-    rd.table.innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+    // v0.37 tester: full card on the first race; after that just the track line (the pickers are what matter)
+    const shown = TESTER && raceSeen ? rows.filter(([k]) => k === 'TRACK') : rows;
+    rd.table.innerHTML = shown.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
     rd.start.style.display = '';
-    rd.small.textContent = 'Enter or click START · B: back to the lab';
+    rd.small.textContent = TESTER ? 'Pick a track and a car · Enter or click START' : 'Enter or click START · B: back to the lab';
     rd.box.classList.add('on');
   }
 
@@ -490,8 +539,8 @@ async function main() {
   function raceFrame(dt: number, now: number) {
     const rNow = isDown('KeyR'), rPress = rNow && !rWas; rWas = rNow;
     if (rPress) { startRace(); return; }
-    if (isDown('KeyB')) { leaveRace(); openLab(); return; }
-    helpEl.innerHTML = `WASD drive &nbsp;·&nbsp; SPACE weapon &nbsp;·&nbsp; Q camera &nbsp;·&nbsp; R restart &nbsp;·&nbsp; B lab`;
+    if (!TESTER && isDown('KeyB')) { leaveRace(); openLab(); return; }   // v0.37 no lab for testers
+    helpEl.innerHTML = `WASD drive &nbsp;·&nbsp; SPACE weapon &nbsp;·&nbsp; Q camera &nbsp;·&nbsp; R restart` + (TESTER ? '' : ` &nbsp;·&nbsp; B lab`);
     if (phase === 'countdown' && tickCountdown(now)) phase = 'fight';
     const waiting = phase !== 'fight';
     scene.getPhysicsEngine()?.setTimeStep(PHYS_STEP);
@@ -565,7 +614,7 @@ async function main() {
     rr.box.classList.add('on');
   }
 
-  openLab();
+  if (TESTER) startRace(); else openLab();   // v0.37 tester version: straight to the race start card
   // v0.33 test aids (not advertised): ?race=<preset> jumps straight into a race with that bot; &autopilot=1 lets the AI
   // drive your bot too. window.__bb exposes the race for the sandbox test runs.
   const qs = new URLSearchParams(location.search);

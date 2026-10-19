@@ -220,6 +220,12 @@
     @media (orientation: portrait) {
       body.mobile #rotate { display: flex; position: fixed; inset: 0; z-index: 100; background: #0b0d10; align-items: center; justify-content: center; text-align: center; font: 800 20px/1.5 system-ui, sans-serif; letter-spacing: .08em; color: #f2b134; padding: 24px; }
     }
+    /* v0.37 tester version (body.tester): race only, track + car pickers on the start card and the results */
+    .pick { display: none; gap: 10px; margin: 0 0 12px; }
+    body.tester .pick { display: flex; }
+    .pick label { flex: 1; display: flex; flex-direction: column; gap: 4px; font: 700 11px/1 system-ui, sans-serif; letter-spacing: .12em; color: #8fa3ad; }
+    .pick select { font: 600 14px/1.2 system-ui, sans-serif; background: #0b1013; color: #ffc400; border: 1px solid #ffc400; border-radius: 4px; padding: 9px 10px; cursor: pointer; }
+    body.tester #rr-lab { display: none; }
   </style>
 </head>
 <body>
@@ -230,6 +236,7 @@
   <div id="sign"></div>
   <div id="ready"><div class="card">
     <h2 id="rd-title"></h2>
+    <div class="pick"><label>TRACK <select id="tp-track"></select></label><label>CAR <select id="tp-car"></select></label></div>
     <table id="rd-table"></table>
     <button class="go" id="rd-start" type="button">START ▶</button>
     <div class="small" id="rd-small">Enter or click START · B: back to the lab</div>
@@ -301,6 +308,7 @@
     <h3>RACE RESULTS</h3>
     <div class="pad">
       <table id="rr-table"></table>
+      <div class="pick" style="margin:0"><label>NEXT TRACK <select id="tp-track2"></select></label><label>CAR <select id="tp-car2"></select></label></div>
       <div class="row"><span class="keys">R race again · B lab</span><span><button id="rr-again" type="button">RACE AGAIN ▶</button> <button id="rr-lab" type="button">◀ LAB</button></span></div>
     </div>
   </div>
