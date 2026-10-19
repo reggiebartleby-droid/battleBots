@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 import './settings.js';   // v0.30: FIRST -- clears old saved settings once, before any module reads them
 import {
-  ArcRotateCamera, Color4, DirectionalLight, Engine, HavokPlugin, HemisphericLight, Quaternion, Scene, Vector3,
+  ArcRotateCamera, Color3, Color4, DirectionalLight, Engine, HavokPlugin, HemisphericLight, Quaternion, Scene, Vector3,
 } from '@babylonjs/core';
 import HavokPhysics from '@babylonjs/havok';
 import type { BotBuild } from '../../src/core/types.js';
@@ -381,6 +381,9 @@ async function main() {
     scene.clearColor = th?.sky ? Color4.FromHexString(th.sky[1] + 'ff') : ARENA_LIGHT.clear.clone();
     hemi.intensity = th?.hemi ?? ARENA_LIGHT.hemi;
     sun.intensity = th?.sun ?? ARENA_LIGHT.sun;
+    // v0.36 rain haze (Night City); off everywhere else
+    if (th?.fog) { scene.fogMode = Scene.FOGMODE_EXP2; scene.fogDensity = th.fog.density; scene.fogColor = Color3.FromHexString(th.fog.color); }
+    else scene.fogMode = Scene.FOGMODE_NONE;
   }
 
   function startRace() {
@@ -498,6 +501,7 @@ async function main() {
       runBot(r.bot, d, dt, now, waiting, false, phase === 'countdown');
     }
     race.update(dt, now, !waiting);
+    if (race.def.theme.fog) { const f = race.flash; hemi.intensity = race.def.theme.hemi + f * 1.6; sun.intensity = race.def.theme.sun + f * 0.8; }   // v0.36 lightning
     bots = race.bots();
     const pr = race.player()!;
     const target = pr.down ? (pr.bot.eliminated?.pos ?? pr.bot.root.position) : pr.bot.root.position;

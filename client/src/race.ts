@@ -24,6 +24,7 @@ import { buildBot, disposeBot, dropBot, forward, freezeBot, upVector, raceTurn, 
 import { cubeKnockout, cubeSkinOf } from './cubes.js';
 import { DIFFICULTY, type Difficulty } from './ai.js';
 import { Raceway } from './raceway.js';
+import { NightCity } from './city.js';
 import type { Drive } from './input.js';
 import type { Combat } from './combat.js';
 import type { Fx } from './fx.js';
@@ -83,7 +84,17 @@ export type TrackId = 'gp' | 'oval';
 export interface TrackTheme {
   sky: [string, string] | null;   // sky dome colours (top, horizon); null = the black night of the arena
   hemi: number; sun: number;      // light intensities while racing here
+  fog?: { color: string; density: number };   // v0.36 exp2 fog (rain haze)
 }
+/** v0.36 wet track (Night City): rain everywhere except the dry stretches, wetter patches. Traction (accelerating,
+ *  braking) is never touched -- only sideways grip, so a bot slides wide but launches like on the dry. */
+export interface WetDef {
+  rainGrip: number; patchGrip: number;     // x the track's sideGrip
+  rainSlide: number; patchSlide: number;   // 1/s: how fast a sideways slide dies out (lower = longer slide)
+  dry: [number, number][];                 // track s ranges under cover (the tunnel)
+  patches: { s0: number; s1: number; u: number; w: number }[];   // wet patches: s range, centre offset, width
+}
+export type WetKind = 'dry' | 'rain' | 'patch';
 export interface TrackDef {
   id: TrackId; name: string; desc: string;
   origin: Vector3;
@@ -97,12 +108,16 @@ export interface TrackDef {
   draft: boolean;                 // slipstream boost behind another bot
   aiCorner: number;               // AI throttle cap going into a corner
   theme: TrackTheme;
-  look: 'neon' | 'raceway';       // walls / edges / ground style
+  look: 'neon' | 'raceway' | 'city';   // walls / edges / ground style (v0.36 city = Night City)
+  wet?: WetDef;                   // v0.36
 }
 const OVAL = { straight: 44, r: 16 };
+/** v0.36 Night City tunnel over the start straight (local x range; dry inside, roof collider). */
+export const CITY_TUNNEL = { x0: 7, x1: 25, roof: 4.6, halfW: 4.4 };
 export const TRACKS: Record<TrackId, TrackDef> = {
   gp: {
-    id: 'gp', name: 'Grand Prix', desc: 'Banked turn · ramp jump over a pit · kill saws · hammer · hairpin',
+    // v0.36 (user): Night City theme -- rain, night, neon, streetlights, a dry tunnel, slippery wet patches
+    id: 'gp', name: 'Night City Grand Prix', desc: 'Rain + wet patches (you slide wide) · dry tunnel · banked turn · ramp jump over a pit · kill saws · hammer · hairpin',
     origin: RACE_ORIGIN, width: 7, bankDeg: 15,
     segs: [
       { tag: 'start', len: START_LEN },
@@ -115,7 +130,17 @@ export const TRACKS: Record<TrackId, TrackDef> = {
     ],
     startX: XE - START_LEN, finishS: START_LEN - XE,
     friction: 0.8, sideGrip: 10, draft: false, aiCorner: 0.6,
-    theme: { sky: null, hemi: 0.5, sun: 1.1 }, look: 'neon',
+    theme: { sky: ['#05030c', '#2b1636'], hemi: 0.3, sun: 0.5, fog: { color: '#1a1226', density: 0.0055 } }, look: 'city',
+    wet: {
+      rainGrip: 0.6, patchGrip: 0.05, rainSlide: 5, patchSlide: 0.6,
+      dry: [[CITY_TUNNEL.x0, CITY_TUNNEL.x1]],   // start straight: track s = x
+      patches: [
+        { s0: 26.5, s1: 29.5, u: 1.4, w: 3.6 },    // tunnel exit, into the banked turn
+        { s0: 41, s1: 50, u: 0, w: 4 },            // middle of the banked turn
+        { s0: 86, s1: 94, u: 0, w: 4.4 },          // S-bends
+        { s0: 114, s1: 120, u: -1.4, w: 3.6 },     // hairpin, outside line (take the inside to miss it)
+      ],
+    },
   },
   // v0.35 (user): wide banked oval, raceway look (asphalt, kerbs, grandstands, pit wall, checkered gantry), daytime;
   // high grip + slipstream boost. Props in the Neon Energy cube look.
@@ -197,6 +222,7 @@ export interface Racer {
   offSince?: number;
   stuckSince?: number;   // v0.34 immobilized / barely moving since
   draft?: number;        // v0.35 in a slipstream: the flat speed of the bot ahead (undefined = not drafting)
+  wet?: WetKind;         // v0.36 what's under it (Night City): dry / rain / a wet patch
   wrecks: { ko: number; off: number; stuck: number };
   ai: { stuckT: number; escapeT: number; escapeTurn: number; nextThink: number; last: Drive; brawler: boolean };   // v0.34 brawler: leans into rivals
 }
@@ -233,6 +259,9 @@ export class Race {
 
   readonly def: TrackDef;
   private raceway: Raceway | null = null;
+  private city: NightCity | null = null;
+  /** v0.36 lightning flash 0..1 (main.ts adds it to the light) */
+  get flash() { return this.city?.flash ?? 0; }
   get laps() { return RACE.laps; }
   readonly origin: Vector3;
   readonly width: number;
@@ -243,7 +272,7 @@ export class Race {
     const line = buildLine(this.def);
     this.samples = line.samples; this.length = line.length;
     const xs = this.samples.map(p => p.x), zs = this.samples.map(p => p.z);
-    const pad = this.width / 2 + (this.def.look === 'raceway' ? 16 : 5);   // v0.35 oval: room round the track for stands + pit lane
+    const pad = this.width / 2 + (this.def.look === 'raceway' ? 16 : this.def.look === 'city' ? 9 : 5);   // v0.35 oval: room round the track for stands + pit lane
     this.bounds = { x0: Math.min(...xs) - pad, x1: Math.max(...xs) + pad, z0: Math.min(...zs) - pad, z1: Math.max(...zs) + pad };
     this.wallNode = new TransformNode('race_walls_' + track, scene);
     this.makeMats();
@@ -256,6 +285,7 @@ export class Race {
     if (this.has('hazard')) this.buildHazards();
     if (track === 'gp') this.buildIsland();
     if (this.def.look === 'raceway') this.raceway = new Raceway(scene, this);   // v0.35b detailed scenery (raceway.ts)
+    if (this.def.look === 'city') { this.buildTunnelRoof(); this.city = new NightCity(scene, this); }   // v0.36 (city.ts)
     this.pickCheckpoints();
     this.setVisible(false);
   }
@@ -270,6 +300,7 @@ export class Race {
     for (const m of this.meshes) m.setEnabled(on);
     this.hammer?.pivot.setEnabled(on);
     this.raceway?.setVisible(on);
+    this.city?.setVisible(on);
   }
 
   // ------------------------------------------------------------------------------------------------- geometry
@@ -296,6 +327,14 @@ export class Race {
     m('grass', '#1d3a1b', false); m('asphalt', '#33373d', false).backFaceCulling = false; m('bankAsphalt', '#3a3f46', false).backFaceCulling = false;
     m('concrete', '#aeb4ba', false); m('stand', '#141a26', false); m('pitlane', '#2a2d33', false); m('garage', '#1b2130', false);
     m('cyan', '#4dd2ff', true); m('pink', '#ff2bd6', true); m('lime', '#39ff14', true); m('violet', '#b88cff', true); m('orange', '#ff9f1c', true);
+    if (this.def.look === 'city') {   // v0.36 wet night asphalt: dark, glossy
+      for (const k of ['road', 'bank', 'ramp', 'ground']) {
+        const mm = this.mats[k];
+        mm.diffuseColor = Color3.FromHexString(k === 'ground' ? '#16181d' : k === 'ramp' ? '#2b2f36' : '#1c1f25');
+        mm.specularColor = new Color3(0.6, 0.58, 0.7); mm.specularPower = 120;   // tight wet highlights
+      }
+      this.mats.black.diffuseColor = Color3.FromHexString('#4a4e56');   // island = a concrete median
+    }
     const glass = new StandardMaterial('race_glass', this.scene);
     glass.disableLighting = true; glass.alpha = 0.45; glass.alphaMode = Constants.ALPHA_ADD; glass.backFaceCulling = false;
     glass.emissiveColor = Color3.FromHexString('#00e5ff').scale(0.07);
@@ -335,12 +374,13 @@ export class Race {
     ];
     for (const [x0, x1, z0, z1] of rects) {
       if (x1 - x0 < 0.01 || z1 - z0 < 0.01) continue;
-      this.slab('floor', this.w((x0 + x1) / 2, -T / 2, (z0 + z1) / 2), Vector3.Right(), Vector3.Up(), Vector3.Forward(), { w: x1 - x0, h: T, d: z1 - z0 }, 'ground', true);
+      this.slab('floor', this.w((x0 + x1) / 2, -T / 2, (z0 + z1) / 2), Vector3.Right(), Vector3.Up(), Vector3.Forward(), { w: x1 - x0, h: T, d: z1 - z0 }, 'ground', true).receiveShadows = true;
     }
     // the pit: a glowing hole
     const pit = MeshBuilder.CreateBox('race_pit', { width: hx1 - hx0, height: 0.1, depth: hw * 2 }, this.scene);
     pit.position = this.w((hx0 + hx1) / 2, -4, hz);
     this.keep(pit, 'pit');
+    if (this.def.look === 'city') return;   // v0.36 city: streets instead of the grid (city.ts)
     // faint floor grid round the track (visual)
     const lines: Mesh[] = [];
     for (let x = Math.ceil(b.x0 / 4) * 4; x <= b.x1; x += 4) lines.push(this.bar(this.w(x, 0.002, b.z0), this.w(x, 0.002, b.z1), 0.03));
@@ -421,7 +461,7 @@ export class Race {
     this.aggs.push(agg);
     // banking stripes (visual): lines along the turn every metre of width
     const lines: Mesh[] = [];
-    const stripes = this.def.look === 'raceway' ? [] : [-1.75, 0, 1.75];   // v0.35 raceway: plain asphalt (kerbs + lines in buildMarkings)
+    const stripes = this.def.look === 'raceway' ? [] : this.def.look === 'city' ? [0] : [-1.75, 0, 1.75];   // v0.36 city: one centre line   // v0.35 raceway: plain asphalt (kerbs + lines in buildMarkings)
     for (const u of stripes) for (let i = 0; i < rows.length - 1; i += 2) {
       const a = rows[i], b = rows[Math.min(i + 2, rows.length - 1)];
       const ya = Math.max(0, half - u) * Math.tan(a.bank), yb = Math.max(0, half - u) * Math.tan(b.bank);
@@ -623,6 +663,21 @@ export class Race {
     this.hammer = { pivot, ring, target, struck: false };
   }
 
+  /** v0.36 Night City: the tunnel roof is solid (a bot launched up bounces off it). The rest of the tunnel is in city.ts. */
+  private buildTunnelRoof() {
+    const T = CITY_TUNNEL;
+    this.slab('tunnelroof', this.w((T.x0 + T.x1) / 2, T.roof + 0.3, 0), Vector3.Right(), Vector3.Up(), Vector3.Forward(), { w: T.x1 - T.x0, h: 0.6, d: T.halfW * 2 }, 'ground', false, 0.3).isVisible = false;
+  }
+
+  /** v0.36 what's under a racer: dry (tunnel / no rain), rain, or a wet patch. */
+  wetAt(s: number, u: number): WetKind {
+    const W = this.def.wet;
+    if (!W) return 'dry';
+    for (const [a, b] of W.dry) if (s >= a && s <= b) return 'dry';
+    for (const p of W.patches) if (s >= p.s0 && s <= p.s1 && Math.abs(u - p.u) <= p.w / 2) return 'patch';
+    return 'rain';
+  }
+
   private pickCheckpoints() {
     const L = this.length;
     if (this.def.id !== 'gp') {   // v0.35 no hazards: a checkpoint every ~10 m on the flat (never on a banked turn)
@@ -731,6 +786,7 @@ export class Race {
       r.prog += ds;
       const p = this.samples[idx], n = nrm(p.h);
       r.u = (b.root.position.x - this.origin.x - p.x) * n.x + (b.root.position.z - this.origin.z - p.z) * n.z;
+      r.wet = this.wetAt(p.s, r.u);   // v0.36
       // lap line
       if (go && r.finished === undefined) {
         const lapsNow = Math.floor(r.prog / L);
@@ -764,6 +820,7 @@ export class Race {
     else this.idleHazards(dt);
     this.findDrafts(go);
     this.raceway?.update(dt, go);   // v0.35b crowd, flags, blimp, start lights, jumbotron
+    this.city?.update(dt, go);      // v0.36 rain, traffic, crowd, lightning, neon
   }
 
   /** v0.35 slipstream (tracks with draft on): who is right behind whom. The push itself is in beforePhysics. */
@@ -826,6 +883,7 @@ export class Race {
 
   // ------------------------------------------------------------------------------------------------- v0.34 race physics
   private spinPrev = new Map<Bot, number>();
+  private latPrev = new Map<Bot, number>();   // v0.36 wet slide
   /** Every physics sub-step, before the step: stabilizer + note each spinner's speed. */
   beforePhysics(dt: number) {
     const free = Math.max(RACE.stabFreeDeg, this.def.bankDeg + 6) * Math.PI / 180;   // v0.35 never fights a steeper bank
@@ -847,6 +905,7 @@ export class Race {
       const arcade = DRIVE.raceArcade;
       const p = this.samples[r.idx];
       const grounded = arcade && up.y > 0.6 && b.root.position.y - this.origin.y - this.surfaceY(p, r.u) < REST_Y + RACE.groundGap;
+      if (!grounded) this.latPrev.delete(b);   // v0.36 airborne / tipped: no slide carried over
       if (grounded) {
         const target = (raceTurn.get(b) ?? 0) * RACE.turnRate;
         yaw += (target - yaw) * Math.min(1, RACE.turnResp * dt);
@@ -855,7 +914,20 @@ export class Race {
         if (right.lengthSquared() > 1e-4) {
           right.normalize();
           const v = b.body.getLinearVelocity();
-          const dv = right.scale(Vector3.Dot(v, right) * Math.min(1, this.def.sideGrip * dt));
+          // v0.36 wet (Night City): less sideways grip, and a sideways slide carries on (the wheels' own friction would
+          // stop it at once) -- dying out at rainSlide / patchSlide per second. Forward grip is never touched.
+          const W = this.def.wet, wk = r.wet ?? 'dry';
+          const lat = Vector3.Dot(v, right);
+          let latOut = lat * (1 - Math.min(1, this.def.sideGrip * (W && wk !== 'dry' ? (wk === 'patch' ? W.patchGrip : W.rainGrip) : 1) * dt));
+          const prev = this.latPrev.get(b);
+          if (W && wk !== 'dry' && prev !== undefined && prev * lat >= 0) {
+            const keep = prev * Math.exp(-(wk === 'patch' ? W.patchSlide : W.rainSlide) * dt);
+            if (Math.abs(keep) > Math.abs(latOut)) latOut = keep;
+          }
+          // the sideways speed we leave it with (the wheels' friction eats it during the step; next step restores
+          // what's left of the slide)
+          if (W && wk !== 'dry') this.latPrev.set(b, latOut); else this.latPrev.delete(b);
+          const dv = right.scale(lat - latOut);
           // v0.35 slipstream: a push forward while tucked in behind a bot, up to a bit faster than it
           if (r.draft !== undefined) {
             const f = Vector3.Cross(right, Vector3.Up());   // forward, flat
