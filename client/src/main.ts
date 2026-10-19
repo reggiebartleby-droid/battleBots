@@ -21,7 +21,7 @@ import { CamControl } from './cam.js';
 import { Builder, PRESETS } from './builder.js';
 import { Course, STATIONS, COURSE_ORIGIN, COURSE, type StationId, type RunResult } from './course.js';
 import { aiDrive, type Difficulty } from './ai.js';
-import { MOBILE, MobileMenu, setupTouchControls } from './mobile.js';
+import { MOBILE, MobileMenu, setupTouchControls, goFullscreen, TOUCH } from './mobile.js';
 import { CUBES } from './cubes.js';
 import { Race, RACE, TRACK_IDS, ordinal, fmtTime, type Racer, type TrackId } from './race.js';
 
@@ -30,7 +30,8 @@ const MATCH_SECONDS = 180;
  *  start card and on the results screen. Your lab: add ?lab=1 to the link (npm run dev always has the lab; ?tester=1
  *  shows the tester version there). Phones keep the v0.32 phone menu (race is desktop only). */
 const QS0 = new URLSearchParams(location.search);
-const TESTER = !MOBILE && QS0.get('lab') !== '1' && (!import.meta.env.DEV || QS0.get('tester') === '1');
+// v0.39 (user): phones get the race only too (race + track / car pickers, no menu, no arena) -- ?mobile=1 tries it on the PC
+const TESTER = QS0.get('lab') !== '1' && (MOBILE || !import.meta.env.DEV || QS0.get('tester') === '1');
 /** Fixed tester settings (the user's own race settings, 2026-10-19): drive boost x3, race speed x3, AI Normal,
  *  Cube Bots look, Neon Energy cubes, 8-bit (big). Not saved, so they never change the lab's own settings. */
 const TESTER_SET = { boost: 3, raceSpeed: 3, ai: 'normal' as Difficulty, track: 'oval' as TrackId | 'random', car: 'Flip Side' };
@@ -194,7 +195,7 @@ async function main() {
     for (const b of bots) if (b.weapon.mode === 'spinner' && !b.weapon.motorDead) b.weapon.spinning = true;
     canvas.focus();
   };
-  rd.start.addEventListener('click', beginCountdown);
+  rd.start.addEventListener('click', () => { if (mode === 'race') goFullscreen(); beginCountdown(); });   // v0.39 phone: full screen on START
   window.addEventListener('keydown', e => {
     if ((e.code === 'Enter' || e.code === 'NumpadEnter') && !e.repeat && phase === 'ready' && !inMenu() && mode !== 'course') { e.preventDefault(); beginCountdown(); }
     else if ((e.code === 'Enter' || e.code === 'NumpadEnter') && !e.repeat && TESTER && mode === 'race' && rr.box.classList.contains('on')) { e.preventDefault(); startRace(true); }   // v0.37
@@ -381,7 +382,7 @@ async function main() {
     again: document.getElementById('rr-again') as HTMLButtonElement, lab: document.getElementById('rr-lab') as HTMLButtonElement,
     cubes: document.getElementById('rr-cubes')!,   // v0.38
   };
-  rr.again.onclick = () => startRace(TESTER);   // v0.37 tester: the pickers are on the results screen, so straight to 3-2-1
+  rr.again.onclick = () => { goFullscreen(); startRace(TESTER); };   // v0.37 tester: the pickers are on the results screen, so straight to 3-2-1
   rr.lab.onclick = () => { leaveRace(); openLab(); };
   const RIVAL_IDS = ['B', 'C', 'D'] as const;
   let raceSpeedMul = 1;   // v0.34d lab RACE SPEED slider: x1 = the v0.34 race pace, up to x3
@@ -440,7 +441,7 @@ async function main() {
       sel.addEventListener('change', () => pick(sel, sel === tp.track[0] || sel === tp.car[0]));
     }
     rr.again.textContent = 'START ▶';
-    (rr.box.querySelector('.keys') as HTMLElement).textContent = 'Enter or START: next race · R: restart';
+    (rr.box.querySelector('.keys') as HTMLElement).textContent = MOBILE ? 'START: next race' : 'Enter or START: next race · R: restart';
   }
   /** v0.35 track look: sky (clear colour) + light levels while racing there; back to the arena's on the way out. */
   const ARENA_LIGHT = { clear: scene.clearColor.clone(), hemi: hemi.intensity, sun: sun.intensity };
@@ -517,8 +518,8 @@ async function main() {
     const p = race.player()!.bot;
     rd.title.innerHTML = `${race.def.name.toUpperCase()} <span class="vs">${RACE.laps} LAPS · 4 BOTS</span>`;   // v0.35 track name
     const rows: [string, string][] = [
-      ['DRIVE', 'W A S D (or gamepad left stick)'],
-      ['WEAPON', p.weapon.hint('SPACE') + ' — weapons are on'],
+      ['DRIVE', MOBILE ? 'It drives itself forward: STEER slider (bottom left) · BRAKE held = slow down, then reverse' : 'W A S D (or gamepad left stick)'],   // v0.39 phone
+      ['WEAPON', p.weapon.hint(MOBILE ? 'FIRE' : 'SPACE') + ' — weapons are on'],
       ['TO WIN', `First across the line after ${RACE.laps} laps. Hit, flip and wreck the others on the way.`],
       ['WRECKED', 'Destroyed, or off the track (into the pit, over a wall): back at the last checkpoint in 2 s, repaired.'],
       ['STUCK', 'Can\'t drive, or barely moving for 4 s (upside down, wedged, pinned): towed back to the last checkpoint, repaired.'],
@@ -526,14 +527,21 @@ async function main() {
       ['CUBES', 'Your bot\'s cubes are your money: −1 for each one knocked off you (wrecked = all of them). Drive near loose cubes to vacuum them up: +1 each, and they repair you. At the line you earn cubes for place, damage and time.'],   // v0.38
       ['TRACK', race.def.desc],   // v0.35
       ['WALLET', `${CUBE_ICON}<b class="cubes">${walletCubes()}</b> cubes · par ${fmtTime(parFor())}`],   // v0.38
-      ['KEYS', TESTER ? 'R: restart · Q: camera' : 'R: restart · B: lab · Q: camera'],
+      MOBILE ? ['BUTTONS', 'CAM: change the view · RESTART: start over'] : ['KEYS', TESTER ? 'R: restart · Q: camera' : 'R: restart · B: lab · Q: camera'],
     ];
     // v0.37 tester: full card on the first race; after that just the track line (the pickers are what matter)
-    const shown = TESTER && raceSeen ? rows.filter(([k]) => k === 'TRACK' || k === 'WALLET') : rows;
+    // v0.39 phone: a short card that fits a landscape phone (pickers, how to drive, wallet)
+    const shown = MOBILE ? rows.filter(([k]) => (raceSeen ? ['WALLET'] : ['DRIVE', 'WEAPON', 'WALLET']).includes(k))
+      : TESTER && raceSeen ? rows.filter(([k]) => k === 'TRACK' || k === 'WALLET') : rows;
     rd.table.innerHTML = shown.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
     rd.start.style.display = '';
-    rd.small.textContent = TESTER ? 'Pick a track and a car · Enter or click START' : 'Enter or click START · B: back to the lab';
+    rd.small.textContent = MOBILE ? 'Pick a track and a car · tap START' : TESTER ? 'Pick a track and a car · Enter or click START' : 'Enter or click START · B: back to the lab';
     rd.box.classList.add('on');
+  }
+  /** v0.39 phone race drive: auto-gas (BRAKE held = brake / reverse), steering from the STEER slider, FIRE. */
+  function phoneDrive(): Drive {
+    const d = readDrive('A');
+    return { throttle: TOUCH.brake ? -1 : 1, turn: d.turn, fire: d.fire };
   }
 
   /** v0.34c race only (user): keyboard steering ramp. A tap turns at RAMP.start, holding builds to full turn over
@@ -573,7 +581,7 @@ async function main() {
     scene.getPhysicsEngine()?.setTimeStep(PHYS_STEP);
     for (const r of race.racers) {
       if (r.down || r.bot.eliminated) continue;
-      const d: Drive = waiting ? { throttle: 0, turn: 0, fire: false } : r.human && !RACE_TEST.autopilot ? steerRamp(readDrive('A'), dt) : race.aiDrive(r, dt);
+      const d: Drive = waiting ? { throttle: 0, turn: 0, fire: false } : r.human && !RACE_TEST.autopilot ? (MOBILE ? phoneDrive() : steerRamp(readDrive('A'), dt)) : race.aiDrive(r, dt);
       runBot(r.bot, d, dt, now, waiting, false, phase === 'countdown');
     }
     race.update(dt, now, !waiting);
@@ -656,6 +664,11 @@ async function main() {
     }).join('');
     // v0.38 your reward, line by line, and the wallet
     const p = paid;
+    if (MOBILE && p) {   // v0.39 phone: one line so START fits on the screen
+      rr.cubes.innerHTML = `<div class="rw-line">${CUBE_ICON}${ordinal(p.place)} ${signed(p.placeCubes)} · dmg ${signed(p.dmgCubes)} · time ${signed(p.timeCubes)} · got ${signed(p.got)} · lost ${signed(-p.lost)} = <b>${signed(p.total)}</b> · wallet <b>${walletAfter}</b></div>`;
+      rr.box.classList.add('on');
+      return;
+    }
     rr.cubes.innerHTML = p ? `<div class="rw-h">${CUBE_ICON}YOUR CUBES</div><table class="rw">`
       + `<tr><td>PLACE</td><td>${ordinal(p.place)}</td><td>${signed(p.placeCubes)}</td></tr>`
       + `<tr><td>DAMAGE</td><td>${Math.round(p.dmg)} dealt</td><td>${signed(p.dmgCubes)}</td></tr>`

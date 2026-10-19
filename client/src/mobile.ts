@@ -1,4 +1,8 @@
 /**
+ * v0.39 (user): phones get the race only (no arena, no menu) -- same as the desktop tester version: track + car pickers
+ * on the start card and the results. Race controls: auto-gas, a left-right STEER slider (left thumb), FIRE + BRAKE
+ * (right thumb; BRAKE held = slow down, then reverse).
+ *
  * v0.32 quick-and-dirty phone / tablet mode (user: not meant for phones, but "somewhat playable" there).
  * On when the browser says it's a phone or tablet. ?mobile=1 forces it on (test on the PC), ?desktop=1 forces it off.
  *  - Lab: a simple menu (your bot, opponent, AI level, FIGHT) -- no part editing; no test course.
@@ -19,15 +23,21 @@ function detect(): boolean {
 }
 export const MOBILE = detect();
 if (MOBILE) document.body.classList.add('mobile');
+/** v0.39 full screen on a phone (needs a tap; iPhones don't support it -- ignored there). */
+export function goFullscreen() {
+  if (!MOBILE) return;
+  try { if (!document.fullscreenElement) void document.documentElement.requestFullscreen?.().catch(() => {}); } catch { /* not supported */ }
+}
 
 /** Touch drive state, read by input.ts (merged with keyboard / gamepad like the gamepad is). */
-export const TOUCH = { throttle: 0, turn: 0, fireHeld: false, fireLatch: false };
+export const TOUCH = { throttle: 0, turn: 0, fireHeld: false, fireLatch: false, brake: false };   // v0.39 brake (race)
 
 /** Short virtual key presses for the RESTART / MENU buttons (input.ts isDown sees them). */
 export const VKEYS = new Set<string>();
 export function tapKey(code: string, ms = 160) { VKEYS.add(code); setTimeout(() => VKEYS.delete(code), ms); }
 
 const STICK_R = 60;      // px the knob can travel from the centre
+const STEER_R = 95;      // v0.39 race: px the knob can travel sideways on the STEER slider
 const DEADZONE = 0.12;
 
 /** Joystick + FIRE + small buttons. onCam cycles the camera. */
@@ -39,10 +49,17 @@ export function setupTouchControls(onCam: () => void) {
   const move = (e: PointerEvent) => {
     const r = zone.getBoundingClientRect();
     let dx = e.clientX - (r.left + r.width / 2), dy = e.clientY - (r.top + r.height / 2);
+    const dz = (v: number) => Math.abs(v) < DEADZONE ? 0 : (v - Math.sign(v) * DEADZONE) / (1 - DEADZONE);
+    if (document.body.classList.contains('inrace')) {   // v0.39 race: steer only (auto-gas), left-right slider
+      dx = Math.max(-STEER_R, Math.min(STEER_R, dx));
+      knob.style.transform = `translate(${dx}px, 0px)`;
+      TOUCH.throttle = 0;
+      TOUCH.turn = dz(dx / STEER_R);
+      return;
+    }
     const len = Math.hypot(dx, dy);
     if (len > STICK_R) { dx *= STICK_R / len; dy *= STICK_R / len; }
     knob.style.transform = `translate(${dx}px, ${dy}px)`;
-    const dz = (v: number) => Math.abs(v) < DEADZONE ? 0 : (v - Math.sign(v) * DEADZONE) / (1 - DEADZONE);
     TOUCH.throttle = dz(-dy / STICK_R);
     TOUCH.turn = dz(dx / STICK_R);
   };
@@ -58,6 +75,10 @@ export function setupTouchControls(onCam: () => void) {
   const fire = document.getElementById('m-fire')!;
   fire.addEventListener('pointerdown', e => { e.preventDefault(); try { fire.setPointerCapture(e.pointerId); } catch { /* ok */ } TOUCH.fireHeld = true; TOUCH.fireLatch = true; fire.classList.add('down'); });
   for (const ev of ['pointerup', 'pointercancel']) fire.addEventListener(ev, () => { TOUCH.fireHeld = false; fire.classList.remove('down'); });
+  // v0.39 race: BRAKE (held = brake, then reverse)
+  const brake = document.getElementById('m-brake')!;
+  brake.addEventListener('pointerdown', e => { e.preventDefault(); try { brake.setPointerCapture(e.pointerId); } catch { /* ok */ } TOUCH.brake = true; brake.classList.add('down'); });
+  for (const ev of ['pointerup', 'pointercancel']) brake.addEventListener(ev, () => { TOUCH.brake = false; brake.classList.remove('down'); });
 
   document.getElementById('m-cam')!.addEventListener('click', onCam);
   document.getElementById('m-restart')!.addEventListener('click', () => tapKey('KeyR'));

@@ -216,6 +216,33 @@
     body.mobile #ready .card { padding: 12px 16px; max-height: calc(100% - 24px); overflow: auto; }
     body.mobile #ready table { font-size: 12px; }
     body.mobile #ready .go { margin: 10px auto 4px; padding: 12px 36px; }
+    /* v0.39 phone race: STEER slider (left), FIRE + BRAKE (right); compact race HUD, minimap, cards */
+    #m-brake { display: none; }
+    body.mobile.inrace #m-stick { width: 250px; height: 92px; border-radius: 46px; bottom: 18px; }
+    body.mobile.inrace #m-stick::before { content: 'STEER'; position: absolute; left: 0; right: 0; top: -16px; text-align: center; font: 700 10px/1 system-ui, sans-serif; letter-spacing: .2em; color: rgba(62,230,196,.7); }
+    body.mobile.inrace #m-knob { width: 64px; height: 64px; margin: -32px 0 0 -32px; }
+    body.mobile.inrace #m-brake { display: block; position: absolute; right: calc(max(20px, env(safe-area-inset-right)) + 128px); bottom: 22px; width: 86px; height: 86px; border-radius: 50%; border: 3px solid #f2b134; background: rgba(242,177,52,.18); color: #fff; font: 900 14px/1 system-ui, sans-serif; letter-spacing: .08em; pointer-events: auto; touch-action: none; }
+    body.mobile.inrace #m-brake.down { background: rgba(242,177,52,.6); box-shadow: 0 0 18px #f2b134; }
+    body.mobile.inrace #m-fire { width: 110px; height: 110px; bottom: 26px; }
+    body.mobile #m-menu { display: none; }
+    body.mobile #rresults.on ~ #m-controls { display: none; }
+    body.mobile #ready.on ~ #rhud, body.mobile #ready.on ~ #rmap, body.mobile:has(#rresults.on) #rhud, body.mobile:has(#rresults.on) #rmap { display: none !important; }
+    body.mobile #rresults h3 { padding: 7px 10px; }
+    body.mobile #rr-table th:nth-child(4), body.mobile #rr-table td:nth-child(4) { display: none; }   /* best lap */
+    body.mobile #rr-cubes .rw-line { font-size: 12px; color: #d7e3e6; } body.mobile #rr-cubes .rw-line b { color: #ffc400; }
+    body.mobile #ready .card h2 { margin: 0 0 8px; font-size: 20px; }   /* results: pickers + START, no controls on top */
+    body.mobile #rhud { top: 6px; left: 8px; padding: 5px 9px 6px; font-size: 11px; line-height: 1.45; min-width: 0; }
+    body.mobile #rhud .pos { font-size: 26px; }
+    body.mobile #rhud ol { display: none; }
+    body.mobile #rmap { width: 150px; height: 75px; top: 6px; right: 8px; }
+    body.mobile #m-btns { bottom: auto; top: 8px; }
+    body.mobile #rresults { width: min(560px, calc(100% - 16px)); max-height: calc(100% - 16px); overflow: auto; }
+    body.mobile #rresults .pad { padding: 8px 10px; gap: 8px; }
+    body.mobile #rresults table { font-size: 12px; }
+    body.mobile #rresults td { padding: 3px 5px; }
+    body.mobile #rresults button { padding: 12px 22px; font-size: 14px; }
+    body.mobile .pick select { font-size: 15px; padding: 8px; }
+    body.mobile .pick { margin-bottom: 8px; }
     /* landscape only */
     @media (orientation: portrait) {
       body.mobile #rotate { display: flex; position: fixed; inset: 0; z-index: 100; background: #0b0d10; align-items: center; justify-content: center; text-align: center; font: 800 20px/1.5 system-ui, sans-serif; letter-spacing: .08em; color: #f2b134; padding: 24px; }
@@ -350,6 +377,7 @@
   <div id="m-controls">
     <div id="m-stick"><div id="m-knob"></div></div>
     <button id="m-fire" type="button">FIRE</button>
+    <button id="m-brake" type="button">BRAKE</button>
     <div id="m-btns"><button id="m-cam" type="button">CAM</button><button id="m-restart" type="button">RESTART</button><button id="m-menu" type="button">MENU</button></div>
   </div>
   <div id="mmenu">
