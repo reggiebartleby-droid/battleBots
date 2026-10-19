@@ -636,6 +636,12 @@ async function main() {
     const stuck = (r: Racer) => r.stuckSince !== undefined && now - r.stuckSince >= 1000 ? ` <i class="x">STUCK ${Math.max(1, Math.ceil((RACE.stuckMs - (now - r.stuckSince)) / 1000))}</i>` : '';
     const tag = (r: Racer) => r.finished !== undefined ? ' <i>FIN</i>' : r.down ? ` <i class="x">${r.down.why === 'stuck' ? 'TOWED' : 'WRECK'}</i>` : stuck(r);
     const dmg = (r: Racer) => Math.round(combat?.stats[r.id]?.dmg ?? 0);   // v0.34 damage dealt to other bots (hazards don't count)
+    if (MOBILE) {   // v0.42 phone (user): one small line at the bottom between the buttons -- place, lap, time, this race's cubes
+      const t = tally[pr.id] ?? newTally(), net = Math.round(t.got) - Math.round(t.lost);
+      const lit = now - cubePulse < 350 ? ' lit' : '';
+      rr.hud.innerHTML = `<b class="mp">${ordinal(pos)}<span>/${st.length}</span></b> · LAP <b>${pr.finished !== undefined ? RACE.laps : race.lap(pr)}/${RACE.laps}</b>`
+        + ` · <b>${fmtTime(pr.finished ?? race.t)}</b> · <span class="mc${lit}">${CUBE_ICON}<b>${signed(net)}</b></span>`;
+    } else
     rr.hud.innerHTML = `<div class="pos">${ordinal(pos)}<span> / ${st.length}</span></div>`
       + `<div>LAP <b>${pr.finished !== undefined ? RACE.laps : race.lap(pr)} / ${RACE.laps}</b> &nbsp; TIME <b>${fmtTime(pr.finished ?? race.t)}</b></div>`
       + `<div>LAST <b>${last}</b> &nbsp; BEST <b>${best}</b> &nbsp; DMG <b>${dmg(pr)}</b></div>`

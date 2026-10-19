@@ -240,6 +240,10 @@
     body.mobile #rhud { top: 6px; left: 8px; padding: 5px 9px 6px; font-size: 11px; line-height: 1.45; min-width: 0; }
     body.mobile #rhud .pos { font-size: 26px; }
     body.mobile #rhud ol { display: none; }
+    /* v0.42 phone race: the tracker is one small line at the bottom, between ◀ and BRAKE (off the track view) */
+    body.mobile.inrace #rhud { top: auto; bottom: 40px; left: calc(max(20px, env(safe-area-inset-left)) + 132px); right: calc(max(20px, env(safe-area-inset-right)) + 228px); width: max-content; max-width: calc(100% - max(20px, env(safe-area-inset-left)) - max(20px, env(safe-area-inset-right)) - 360px); margin: 0 auto; padding: 4px 9px; font-size: 12px; line-height: 1.3; white-space: nowrap; color: #8fa3ad; font-weight: 700; }
+    body.mobile.inrace #rhud .mp { color: #ffc400; font-size: 15px; } body.mobile.inrace #rhud .mp span { font-size: 11px; color: #8fa3ad; }
+    body.mobile.inrace #rhud .mc .cube-ico { transition: transform .15s; } body.mobile.inrace #rhud .mc.lit { text-shadow: 0 0 8px rgba(0,229,255,.95); }
     body.mobile #rmap { width: 150px; height: 75px; top: 6px; right: 8px; }
     body.mobile #m-btns { bottom: auto; top: 8px; }
     body.mobile #rresults { width: min(560px, calc(100% - 16px)); max-height: calc(100% - 16px); overflow: auto; }
