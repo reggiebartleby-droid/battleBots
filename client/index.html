@@ -245,7 +245,8 @@
     body.mobile.inrace #rhud .mp { color: #ffc400; font-size: 15px; } body.mobile.inrace #rhud .mp span { font-size: 11px; color: #8fa3ad; }
     body.mobile.inrace #rhud .mc .cube-ico { transition: transform .15s; } body.mobile.inrace #rhud .mc.lit { text-shadow: 0 0 8px rgba(0,229,255,.95); }
     body.mobile #rmap { width: 150px; height: 75px; top: 6px; right: 8px; }
-    body.mobile #m-btns { bottom: auto; top: 8px; }
+    body.mobile #m-btns { bottom: auto; top: 8px; left: max(8px, env(safe-area-inset-left)); transform: none; }   /* v0.42b (user): top left */
+    body.mobile #m-btns button { background: rgba(14,16,20,.35); border-color: rgba(74,79,88,.5); color: rgba(215,227,230,.75); }   /* v0.42b: more see-through */
     body.mobile #rresults { width: min(560px, calc(100% - 16px)); max-height: calc(100% - 16px); overflow: auto; }
     body.mobile #rresults .pad { padding: 8px 10px; gap: 8px; }
     body.mobile #rresults table { font-size: 12px; }
