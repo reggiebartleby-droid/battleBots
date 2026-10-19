@@ -23,6 +23,7 @@ import { Course, STATIONS, COURSE_ORIGIN, COURSE, type StationId, type RunResult
 import { aiDrive, type Difficulty } from './ai.js';
 import { MOBILE, MobileMenu, setupTouchControls, goFullscreen, TOUCH } from './mobile.js';
 import { CUBES } from './cubes.js';
+import { Upgrades } from './upgrades.js';   // v0.40 race upgrades (SCRAP meter)
 import { Race, RACE, TRACK_IDS, ordinal, fmtTime, type Racer, type TrackId } from './race.js';
 
 const MATCH_SECONDS = 180;
@@ -35,6 +36,10 @@ const TESTER = QS0.get('lab') !== '1' && (MOBILE || !import.meta.env.DEV || QS0.
 /** Fixed tester settings (the user's own race settings, 2026-10-19): drive boost x3, race speed x3, AI Normal,
  *  Cube Bots look, Neon Energy cubes, 8-bit (big). Not saved, so they never change the lab's own settings. */
 const TESTER_SET = { boost: 3, raceSpeed: 3, ai: 'normal' as Difficulty, track: 'oval' as TrackId | 'random', car: 'Flip Side' };
+/** v0.41 phone (user: x3 is too hard on a phone): drive boost x2, race speed x2. Par stretches with the race speed (parFor). */
+const PHONE_SET = { boost: 2, raceSpeed: 2 };
+/** v0.41 phone: the race camera sits this much further back, and a bit higher (CHASE), so more of the track shows. */
+const PHONE_CAM = { zoom: 1.5, maxBeta: 1.05 };
 const TESTER_KEY = 'bb.tester.v1';   // last track + car picked, remembered in this browser
 const RACE_TEST = { autopilot: false };
 /** v0.21: the drive is real wheels now -- see DRIVE / driveWheels in bot.ts. */
@@ -393,6 +398,8 @@ async function main() {
   let paid: Reward | null = null;          // the player's race reward, once it's in the wallet
   let walletAfter = walletCubes();
   let cubePulse = 0;                       // HUD: the cube line lights up for a moment after a pickup
+  // ---------------- v0.40 race upgrades: the SCRAP meter (upgrades.ts) ----------------
+  const upg = new Upgrades(scene, fx, { sign: (t, ms, c) => hud.sign(t, ms, c), isPlayer: id => race.player()?.id === id, shadows });
   const inRace = (id: string) => { const r = race.racers.find(x => x.id === id); return !!r && r.finished === undefined && phase === 'fight'; };
   LOOT.collectors = () => mode === 'race' && phase === 'fight'
     ? race.racers.filter(r => !r.down && !r.bot.eliminated && r.finished === undefined).map(r => ({ id: r.id, bot: r.bot, lap: r.lapsDone }))
@@ -403,6 +410,7 @@ async function main() {
     if (!inRace(id)) return;
     const t = (tally[id] ??= newTally());
     t.got += v; if (repaired) t.repaired++;
+    upg.gain(id as Racer['id'], v);   // v0.40 every vacuumed cube is scrap too
     if (race.player()?.id === id) cubePulse = performance.now();
   };
   /** par for this race: the track's par is at the tester race speed (x3); the lab's RACE SPEED slider scales it */
@@ -421,7 +429,7 @@ async function main() {
     try { saved = JSON.parse(localStorage.getItem(TESTER_KEY) ?? '{}'); } catch { /* ignore */ }
     raceTrack = saved.track === 'random' || TRACK_IDS.includes(saved.track as TrackId) ? saved.track as TrackId | 'random' : TESTER_SET.track;
     testerCar = saved.car && PRESETS[saved.car] ? saved.car : TESTER_SET.car;
-    DRIVE.boost = TESTER_SET.boost; raceSpeedMul = TESTER_SET.raceSpeed; raceDiff = TESTER_SET.ai;
+    DRIVE.boost = MOBILE ? PHONE_SET.boost : TESTER_SET.boost; raceSpeedMul = MOBILE ? PHONE_SET.raceSpeed : TESTER_SET.raceSpeed; raceDiff = TESTER_SET.ai;   // v0.41 phone x2 / x2
     CUBES.on = true; CUBES.style = 'neonEnergy'; CUBES.size = 'big';
     raceBuild = JSON.parse(JSON.stringify(PRESETS[testerCar]));
     for (const sel of tp.track) sel.innerHTML = TRACK_IDS.map(id => `<option value="${id}">${races[id].def.name}</option>`).join('') + '<option value="random">Random</option>';
@@ -478,11 +486,12 @@ async function main() {
     DRIVE.raceSteer = true;            // v0.34c race only: speed-sensitive steering + heading hold
     DRIVE.raceArcade = true;           // v0.34f race only: turn-rate steering + sideways grip (race.ts)
     rampT = 0; rampDir = 0;
+    upg.reset(race);   // v0.40 fresh SCRAP meters + boxes
     race.begin([
       { id: 'A', human: true, build: raceBuild },
       ...names.map((n, i) => ({ id: RIVAL_IDS[i], human: false, build: JSON.parse(JSON.stringify(PRESETS[n])) as BotBuild })),
     ], catalog, combat, raceDiff, {
-      onSpawn: b => { castShadows(shadows, botMeshes(b)); skinBot(b, shadows); },
+      onSpawn: b => { castShadows(shadows, botMeshes(b)); skinBot(b, shadows); upg.attach(b); },   // v0.40 upgrades back on
       sign: (t, ms, c) => hud.sign(t, ms, c),
     });
     bots = race.bots();
@@ -490,7 +499,8 @@ async function main() {
     over = false; camFocus = null;
     phase = 'ready'; rd.count.className = '';
     const p = race.player()!.bot;
-    cam.target = p.root.position.clone(); cam.radius = camCtl.radius(11);
+    cam.target = p.root.position.clone(); cam.radius = camCtl.radius(raceCamR());
+    if (MOBILE && camCtl.view === 'chase') cam.beta = Math.min(cam.beta, PHONE_CAM.maxBeta);   // v0.41 phone: a bit higher
     sun.position = p.root.position.add(SUN_OFFSET);
     drawRaceHud(performance.now(), true);
     if (TESTER && !skipCard) showRaceReady();   // v0.37 tester: track + car pickers before every START (first load, R)
@@ -504,6 +514,7 @@ async function main() {
     DRIVE.raceArcade = false;
     if (mode !== 'race') return;
     race.dispose(); bots = []; fx.clear(); fx.focus = null; hud.clearSign();   // v0.34i
+    upg.clear();   // v0.40
     clearLoot(); LOOT.on = false;   // v0.38
     mode = 'match';
     document.body.classList.remove('inrace');
@@ -518,30 +529,35 @@ async function main() {
     const p = race.player()!.bot;
     rd.title.innerHTML = `${race.def.name.toUpperCase()} <span class="vs">${RACE.laps} LAPS · 4 BOTS</span>`;   // v0.35 track name
     const rows: [string, string][] = [
-      ['DRIVE', MOBILE ? 'It drives itself forward: STEER slider (bottom left) · BRAKE held = slow down, then reverse' : 'W A S D (or gamepad left stick)'],   // v0.39 phone
-      ['WEAPON', p.weapon.hint(MOBILE ? 'FIRE' : 'SPACE') + ' — weapons are on'],
+      ['DRIVE', MOBILE ? 'It drives itself forward: ◀ ▶ steer (tap = small turn, hold = full turn) · BRAKE held = slow down, then reverse' : 'W A S D (or gamepad left stick)'],   // v0.39 phone; v0.41 ◀ ▶
+      ['WEAPON', MOBILE ? 'Fires on its own when a bot is close in front of you' : p.weapon.hint('SPACE') + ' — weapons are on'],   // v0.41 phone auto-fire
       ['TO WIN', `First across the line after ${RACE.laps} laps. Hit, flip and wreck the others on the way.`],
       ['WRECKED', 'Destroyed, or off the track (into the pit, over a wall): back at the last checkpoint in 2 s, repaired.'],
       ['STUCK', 'Can\'t drive, or barely moving for 4 s (upside down, wedged, pinned): towed back to the last checkpoint, repaired.'],
       ['DAMAGE', 'Your damage score (DMG) counts every point of damage you deal to the other bots.'],
       ['CUBES', 'Your bot\'s cubes are your money: −1 for each one knocked off you (wrecked = all of them). Drive near loose cubes to vacuum them up: +1 each, and they repair you. At the line you earn cubes for place, damage and time.'],   // v0.38
+      ['UPGRADES', 'Vacuumed cubes, laps (more for the back of the pack), damage and the gold SCRAP boxes fill your SCRAP meter: 25 = MOTOR, 60 = ARMOR plating, 100 = WEAPON power, 150 = a spiked RAM on your back that punches the first bot to get close behind you (once). Upgrades are cubes: hits knock them off. 25 more scrap rebuilds a lost one. Wrecked = all lost.'],   // v0.40
       ['TRACK', race.def.desc],   // v0.35
       ['WALLET', `${CUBE_ICON}<b class="cubes">${walletCubes()}</b> cubes · par ${fmtTime(parFor())}`],   // v0.38
       MOBILE ? ['BUTTONS', 'CAM: change the view · RESTART: start over'] : ['KEYS', TESTER ? 'R: restart · Q: camera' : 'R: restart · B: lab · Q: camera'],
     ];
     // v0.37 tester: full card on the first race; after that just the track line (the pickers are what matter)
     // v0.39 phone: a short card that fits a landscape phone (pickers, how to drive, wallet)
-    const shown = MOBILE ? rows.filter(([k]) => (raceSeen ? ['WALLET'] : ['DRIVE', 'WEAPON', 'WALLET']).includes(k))
+    const shown = MOBILE ? rows.filter(([k]) => (raceSeen ? ['WALLET'] : ['DRIVE', 'WEAPON', 'WALLET'])   /* v0.40: no room for UPGRADES on a phone card */.includes(k))
       : TESTER && raceSeen ? rows.filter(([k]) => k === 'TRACK' || k === 'WALLET') : rows;
     rd.table.innerHTML = shown.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
     rd.start.style.display = '';
     rd.small.textContent = MOBILE ? 'Pick a track and a car · tap START' : TESTER ? 'Pick a track and a car · Enter or click START' : 'Enter or click START · B: back to the lab';
     rd.box.classList.add('on');
   }
-  /** v0.39 phone race drive: auto-gas (BRAKE held = brake / reverse), steering from the STEER slider, FIRE. */
-  function phoneDrive(): Drive {
-    const d = readDrive('A');
-    return { throttle: TOUCH.brake ? -1 : 1, turn: d.turn, fire: d.fire };
+  /** v0.41 phone race camera distance (11 = the desktop race camera). */
+  function raceCamR() { return MOBILE ? 11 * PHONE_CAM.zoom : 11; }
+  /** v0.39 phone race drive: auto-gas (BRAKE held = brake / reverse).
+   *  v0.41 (user): ◀ ▶ buttons steer (with the keyboard steering ramp: tap = small turn, hold = full turn);
+   *  no FIRE button -- the weapon fires on its own when a bot is close in front (race.autoFire). */
+  function phoneDrive(r: Racer, dt: number): Drive {
+    const d = steerRamp(readDrive('A'), dt);
+    return { throttle: TOUCH.brake ? -1 : 1, turn: d.turn, fire: d.fire || race.autoFire(r) };
   }
 
   /** v0.34c race only (user): keyboard steering ramp. A tap turns at RAMP.start, holding builds to full turn over
@@ -581,17 +597,18 @@ async function main() {
     scene.getPhysicsEngine()?.setTimeStep(PHYS_STEP);
     for (const r of race.racers) {
       if (r.down || r.bot.eliminated) continue;
-      const d: Drive = waiting ? { throttle: 0, turn: 0, fire: false } : r.human && !RACE_TEST.autopilot ? (MOBILE ? phoneDrive() : steerRamp(readDrive('A'), dt)) : race.aiDrive(r, dt);
+      const d: Drive = waiting ? { throttle: 0, turn: 0, fire: false } : r.human && !RACE_TEST.autopilot ? (MOBILE ? phoneDrive(r, dt) : steerRamp(readDrive('A'), dt)) : race.aiDrive(r, dt);
       runBot(r.bot, d, dt, now, waiting, false, phase === 'countdown');
     }
     race.update(dt, now, !waiting);
+    upg.update(dt, race, combat, !waiting);   // v0.40 scrap: laps, damage, boxes; wrecks; the ram
     if (race.def.theme.fog) { const f = race.flash; hemi.intensity = race.def.theme.hemi + f * 1.6; sun.intensity = race.def.theme.sun + f * 0.8; }   // v0.36 lightning
     bots = race.bots();
     const pr = race.player()!;
     const target = pr.down ? (pr.bot.eliminated?.pos ?? pr.bot.root.position) : pr.bot.root.position;
     cam.target = Vector3.Lerp(cam.target, target, 0.1).add(fx.shakeOffset());
     camGuard(target, 'race');   // v0.34h
-    cam.radius += (camCtl.radius(11) - cam.radius) * 0.05;
+    cam.radius += (camCtl.radius(raceCamR()) - cam.radius) * 0.05;
     if (!pr.down) camCtl.chase(pr.bot.root.rotationQuaternion, dt);
     sun.position = target.add(SUN_OFFSET);
     fx.focus = target;
@@ -623,6 +640,7 @@ async function main() {
       + `<div>LAP <b>${pr.finished !== undefined ? RACE.laps : race.lap(pr)} / ${RACE.laps}</b> &nbsp; TIME <b>${fmtTime(pr.finished ?? race.t)}</b></div>`
       + `<div>LAST <b>${last}</b> &nbsp; BEST <b>${best}</b> &nbsp; DMG <b>${dmg(pr)}</b></div>`
       + cubeLine(pr, now)   // v0.38
+      + upg.hud(pr.id, now)   // v0.40
       + (pr.draft !== undefined ? `<div class="draft">SLIPSTREAM ▲ BOOST</div>` : '')   // v0.35 oval
       + `<ol>${st.map(r => `<li style="color:${r.paint}">${r.name}${r.human ? ' <b>(YOU)</b>' : ''} <span class="dmg">${dmg(r)}</span>${tag(r)}</li>`).join('')}</ol>`;
     // minimap
@@ -692,7 +710,7 @@ async function main() {
     raceSeen = true; startRace();
   }
   (window as unknown as { __bb: unknown }).__bb = { get race() { return race; }, get phase() { return phase; }, scene, cam,
-    get tally() { return tally; }, get paid() { return paid; }, skinCount: (id: string) => { const r = race.racers.find(x => x.id === id); return r ? cubeSkinOf(r.bot.root)?.count : undefined; } };   // v0.38   // v0.35b scene + cam for sandbox screenshots   // v0.35 race changes with the track
+    get tally() { return tally; }, get paid() { return paid; }, upg, skinCount: (id: string) => { const r = race.racers.find(x => x.id === id); return r ? cubeSkinOf(r.bot.root)?.count : undefined; } };   // v0.38   // v0.35b scene + cam for sandbox screenshots   // v0.35 race changes with the track
 
   // v0.8 real spinner damage: weapon energy measured around every physics step
   scene.onBeforePhysicsObservable.add(() => {

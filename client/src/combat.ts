@@ -116,6 +116,11 @@ export const PART_HIT = {
   maxDmg: 8,           // small: one flying part never does more than this
 };
 
+/** v0.40 every hit goes through here: race upgrades (armour plating, rear ram) soak part of it first. */
+function hurt(victim: Bot, socket: string, raw: number, point: Vector3 | undefined): number {
+  return applyDamage(victim.state, socket, victim.shield ? Math.round(victim.shield(raw, point)) : raw);
+}
+
 export class Combat {
   private lastContinued = 0;
   log: HitLog[] = [];
@@ -160,12 +165,31 @@ export class Combat {
     this.register(b);
   }
 
+  /** v0.40 the rear spiked ram's piston punch (upgrades.ts): a scripted hit, credited to the ram's bot. */
+  scriptedHit(attacker: Bot, victim: Bot, point: Vector3, raw: number): number {
+    const alive = (id: string) => (victim.state.parts[id]?.hp ?? 0) > 0;
+    const socket = this.cubeSocket(victim, point) ?? ['armor', 'armor_1', 'armor_2', 'front', 'wheels', 'motor'].find(alive) ?? Object.keys(victim.state.parts).find(alive);
+    if (!socket) return 0;
+    const dealt = hurt(victim, socket, raw, point);
+    const now = performance.now();
+    this.stats[attacker.id] ??= { hits: 0, dmg: 0, bumps: 0, maxImpulse: 0 };
+    this.score[attacker.id] ??= 0;
+    this.log.push({ t: now, attacker: attacker.id, victim: victim.id, socket, dmg: dealt });
+    this.stats[attacker.id].hits++;
+    this.stats[attacker.id].dmg += dealt;
+    this.credit(attacker, victim, dealt);
+    victim.lastHit = { socket, t: now };
+    this.lastWeaponTouch.set(victim.id, { t: now, by: attacker });
+    this.fx.hit(point, dealt, victim, attacker.build.cosmetics.paint ?? '#fff');
+    return dealt;
+  }
+
   /** v0.33 race hazards (kill saws, hammer): damage with no attacker. Same part pick as a slam. */
   environmentHit(victim: Bot, point: Vector3, raw: number, color = '#ff5533'): number {
     const alive = (id: string) => (victim.state.parts[id]?.hp ?? 0) > 0;
     const socket = this.cubeSocket(victim, point) ?? ['armor', 'armor_1', 'armor_2', 'wheels', 'front', 'motor', 'weapon_motor'].find(alive) ?? Object.keys(victim.state.parts).find(alive);
     if (!socket) return 0;
-    const dealt = applyDamage(victim.state, socket, raw);
+    const dealt = hurt(victim, socket, raw, point);
     victim.lastHit = { socket, t: performance.now() };
     this.fx.hit(point, dealt, victim, color);
     return dealt;
@@ -233,7 +257,7 @@ export class Combat {
     const order = up < 0 ? ['armor', 'armor_1', 'armor_2', 'weapon', 'motor'] : ['wheels', 'armor_1', 'armor_2', 'armor', 'motor'];
     const socket = this.cubeSocket(self, ev.point ?? undefined) ?? order.find(alive) ?? Object.keys(self.state.parts).find(alive);   // v0.29 HP = cubes
     if (!socket) return;
-    const dealt = applyDamage(self.state, socket, raw);
+    const dealt = hurt(self, socket, raw, ev.point ?? undefined);
     const by = touch.by;
     this.log.push({ t: now, attacker: by.id, victim: self.id, socket, dmg: dealt });
     this.stats[by.id].hits++;
@@ -309,14 +333,14 @@ export class Combat {
   }
 
   private spinHit(attacker: Bot, defender: Bot, c: SpinContact) {
-    const raw = canAttack(attacker.state) ? Math.round(c.lost / (c.jPerDmg ?? SPIN_DMG.joulesPerDmg) * (DMG_SCALE[attacker.weaponKind ?? ''] ?? 1)) : 0;   // v0.31 DMG_SCALE
+    const raw = canAttack(attacker.state) ? Math.round(c.lost / (c.jPerDmg ?? SPIN_DMG.joulesPerDmg) * (DMG_SCALE[attacker.weaponKind ?? ''] ?? 1) * (attacker.dmgMul ?? 1)) : 0;   // v0.31 DMG_SCALE; v0.40 weapon upgrade
     if (raw < SPIN_DMG.minDmg) return;
     const alive = (id: string) => (defender.state.parts[id]?.hp ?? 0) > 0;
     // crusher pierces the top: top armor, then the insides (weapon motor, drive motor)
     const crushSocket = c.crush ? ['armor', 'armor_1', 'armor_2', 'weapon_motor', 'motor', 'weapon'].find(alive) : undefined;
     // a flip / lift gets under them: socket from the hit direction even if the plate touched their weapon
     const socket = crushSocket ?? this.cubeSocket(defender, c.point) ?? (c.vsWeapon && alive('weapon') && !c.gain ? 'weapon' : pickSocket(defender, attacker));   // v0.29 HP = cubes
-    const dealt = applyDamage(defender.state, socket, raw);
+    const dealt = hurt(defender, socket, raw, c.point);
     const now = performance.now();
     this.log.push({ t: now, attacker: attacker.id, victim: defender.id, socket, dmg: dealt });
     this.stats[attacker.id].hits++;
@@ -370,7 +394,7 @@ export class Combat {
     const alive = (id: string) => (victim.state.parts[id]?.hp ?? 0) > 0;
     const socket = this.cubeSocket(victim, point) ?? Object.keys(victim.state.parts).find(alive);
     if (!socket) return true;
-    const dealt = applyDamage(victim.state, socket, raw);
+    const dealt = hurt(victim, socket, raw, point);
     const touch = this.lastWeaponTouch.get(owner.id);
     const knocker = touch && touch.by !== owner ? touch.by : this.bots.find(b => b !== owner);   // v0.33: who last hit the owner
     const now = performance.now();

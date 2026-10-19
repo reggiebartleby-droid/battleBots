@@ -310,7 +310,8 @@ export class Race {
   // ------------------------------------------------------------------------------------------------- geometry
   private w(x: number, y: number, z: number) { return new Vector3(this.origin.x + x, this.origin.y + y, this.origin.z + z); }
   /** world point at sample p, sideways u, height y */
-  private at(p: Sample, u: number, y = 0) { const n = nrm(p.h); return this.w(p.x + n.x * u, y, p.z + n.z * u); }
+  /** world point at sample p, u m to its left, y up (v0.40: public for the pickup boxes) */
+  at(p: Sample, u: number, y = 0) { const n = nrm(p.h); return this.w(p.x + n.x * u, y, p.z + n.z * u); }
   private dir(h: number) { return new Vector3(Math.cos(h), 0, Math.sin(h)); }
 
   private makeMats() {
@@ -1116,6 +1117,31 @@ export class Race {
     if (throttle > 0.5 && speed < 0.35 && this.running) m.stuckT += Math.max(dt, D.reactMs / 1000); else m.stuckT = 0;
     if (m.stuckT > 0.9) { m.stuckT = 0; m.escapeT = 0.7; m.escapeTurn = Math.random() < 0.5 ? -1 : 1; }
     return decide({ throttle, turn, fire });
+  }
+
+  /** v0.41 phone (user: no FIRE button, auto-fire when enemies are close): the AI's weapon rule for the player, minus
+   *  the AI's random whiffs. Spinners stay on; hammers / flippers fire at a rival close in front; lifters / grabbers hold
+   *  while one is close in front. */
+  autoFire(r: Racer): boolean {
+    const self = r.bot, w = self.weapon, pos = self.root.position;
+    if (r.finished !== undefined) return false;
+    const fwd = forward(self); fwd.y = 0; fwd.normalize();
+    let rd = Infinity;
+    for (const o of this.racers) {
+      if (o === r || o.down || o.bot.eliminated) continue;
+      const to = o.bot.root.position.subtract(pos); to.y = 0;
+      const d = to.length();
+      if (d > 0.01 && d < rd && Vector3.Dot(fwd, to.scale(1 / d)) > 0.55) rd = d;
+    }
+    switch (w.mode) {
+      case 'spinner': return !w.spinning;
+      case 'strike': case 'flipper': {
+        const onPlate = self.hinges?.some(h => h.touched) ?? false;
+        return w.phase === 'ready' && w.refill <= 0 && (onPlate || rd < (w.mode === 'strike' ? 2.8 : 2.2));
+      }
+      case 'hold': return rd < 2.0;
+      default: return false;
+    }
   }
 
   /** For the minimap: local (x, z) of the centre line. */

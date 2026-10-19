@@ -291,6 +291,9 @@ export class Skin {
   private freeLoss = false;
   private orphan = false;
   ownerId?: BotId;
+  /** v0.40 upgrade cubes (upgrades.ts): built from the scrap meter, not the wallet -- knocked off they cost the owner
+   *  nothing (still loot for the others) */
+  free = false;
   /** v0.38 one cube's worth of money: 1 for an 8-bit (big) cube, less for smaller cubes */
   readonly cubeValue: number;
   private active: number[] = [];
@@ -770,6 +773,26 @@ export class Skin {
     this.rides = keep;
   }
 
+  /** v0.40 blown apart already (KO / poof) */
+  get knocked() { return this.ko; }
+  /** v0.40 cubes still on (upgrade addons: their HP) */
+  alive(): number { let k = 0; for (let g = 0; g < this.n; g++) if (this.st[g] === 0) k++; return k; }
+  /** v0.40 knock the n cubes nearest `point` (world) off -- an upgrade addon taking a hit. Returns how many came off. */
+  chip(point: Vector3, n: number): number {
+    if (this.ko || n <= 0) return 0;
+    this.flash = 0.15;
+    const near: { g: number; d: number }[] = [];
+    for (const h of this.holders) {
+      if (!h.mesh.isEnabled()) continue;
+      h.mesh.computeWorldMatrix(true);
+      for (const g of h.cubes) if (this.st[g] === 0) near.push({ g, d: Vector3.DistanceSquared(this.worldOf(g), point) });
+    }
+    near.sort((a, b) => a.d - b.d);
+    const take = near.slice(0, n);
+    for (const { g } of take) this.loosen(g, 1);
+    return take.length;
+  }
+
   /** KO (v0.28: the whole bot, its collider goes too -- main.ts dropBot) or knocked out of the arena: every cube flies. */
   /** v0.38 loot = false (towed when stuck, or off the track): the bot still bursts into cubes, but they cost its racer
    *  nothing and nobody can vacuum them -- they're gone in a couple of seconds. A real wreck (KO) = every cube lost + loot. */
@@ -804,7 +827,7 @@ export class Skin {
     // v0.38 cube currency: it cost its racer one cube; remember the lap it came off on (own cubes: next lap on)
     this.age[g] = 0; this.pullTo[g] = undefined;
     this.noLoot[g] = 0;
-    if (LOOT.on && this.ownerId && !this.freeLoss) { this.lapOff[g] = LOOT.lapOf(this.ownerId); LOOT.onLost(this.ownerId, this.cubeValue); }
+    if (LOOT.on && this.ownerId && !this.freeLoss && !this.free) { this.lapOff[g] = LOOT.lapOf(this.ownerId); LOOT.onLost(this.ownerId, this.cubeValue); }
   }
 
   /** Detach one cube: it becomes debris, flying out from the bot (or with the given velocity / spin). */

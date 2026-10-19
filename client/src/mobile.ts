@@ -3,6 +3,9 @@
  * on the start card and the results. Race controls: auto-gas, a left-right STEER slider (left thumb), FIRE + BRAKE
  * (right thumb; BRAKE held = slow down, then reverse).
  *
+ * v0.41 (user: phone mode too hard): ◀ ▶ steer buttons (left / right thumb) replace the slider, no FIRE button (the weapon
+ * auto-fires when a bot is close in front), BRAKE stays; drive boost + race speed x2 (desktop x3); camera further out.
+ *
  * v0.32 quick-and-dirty phone / tablet mode (user: not meant for phones, but "somewhat playable" there).
  * On when the browser says it's a phone or tablet. ?mobile=1 forces it on (test on the PC), ?desktop=1 forces it off.
  *  - Lab: a simple menu (your bot, opponent, AI level, FIGHT) -- no part editing; no test course.
@@ -79,6 +82,15 @@ export function setupTouchControls(onCam: () => void) {
   const brake = document.getElementById('m-brake')!;
   brake.addEventListener('pointerdown', e => { e.preventDefault(); try { brake.setPointerCapture(e.pointerId); } catch { /* ok */ } TOUCH.brake = true; brake.classList.add('down'); });
   for (const ev of ['pointerup', 'pointercancel']) brake.addEventListener(ev, () => { TOUCH.brake = false; brake.classList.remove('down'); });
+
+  // v0.41 race (user): ◀ ▶ steer buttons replace the STEER slider (and the FIRE button: the weapon auto-fires, main.ts)
+  const steer = { left: false, right: false };
+  for (const [id, side] of [['m-left', 'left'], ['m-right', 'right']] as const) {
+    const b = document.getElementById(id)!;
+    const set = (on: boolean) => { steer[side] = on; b.classList.toggle('down', on); TOUCH.turn = (steer.right ? 1 : 0) - (steer.left ? 1 : 0); };
+    b.addEventListener('pointerdown', e => { e.preventDefault(); try { b.setPointerCapture(e.pointerId); } catch { /* ok */ } set(true); });
+    for (const ev of ['pointerup', 'pointercancel']) b.addEventListener(ev, () => set(false));
+  }
 
   document.getElementById('m-cam')!.addEventListener('click', onCam);
   document.getElementById('m-restart')!.addEventListener('click', () => tapKey('KeyR'));

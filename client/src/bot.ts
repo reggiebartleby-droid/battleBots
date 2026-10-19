@@ -106,6 +106,11 @@ export interface Bot {
   partShapes: Record<string, PhysicsShape[]>;
   /** v0.29 Cube Bots: a part just fell off and flies as its own body for a moment (combat.ts hooks its hits). */
   onPartOff?: (body: PhysicsBody, socketId: string) => void;
+  /** v0.40 race upgrades (upgrades.ts): motor = x top speed and drive torque; weapon = x the damage its hits do;
+   *  shield = armour plating / rear ram soak part of every hit (returns what gets through). Unset = 1 / none. */
+  driveMul?: number;
+  dmgMul?: number;
+  shield?: (raw: number, point: Vector3 | undefined) => number;
 }
 
 /** v0.21 one tyre on its powered axle. */
@@ -742,7 +747,7 @@ function buildWheels(scene: Scene, root: Mesh, chassis: PhysicsBody, tyres: Mesh
 /** v0.21 skid-steer drive: left = throttle + turn, right = throttle - turn (v0.22: arcade mix, see DRIVE.arc). Sets each wheel's speed controller output; wheelsBefore turns it into motor torque.
  *  `on` false = neutral (the controllers brake). Drive dead (motor / wheels destroyed) = only gearbox drag. */
 export function driveWheels(bot: Bot, throttle: number, turn: number, on: boolean) {
-  const vTop = currentSpeed(bot.state) * DRIVE.speedScale * DRIVE.raceSpeed;   // v0.34: x2 in races
+  const vTop = currentSpeed(bot.state) * DRIVE.speedScale * DRIVE.raceSpeed * (bot.driveMul ?? 1);   // v0.34: x2 in races; v0.40 motor upgrade
   if (DRIVE.raceSteer && vTop > 0) {                    // v0.34c race: less turn the faster it goes
     const v = bot.body.getLinearVelocity(), f = Math.min(1, Math.hypot(v.x, v.z) / vTop);
     turn *= 1 - (1 - DRIVE.steerAtTop) * f;
@@ -813,7 +818,7 @@ export function wheelsBefore(bot: Bot, dt: number) {
     const rel = (Vector3.Dot(w.body.getAngularVelocity(), axis) - wc) * WHEEL_SIGN;   // wheel speed on its axle, + = forward
     const t = w.drag
       ? -Math.max(-1, Math.min(1, rel / w.omegaMax)) * w.torque * DRIVE.gearDrag
-      : Math.max(-1, Math.min(1, w.cmd - rel / w.omegaMax)) * w.torque;
+      : Math.max(-1, Math.min(1, w.cmd - rel / w.omegaMax)) * w.torque * (bot.driveMul ?? 1);   // v0.40 motor upgrade
     const imp = axis.scale(t * WHEEL_SIGN * dt);
     w.body.applyAngularImpulse(imp);
     bot.body.applyAngularImpulse(imp.negate());
