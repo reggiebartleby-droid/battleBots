@@ -43,7 +43,7 @@
  */
 import { Vector3, type IPhysicsCollisionEvent, PhysicsEventType } from '@babylonjs/core';
 import { applyDamage, canAttack, isProtected, HIT } from '../../src/core/state.js';
-import { cubeSkinOf, isLooseBody } from './cubes.js';
+import { cubeSkinOf, isLooseBody, creditCubes } from './cubes.js';
 import { forward, spinEnergy, armEnergy, energyOf, weaponBodies, chassisBodies, isChassis, CONTROL, type Bot, type BotId } from './bot.js';
 import type { PhysicsBody } from '@babylonjs/core';
 import type { Fx } from './fx.js';
@@ -131,10 +131,19 @@ export class Combat {
 
   /** v0.19: points for a damaging hit (+ BIG HIT bonus). */
   private credit(attacker: Bot, defender: Bot, dealt: number) {
+    creditCubes(defender.id, attacker.id);   // v0.47 the cubes this hit knocks off are the attacker's damage
+    this.lastBy.set(defender.id, { by: attacker.id, t: performance.now() });
     if (dealt <= 0) return;
     this.score[attacker.id] += SCORE.perHit + dealt;
     const startHp = Object.values(defender.state.parts).reduce((a, p) => a + p.maxHp, 0);
     if (dealt >= startHp * SCORE.bigHitFrac) this.bonus(attacker, 'BIG HIT', SCORE.bigHitBonus);
+  }
+  /** v0.47 the rival that last hit each bot, and when (race: who gets the KO bonus) */
+  private lastBy = new Map<string, { by: BotId; t: number }>();
+  /** v0.47 the rival whose hit landed on `victim` within `ms` -- undefined = nobody (or a hazard since) */
+  lastAttacker(victim: Bot, ms: number): BotId | undefined {
+    const l = this.lastBy.get(victim.id);
+    return l && performance.now() - l.t <= ms ? l.by : undefined;
   }
   private bonus(attacker: Bot, text: string, pts: number) {
     this.score[attacker.id] += pts;
@@ -165,6 +174,9 @@ export class Combat {
     this.register(b);
   }
 
+  /** v0.49b Big Arena: a bot that's out is deleted (its bodies go) -- stop tracking it. */
+  removeBot(old: Bot) { this.bots = this.bots.filter(x => x !== old); this.spin = this.spin.filter(c => c.bot !== old); }
+
   /** v0.40 the rear spiked ram's piston punch (upgrades.ts): a scripted hit, credited to the ram's bot. */
   scriptedHit(attacker: Bot, victim: Bot, point: Vector3, raw: number): number {
     const alive = (id: string) => (victim.state.parts[id]?.hp ?? 0) > 0;
@@ -191,6 +203,7 @@ export class Combat {
     if (!socket) return 0;
     const dealt = hurt(victim, socket, raw, point);
     victim.lastHit = { socket, t: performance.now() };
+    creditCubes(victim.id, undefined); this.lastBy.delete(victim.id);   // v0.47 hazards: nobody's damage, nobody's KO
     this.fx.hit(point, dealt, victim, color);
     return dealt;
   }
@@ -400,6 +413,7 @@ export class Combat {
     const now = performance.now();
     victim.lastHit = { socket, t: now };
     this.partHits++;
+    if (!knocker || knocker === victim) creditCubes(victim.id, undefined);   // v0.47
     if (knocker && knocker !== victim) {
       this.log.push({ t: now, attacker: knocker.id, victim: victim.id, socket, dmg: dealt });
       this.stats[knocker.id].hits++;

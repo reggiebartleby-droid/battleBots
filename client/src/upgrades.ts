@@ -70,10 +70,15 @@ interface RState {
 }
 interface Box { node: TransformNode; inner: Mesh; outer: Mesh; pos: Vector3; away: number; spin: number }
 
+/** v0.49 what update() needs from a race -- the Big Arena brawl hands in its own fighters (no laps) */
+export interface UpgRacer { id: BotId; bot: Bot; down?: { why: 'ko' | 'off' | 'stuck' }; lapsDone: number; finished?: number }
+export interface UpgField { racers: UpgRacer[]; standings(): UpgRacer[] }
+
 export interface UpgHooks {
   sign: (text: string, ms: number, color: string) => void;
   isPlayer: (id: BotId) => boolean;
   shadows?: ShadowGenerator;
+  onBox?: (id: BotId) => void;   // v0.51 a SCRAP box was taken (Big Arena points)
 }
 
 export class Upgrades {
@@ -102,14 +107,21 @@ export class Upgrades {
   // ------------------------------------------------------------------------------------------------- race lifecycle
   /** A new race on this track: fresh meters, boxes placed. Call before race.begin (bots spawn through attach). */
   reset(race: Race) {
-    this.clear();
-    this.race = race;
+    const at: Vector3[] = [];
     for (const f of UPG.boxFrac) {
       let s = race.length * f;
       for (let k = 0; k < 40 && ['jump', 'hazard'].includes(race.sampleAt(s).tag); k++) s += 2;   // not over the pit / in the saws
       const p = race.sampleAt(s);
       const u = (Math.round(f * 10) % 3 - 1) * race.width * 0.2;
-      const pos = race.at(p, u, race.surfaceY(p, u) + 0.6);
+      at.push(race.at(p, u, race.surfaceY(p, u) + 0.6));
+    }
+    this.resetAt(at);
+    this.race = race;
+  }
+  /** v0.49 fresh meters + SCRAP boxes at these points (the Big Arena brawl). */
+  resetAt(points: Vector3[]) {
+    this.clear();
+    for (const pos of points) {
       const node = new TransformNode('upg_box', this.scene);
       node.position.copyFrom(pos);
       const outer = MeshBuilder.CreateBox('upg_boxO', { size: 0.6 }, this.scene);
@@ -173,7 +185,7 @@ export class Upgrades {
   private alive(s: RState): boolean { return !!s.bot && !s.bot.eliminated && !s.bot.root.isDisposed(); }
 
   /** Every frame (after race.update): laps, damage, boxes, wrecks, the ram, chipped-away upgrades. */
-  update(dt: number, race: Race, combat: Combat | null, go: boolean) {
+  update(dt: number, race: UpgField, combat: Combat | null, go: boolean) {
     for (const b of this.boxes) {           // boxes spin + bob even before GO
       b.spin += dt;
       b.inner.rotation.set(b.spin * 1.3, b.spin * 2, 0);
@@ -213,6 +225,7 @@ export class Upgrades {
         b.away = UPG.boxRespawnS; b.node.setEnabled(false);
         this.fx.bump(b.node.position);
         this.gain(r.id, UPG.box);
+        this.hooks.onBox?.(r.id);
         if (this.hooks.isPlayer(r.id)) this.hooks.sign(`+${UPG.box} SCRAP`, 800, '#ffd23f');
       }
       // the ram
@@ -351,7 +364,7 @@ export class Upgrades {
   }
 
   // ------------------------------------------------------------------------------------------------- the ram
-  private ramUpdate(s: RState, race: Race, combat: Combat | null, dt: number) {
+  private ramUpdate(s: RState, race: UpgField, combat: Combat | null, dt: number) {
     const a = s.addons.get('ram'), b = s.bot, g = s.geo;
     if (!a?.ramNode || !b || !g) return;
     const head = (a.ramNode.metadata as { head: TransformNode }).head;

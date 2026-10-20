@@ -136,7 +136,15 @@ export const LOOT = {
   onLost: (_id: BotId, _value: number): void => {},
   /** this racer vacuumed up a cube; repaired = it went back onto the bot as repair */
   onCollect: (_id: BotId, _value: number, _repaired: boolean): void => {},
+  /** v0.47 damage = cubes: `by` knocked a cube off `victim` (its bot or an upgrade on it) */
+  onKnocked: (_by: BotId, _victim: BotId, _value: number, _free: boolean): void => {},   // free = an upgrade's cube
+  creditMs: 1000,       // v0.47 a cube that comes off this soon after a rival's hit is that rival's damage
 };
+/** v0.47 who last hit each bot (combat.ts sets it on every credited hit, clears it on a hazard hit). */
+const CREDIT = new Map<BotId, { by: BotId; t: number }>();
+export function creditCubes(victim: BotId, by: BotId | undefined) {
+  if (by && by !== victim) CREDIT.set(victim, { by, t: performance.now() }); else CREDIT.delete(victim);
+}
 /** Skins whose bot is gone (wrecked + respawned) but whose loose cubes are still lying on the track. */
 const orphans = new Set<Skin>();
 /** v0.38 remove every loose cube (and the skins that only still exist for them) -- a new race, or leaving the race. */
@@ -289,6 +297,7 @@ export class Skin {
   private pullBy: (BotId | undefined)[] = [];
   private noLoot!: Uint8Array;   // v0.38 poof cubes (towed / off the track): cost nothing, can't be vacuumed, vanish fast
   private freeLoss = false;
+  private noCredit = false;   // v0.47 the KO explosion / a poof: nobody's damage
   private orphan = false;
   ownerId?: BotId;
   /** v0.40 upgrade cubes (upgrades.ts): built from the scrap meter, not the wallet -- knocked off they cost the owner
@@ -800,12 +809,12 @@ export class Skin {
     if (this.ko) return;
     this.ko = true;
     for (const h of this.holders) h.mesh.computeWorldMatrix();
-    this.freeLoss = !loot;
+    this.freeLoss = !loot; this.noCredit = true;
     for (let g = 0; g < this.n; g++) if (this.st[g] === 0) {
       this.loosen(g, 2.4);
       if (!loot) { this.noLoot[g] = 1; this.age[g] = Math.max(0, LOOT.fadeS - 1.6); }
     }
-    this.freeLoss = false;
+    this.freeLoss = false; this.noCredit = false;
     this.flash = 0.3;
   }
 
@@ -828,6 +837,11 @@ export class Skin {
     this.age[g] = 0; this.pullTo[g] = undefined;
     this.noLoot[g] = 0;
     if (LOOT.on && this.ownerId && !this.freeLoss && !this.free) { this.lapOff[g] = LOOT.lapOf(this.ownerId); LOOT.onLost(this.ownerId, this.cubeValue); }
+    // v0.47 damage = cubes: knocked off by a rival's hit just now (not the KO explosion, not a hazard)
+    if (LOOT.on && this.ownerId && !this.noCredit) {
+      const c = CREDIT.get(this.ownerId);
+      if (c && performance.now() - c.t <= LOOT.creditMs) LOOT.onKnocked(c.by, this.ownerId, this.cubeValue, this.free);
+    }
   }
 
   /** Detach one cube: it becomes debris, flying out from the bot (or with the given velocity / spin). */

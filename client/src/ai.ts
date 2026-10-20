@@ -37,7 +37,9 @@ const ESCAPE_SECONDS = 0.7;
 interface Mem { stuckT: number; escapeT: number; escapeTurn: number; nextThink: number; last: Drive }
 const mem = new WeakMap<Bot, Mem>();
 
-export function aiDrive(self: Bot, target: Bot, arenaHalf: number, dt: number, difficulty: Difficulty = 'hard'): Drive {
+/** v0.49 center: the arena's centre (the Big Arena isn't at 0,0); speedLook: look further ahead for the wall the faster it
+ *  goes (race-speed bots in the Big Arena). Leaving both out = the arena AI exactly as before. */
+export function aiDrive(self: Bot, target: Bot, arenaHalf: number, dt: number, difficulty: Difficulty = 'hard', opts: { center?: Vector3; speedLook?: number } = {}): Drive {
   const D = DIFFICULTY[difficulty];
   let m = mem.get(self);
   if (!m) { m = { stuckT: 0, escapeT: 0, escapeTurn: 1, nextThink: 0, last: { throttle: 0, turn: 0, fire: false } }; mem.set(self, m); }
@@ -94,10 +96,12 @@ export function aiDrive(self: Bot, target: Bot, arenaHalf: number, dt: number, d
   }
 
   // ---- wall avoidance: if our nose is heading into a wall, steer for the centre ----
-  const look = pos.add(fwd.scale(2.2));
+  const c0 = opts.center ?? Vector3.Zero();
+  const flat = self.body.getLinearVelocity(); const flatSpeed = Math.hypot(flat.x, flat.z);
+  const look = pos.add(fwd.scale(2.2 + (opts.speedLook ?? 0) * flatSpeed)).subtract(c0);
   const margin = arenaHalf - WALL_MARGIN;
   const nearWall = Math.abs(look.x) > margin || Math.abs(look.z) > margin;
-  if (nearWall && dist > 2.5) aim = Vector3.Zero();
+  if (nearWall && dist > 2.5) aim = c0.clone();
 
   // ---- steer toward the aim point ----
   const dir = aim.subtract(pos); dir.y = 0;

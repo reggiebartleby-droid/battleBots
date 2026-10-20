@@ -169,6 +169,30 @@
     #rhud i { font-style: normal; font-size: 10px; letter-spacing: .1em; color: #39ff14; } #rhud i.x { color: #ff4d4d; }
     #rhud .dmg { font-size: 11px; color: #8fa3ad; font-weight: 700; }   /* v0.34 damage dealt */
     #rhud .draft { color: #39ff14; font-weight: 900; letter-spacing: .12em; text-shadow: 0 0 6px rgba(57,255,20,.7); }   /* v0.35 slipstream */
+    /* v0.50 start screen: Battle Royal / Race Mode */
+    #modepick { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(8,10,12,.55); z-index: 20; }
+    #modepick.on { display: flex; }
+    #modepick .mp-card { text-align: center; padding: 16px; }
+    #modepick h1 { margin: 0 0 22px; font: 900 34px/1 system-ui, sans-serif; letter-spacing: .14em; color: #fff; text-shadow: 0 0 18px rgba(242,177,52,.6); }
+    #modepick .mp-row { display: flex; gap: 18px; justify-content: center; flex-wrap: wrap; }
+    #modepick .mp-b { width: 240px; padding: 22px 16px; background: rgba(20,22,26,.94); border: 2px solid #4a4f58; border-radius: 10px; color: #d7e3e6; cursor: pointer; display: flex; flex-direction: column; gap: 8px; align-items: center; }
+    #modepick .mp-b b { font: 900 22px/1 system-ui, sans-serif; letter-spacing: .1em; white-space: nowrap; color: #f2b134; }
+    #modepick .mp-b span { font-size: 12px; color: #8fa3ad; }
+    #modepick .mp-b.hi { border-color: #f2b134; box-shadow: 0 0 18px rgba(242,177,52,.45); }
+    #modepick .mp-s { margin-top: 16px; font-size: 11px; color: #8fa3ad; }
+    body.mobile #modepick .mp-s { display: none; }
+    body.choosing #rhud, body.choosing #rmap, body.choosing #kopod, body.choosing #help, body.choosing #m-controls { display: none !important; }
+    body.inlab #modepick { display: none !important; }
+    /* v0.50 Big Arena KO tracker (v0.51 points): a semi-transparent podium, top centre */
+    #kopod { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); display: none; align-items: flex-end; gap: 6px; padding: 6px 10px 0; background: rgba(14,16,20,.35); border-radius: 6px; pointer-events: none; opacity: .85; font-variant-numeric: tabular-nums; }
+    #kopod .pd { display: flex; flex-direction: column; align-items: center; min-width: 84px; color: var(--c); text-shadow: 0 0 6px #000; }
+    #kopod .pn { font-size: 11px; font-weight: 700; letter-spacing: .06em; white-space: nowrap; }
+    #kopod .pk { font-size: 16px; font-weight: 700; line-height: 1.1; }
+    #kopod .me .pn { font-size: 22px; font-weight: 900; }
+    #kopod .me .pk { font-size: 32px; font-weight: 900; }
+    #kopod .ps { width: 100%; margin-top: 2px; background: color-mix(in srgb, var(--c) 30%, transparent); border: 1px solid var(--c); border-bottom: 0; border-radius: 3px 3px 0 0; font-size: 10px; font-weight: 900; color: #fff; text-align: center; padding-top: 2px; box-sizing: border-box; }
+    #kopod i { font-style: normal; font-size: 9px; letter-spacing: .1em; color: #ff4d4d; }
+    body.inlab #kopod { display: none !important; }
     #rmap { position: absolute; top: 12px; right: 12px; background: rgba(14,16,20,.6); border: 1px solid rgba(120,130,145,.35); border-radius: 6px; display: none; pointer-events: none; }
     #rresults { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); background: #141b20; border: 2px solid #2a363f; border-radius: 6px; box-shadow: 0 0 0 1px #0a0e11, 0 20px 50px rgba(0,0,0,.6); font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; color: #d7e3e6; display: none; width: min(560px, calc(100% - 32px)); }
     #rresults.on { display: block; }
@@ -260,8 +284,7 @@
       body.mobile #rotate { display: flex; position: fixed; inset: 0; z-index: 100; background: #0b0d10; align-items: center; justify-content: center; text-align: center; font: 800 20px/1.5 system-ui, sans-serif; letter-spacing: .08em; color: #f2b134; padding: 24px; }
     }
     /* v0.37 tester version (body.tester): race only, track + car pickers on the start card and the results */
-    .pick { display: none; gap: 10px; margin: 0 0 12px; }
-    body.tester .pick { display: flex; }
+    .pick { display: flex; gap: 10px; margin: 0 0 12px; }   /* v0.48 every race (was tester only) */
     .pick label { flex: 1; display: flex; flex-direction: column; gap: 4px; font: 700 11px/1 system-ui, sans-serif; letter-spacing: .12em; color: #8fa3ad; }
     .pick select { font: 600 14px/1.2 system-ui, sans-serif; background: #0b1013; color: #ffc400; border: 1px solid #ffc400; border-radius: 4px; padding: 9px 10px; cursor: pointer; }
     body.tester #rr-lab { display: none; }
@@ -272,6 +295,8 @@
     #rhud .cubeln .wal { font-size: 11px; color: #8fa3ad; font-weight: 700; }
     #rhud .cubeln.lit { text-shadow: 0 0 8px rgba(0,229,255,.95); }
     #rhud .cubeln.lit .cube-ico { transform: scale(1.35); }
+    /* v0.47 crash: the race count is back to 0 -- flashes red */
+    #rhud .cubeln.crash, body.mobile.inrace #rhud .mc.crash { color: #ff4d4d; text-shadow: 0 0 8px rgba(255,77,77,.9); }
     /* v0.40 SCRAP meter + upgrades */
     #rhud .upgln { margin-top: 2px; font-weight: 700; color: #ffd23f; white-space: nowrap; transition: text-shadow .15s; }
     #rhud .upgln b { color: #fff; }
@@ -370,6 +395,13 @@
   <!-- v0.33 race -->
   <div id="rhud"></div>
   <canvas id="rmap" width="260" height="130"></canvas>
+  <div id="kopod"></div>
+  <div id="modepick"><div class="mp-card">
+    <h1>ROBOT REVOLUTION</h1>
+    <div class="mp-row"><button type="button" class="mp-b"><b>BATTLE ROYAL</b><span>Big Arena · 4 bots · most points in 2:00</span></button>
+    <button type="button" class="mp-b"><b>RACE MODE</b><span>4 tracks · 3 laps · weapons on</span></button></div>
+    <div class="mp-s">Click a mode · or ◀ ▶ and Enter</div>
+  </div></div>
   <div id="rresults">
     <h3>RACE RESULTS</h3>
     <div class="pad">

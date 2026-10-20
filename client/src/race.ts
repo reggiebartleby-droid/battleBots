@@ -38,6 +38,7 @@ export const RACE = {
   width: 7,              // road width, m
   wallH: 1.0,            // wall height above the road (v0.33b: 0.8 -> 1.0, fewer bots knocked over it)
   respawnMs: 2000,       // wrecked / off the track -> back at the last checkpoint after this
+  koCreditMs: 2000,      // v0.47 a rival's hit this recent when a bot is wrecked = that rival's KO bonus
   stuckMs: 4000,         // v0.34 immobilized (drive destroyed) or barely moving this long -> back at the last checkpoint, repaired
   stuckSpeed: 0.5,       // m/s: slower than this (flat speed) counts as barely moving
   stuckRespawnMs: 500,   // stuck: short pause after the poof before the fresh bot appears
@@ -270,6 +271,8 @@ export interface RaceHooks {
   /** a racer's bot was (re)built: shadows + Cube Bots skin */
   onSpawn: (b: Bot) => void;
   sign: (text: string, ms: number, color: string) => void;
+  /** v0.47 a crash (wrecked / off the track / lava -- not towed when stuck); koBy = the rival whose hit wrecked it */
+  onCrash?: (r: Racer, why: 'ko' | 'off', koBy?: BotId) => void;
 }
 
 interface Saw { mesh: Mesh; slot: Mesh; pos: Vector3; row: number; up: boolean; last: Map<Bot, number> }
@@ -1206,9 +1209,11 @@ export class Race {
       if (r.human) this.hooks.sign((r.burns ?? 0) === 0 ? 'BURNED UP! — BACK TO THE START LINE' : 'BURNED UP! — BACK TO THE CHECKPOINT', 1800, '#ff6a1f');
     }
     const pos = b.root.position.clone();
+    const koBy = why === 'ko' ? this.combat?.lastAttacker(b, RACE.koCreditMs) : undefined;   // v0.47 KO bonus
     if (cubeSkinOf(b.root)) { cubeKnockout(b, why === 'ko'); dropBot(b); }   // v0.38 towed / off: a poof, no cubes lost
     else { this.fx.explode(b, pos, why === 'ko' ? 'WRECKED!' : why === 'off' ? 'OFF!' : 'TOWED!'); freezeBot(b); }
     if (!b.eliminated) b.eliminated = { t: now, pos, vel: Vector3.Zero(), reason: why === 'off' ? 'out' : 'ko' };
+    if (why !== 'stuck') this.hooks.onCrash?.(r, why, koBy);   // v0.47 crash: the race count goes back to 0
     if (r.human && !burn) this.hooks.sign(why === 'ko' ? 'WRECKED! — BACK TO THE CHECKPOINT' : why === 'off' ? 'OFF THE TRACK!' : 'IMMOBILIZED — BACK TO THE CHECKPOINT', 1500, '#ff4d4d');
   }
 
@@ -1602,25 +1607,8 @@ export class Race {
    *  the AI's random whiffs. Spinners stay on; hammers / flippers fire at a rival close in front; lifters / grabbers hold
    *  while one is close in front. */
   autoFire(r: Racer): boolean {
-    const self = r.bot, w = self.weapon, pos = self.root.position;
     if (r.finished !== undefined) return false;
-    const fwd = forward(self); fwd.y = 0; fwd.normalize();
-    let rd = Infinity;
-    for (const o of this.racers) {
-      if (o === r || o.down || o.bot.eliminated) continue;
-      const to = o.bot.root.position.subtract(pos); to.y = 0;
-      const d = to.length();
-      if (d > 0.01 && d < rd && Vector3.Dot(fwd, to.scale(1 / d)) > 0.55) rd = d;
-    }
-    switch (w.mode) {
-      case 'spinner': return !w.spinning;
-      case 'strike': case 'flipper': {
-        const onPlate = self.hinges?.some(h => h.touched) ?? false;
-        return w.phase === 'ready' && w.refill <= 0 && (onPlate || rd < (w.mode === 'strike' ? 2.8 : 2.2));
-      }
-      case 'hold': return rd < 2.0;
-      default: return false;
-    }
+    return autoFireAt(r.bot, this.racers);
   }
 
   /** For the minimap: local (x, z) of the centre line. */
@@ -1636,4 +1624,75 @@ export function fmtTime(t: number) {
 function worldSpin(s: NonNullable<Bot['spinner']>): number {
   const axis = Vector3.TransformNormal(s.axis, s.parentNode.getWorldMatrix()).normalize();
   return Vector3.Dot(s.body.getAngularVelocity(), axis) * s.dir;
+}
+
+/** v0.49 Big Arena brawl (race settings, no track): the race handling on a flat floor at height floorY --
+ *  the stabilizer, arcade steering (turn rate follows the stick) and sideways grip, exactly as Race.beforePhysics does on
+ *  a flat track (no wet, no slipstream). Notes each spinner's world spin in spinPrev for raceSpinGiveBack. */
+export function flatRacePhysics(bots: Bot[], dt: number, floorY: number, sideGrip: number, spinPrev: Map<Bot, number>) {
+  const free = RACE.stabFreeDeg * Math.PI / 180;
+  for (const b of bots) {
+    if (b.eliminated) continue;
+    if (b.spinner && b.spinner.parentBody === b.body) spinPrev.set(b, worldSpin(b.spinner));
+    if (b.inverted || b.rightingUntil) continue;            // upside down: the self-right handles it
+    const up = upVector(b), tilt = Math.acos(Math.max(-1, Math.min(1, up.y)));
+    if (tilt > Math.PI / 2) continue;
+    const w = b.body.getAngularVelocity();
+    let yaw = w.y;
+    let wx = w.x * (1 - RACE.stabDamp * dt), wz = w.z * (1 - RACE.stabDamp * dt);
+    if (tilt > free) {
+      const ax = Vector3.Cross(up, Vector3.Up()); const n = ax.length();
+      if (n > 1e-4) { const k = RACE.stabPull * (tilt - free) * dt / n; wx += ax.x * k; wz += ax.z * k; }
+    }
+    const grounded = DRIVE.raceArcade && up.y > 0.6 && b.root.position.y - floorY < REST_Y + RACE.groundGap;
+    if (grounded) {
+      const target = (raceTurn.get(b) ?? 0) * RACE.turnRate;
+      yaw += (target - yaw) * Math.min(1, RACE.turnResp * dt);
+      const q = b.root.rotationQuaternion ?? Quaternion.Identity();
+      const right = new Vector3(1, 0, 0).applyRotationQuaternion(q); right.y = 0;
+      if (right.lengthSquared() > 1e-4) {
+        right.normalize();
+        const v = b.body.getLinearVelocity();
+        const lat = Vector3.Dot(v, right);
+        const dv = right.scale(lat * Math.min(1, sideGrip * dt));
+        b.body.setLinearVelocity(v.subtract(dv));
+        for (const wh of b.wheels ?? []) if (!wh.released) wh.body.setLinearVelocity(wh.body.getLinearVelocity().subtract(dv));
+      }
+    }
+    b.body.setAngularVelocity(new Vector3(wx, yaw, wz));
+  }
+}
+/** v0.49 Big Arena brawl: Race.afterPhysics without a race -- a spinner speeding up doesn't twist its chassis. */
+export function raceSpinGiveBack(spinPrev: Map<Bot, number>) {
+  for (const [b, prev] of spinPrev) {
+    const s = b.spinner;
+    if (!s || b.eliminated || s.parentBody !== b.body) continue;
+    const w = worldSpin(s), dw = w - prev;
+    if (dw <= 0 || w <= 0) continue;
+    const axis = Vector3.TransformNormal(s.axis, s.parentNode.getWorldMatrix()).normalize();
+    b.body.applyAngularImpulse(axis.scale(s.inertia * dw * s.dir));
+  }
+  spinPrev.clear();
+}
+
+/** v0.41 phone auto-fire (v0.49: shared by the race and the Big Arena brawl): fire when a rival is close in front. */
+export function autoFireAt(self: Bot, others: { bot: Bot; down?: unknown }[]): boolean {
+  const w = self.weapon, pos = self.root.position;
+  const fwd = forward(self); fwd.y = 0; fwd.normalize();
+  let rd = Infinity;
+  for (const o of others) {
+    if (o.bot === self || o.down || o.bot.eliminated) continue;
+    const to = o.bot.root.position.subtract(pos); to.y = 0;
+    const d = to.length();
+    if (d > 0.01 && d < rd && Vector3.Dot(fwd, to.scale(1 / d)) > 0.55) rd = d;
+  }
+  switch (w.mode) {
+    case 'spinner': return !w.spinning;
+    case 'strike': case 'flipper': {
+      const onPlate = self.hinges?.some(h => h.touched) ?? false;
+      return w.phase === 'ready' && w.refill <= 0 && (onPlate || rd < (w.mode === 'strike' ? 2.8 : 2.2));
+    }
+    case 'hold': return rd < 2.0;
+    default: return false;
+  }
 }

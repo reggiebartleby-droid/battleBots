@@ -1418,6 +1418,11 @@ function releaseWheels(bot: Bot) {
     w.body.setAngularVelocity(Vector3.Zero());
     w.body.setMotionType(PhysicsMotionType.STATIC);
     w.hub.setEnabled(false);
+    // v0.49b parked far below the world: hidden + static with its filters off it could still block bots (an invisible
+    // wall where the wheel fell off -- found in the Big Arena with the K probe)
+    w.body.disablePreStep = false;
+    w.hub.position.set(w.hub.position.x, -500, w.hub.position.z);
+    w.hub.getScene().onAfterPhysicsObservable.addOnce(() => { w.body.disablePreStep = true; });
     extra += w.mass;
   }
   if (extra <= 0) return;
