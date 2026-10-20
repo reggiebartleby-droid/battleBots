@@ -548,6 +548,7 @@ async function main() {
 
   // ---------------- v0.37 TESTER pickers (track + car) ----------------
   const tp = {
+    mode: [document.getElementById('tp-mode') as HTMLSelectElement, document.getElementById('tp-mode2') as HTMLSelectElement],   // v0.61 (user) MODE picker
     track: [document.getElementById('tp-track') as HTMLSelectElement, document.getElementById('tp-track2') as HTMLSelectElement],
     car: [document.getElementById('tp-car') as HTMLSelectElement, document.getElementById('tp-car2') as HTMLSelectElement],
   };
@@ -569,21 +570,33 @@ async function main() {
     const opts = Object.keys(PRESETS).map(n => `<option value="${n}">${PRESETS[n].cosmetics.name}</option>`).join('');
     for (const sel of tp.car) sel.innerHTML = opts + (labBuild && !pickRace ? `<option value="${LAB_CAR}">MY LAB BUILD</option>` : '');
   };
-  const sync = () => { for (const sel of tp.track) sel.value = raceTrack; for (const sel of tp.car) sel.value = testerCar; };
+  /** v0.61 (user) MODE picker on the start card + results: Battle Royale / Race Mode / Boss Battle. TRACK only shows in
+   *  Race Mode (race tracks + Random); lastRaceTrack remembers the race pick while you play the other modes. */
+  let lastRaceTrack: TrackId | 'random' = TESTER_SET.track;
+  const modeKey = (t: TrackPick) => t === BIG_ID ? 'brawl' : t === BOSS_ID ? 'boss' : 'race';
+  const pickHint = () => modeKey(raceTrack) === 'race' ? 'Pick a track and a car' : 'Pick a car';
+  const sync = () => {
+    if (raceTrack !== BIG_ID && raceTrack !== BOSS_ID) lastRaceTrack = raceTrack;
+    for (const sel of tp.mode) sel.value = modeKey(raceTrack);
+    for (const sel of tp.track) { sel.value = lastRaceTrack; (sel.closest('label') as HTMLElement).style.display = modeKey(raceTrack) === 'race' ? '' : 'none'; }
+    for (const sel of tp.car) sel.value = testerCar;
+  };
   const buildFor = (car: string): BotBuild | null => car === LAB_CAR ? (labBuild ? JSON.parse(JSON.stringify(labBuild)) : null) : JSON.parse(JSON.stringify(PRESETS[car]));
-  for (const sel of tp.track) sel.innerHTML = TRACK_IDS.map(id => `<option value="${id}">${races[id].def.name}</option>`).join('') + `<option value="${BIG_ID}">Big Arena</option>` + `<option value="${BOSS_ID}">Boss Battle</option>` + '<option value="random">Random</option>';   // v0.49 + Big Arena; v0.58 + Boss Battle
+  for (const sel of tp.track) sel.innerHTML = TRACK_IDS.map(id => `<option value="${id}">${races[id].def.name}</option>`).join('') + '<option value="random">Random</option>';   // v0.61 race tracks only (the arenas moved to MODE)
+  for (const sel of tp.mode) sel.innerHTML = '<option value="brawl">Battle Royale</option><option value="race">Race Mode</option><option value="boss">Boss Battle</option>';
   carOptions();
   const pick = (sel: HTMLSelectElement, rebuild: boolean) => {
-    if (tp.track.includes(sel)) raceTrack = sel.value as TrackPick; else testerCar = sel.value;
+    if (tp.mode.includes(sel)) raceTrack = sel.value === 'brawl' ? BIG_ID : sel.value === 'boss' ? BOSS_ID : lastRaceTrack;   // v0.61
+    else if (tp.track.includes(sel)) raceTrack = sel.value as TrackPick; else testerCar = sel.value;
     raceBuild = buildFor(testerCar) ?? raceBuild;
     sync();
     if (pickRace) try { localStorage.setItem(TESTER_KEY, JSON.stringify({ track: raceTrack, car: testerCar })); } catch { /* ignore */ }
     sel.blur(); canvas.focus();
     if (rebuild) startRace();   // start card: rebuild the grid behind it with the new pick, card stays up
   };
-  for (const sel of [...tp.track, ...tp.car]) {
+  for (const sel of [...tp.mode, ...tp.track, ...tp.car]) {
     sel.addEventListener('keydown', e => e.preventDefault());   // mouse only: R / Enter / WASD never change the pick by accident
-    sel.addEventListener('change', () => pick(sel, sel === tp.track[0] || sel === tp.car[0]));
+    sel.addEventListener('change', () => pick(sel, sel === tp.mode[0] || sel === tp.track[0] || sel === tp.car[0]));
   }
   /** v0.48 a race from the lab's RACE button: lab settings, pickers start on what the lab picked */
   const fromLab = (player: BotBuild) => {
@@ -606,9 +619,18 @@ async function main() {
   // ---------------- v0.43 controller (user): menus + buttons. A / Start = START, Y = camera, Back / View = restart,
   // LB / RB = track, D-pad left / right = car (start card + results). Phone: a controller hides the touch buttons.
   const cardUp = () => rd.box.classList.contains('on') || rr.box.classList.contains('on');
+  /** v0.61 LB / RB step through Battle Royale, the race tracks, Random, Boss Battle (mode + track in one list) */
+  const PAD_TRACKS: TrackPick[] = [BIG_ID, ...TRACK_IDS, 'random', BOSS_ID];
   function padPick(kind: 'track' | 'car', dir: number) {
     if (mode !== 'race' || !cardUp()) return;
-    const sel = (kind === 'track' ? tp.track : tp.car)[rd.box.classList.contains('on') ? 0 : 1];
+    if (kind === 'track') {
+      const n = PAD_TRACKS.length, i = Math.max(0, PAD_TRACKS.indexOf(raceTrack));
+      raceTrack = PAD_TRACKS[(i + dir + n) % n]; sync();
+      if (pickRace) try { localStorage.setItem(TESTER_KEY, JSON.stringify({ track: raceTrack, car: testerCar })); } catch { /* ignore */ }
+      if (rd.box.classList.contains('on')) startRace();
+      return;
+    }
+    const sel = tp.car[rd.box.classList.contains('on') ? 0 : 1];
     const n = sel.options.length; if (!n) return;
     sel.selectedIndex = (sel.selectedIndex + dir + n) % n;
     sel.dispatchEvent(new Event('change'));
@@ -1080,7 +1102,7 @@ async function main() {
     if (brawl?.boss) { showBossReady(); return; }   // v0.58
     const p = brawlPlayer()!.bot;
     const pad = padConnected();
-    rd.title.innerHTML = `BIG ARENA <span class="vs">4 BOTS · ${bigTarget ? `FIRST TO ${bigTarget} POINTS` : `MOST POINTS IN ${clock(BIG.seconds)}`}</span>`;
+    rd.title.innerHTML = `BATTLE ROYALE <span class="vs">4 BOTS · ${bigTarget ? `FIRST TO ${bigTarget} POINTS` : `MOST POINTS IN ${clock(BIG.seconds)}`}</span>`;
     const rows: [string, string][] = [
       ['DRIVE', pad ? 'Controller: RT gas · LT brake, then reverse · left stick steers' : MOBILE ? 'It drives itself forward: ◀ ▶ steer (tap = small turn, hold = full turn) · BRAKE held = slow down, then reverse' : 'W A S D (or gamepad left stick)'],
       ['WEAPON', pad ? p.weapon.hint('A') : MOBILE ? 'Fires on its own when a bot is close in front of you' : p.weapon.hint('SPACE')],
@@ -1098,7 +1120,7 @@ async function main() {
       : raceSeen ? rows.filter(([k]) => k === 'ARENA' || k === 'WALLET') : rows;
     rd.table.innerHTML = shown.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
     rd.start.style.display = '';
-    rd.small.textContent = pad ? 'LB / RB: track · D-pad ◀ ▶: car · A or Start: START · Y: camera · Back: restart' : MOBILE ? 'Pick a track and a car · tap START' : pickRace ? 'Pick a track and a car · Enter or click START' : 'Pick a track and a car · Enter or click START · B: back to the lab';
+    rd.small.textContent = pad ? 'LB / RB: mode / track · D-pad ◀ ▶: car · A or Start: START · Y: camera · Back: restart' : MOBILE ? `${pickHint()} · tap START` : pickRace ? `${pickHint()} · Enter or click START` : `${pickHint()} · Enter or click START · B: back to the lab`;   // v0.61
     rd.box.classList.add('on');
   }
 
@@ -1125,7 +1147,7 @@ async function main() {
       : raceSeen ? rows.filter(([k]) => k === 'TO WIN' || k === 'SUPER' || k === 'WALLET') : rows;
     rd.table.innerHTML = shown.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
     rd.start.style.display = '';
-    rd.small.textContent = pad ? 'LB / RB: track · D-pad ◀ ▶: car · A or Start: START · Y: camera · Back: restart' : MOBILE ? 'Pick a car · tap START' : pickRace ? 'Pick a car · Enter or click START' : 'Pick a car · Enter or click START · B: back to the lab';
+    rd.small.textContent = pad ? 'LB / RB: mode / track · D-pad ◀ ▶: car · A or Start: START · Y: camera · Back: restart' : MOBILE ? 'Pick a car · tap START' : pickRace ? 'Pick a car · Enter or click START' : 'Pick a car · Enter or click START · B: back to the lab';
     rd.box.classList.add('on');
   }
   /** v0.58 boss HP bar (top centre; the podium moves down under it) */
@@ -1337,7 +1359,7 @@ async function main() {
       : raceSeen ? rows.filter(([k]) => k === 'TRACK' || k === 'WALLET') : rows;
     rd.table.innerHTML = shown.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
     rd.start.style.display = '';
-    rd.small.textContent = pad ? 'LB / RB: track · D-pad ◀ ▶: car · A or Start: START · Y: camera · Back: restart' : MOBILE ? 'Pick a track and a car · tap START' : pickRace ? 'Pick a track and a car · Enter or click START' : 'Pick a track and a car · Enter or click START · B: back to the lab';   // v0.48 pickers in every race
+    rd.small.textContent = pad ? 'LB / RB: mode / track · D-pad ◀ ▶: car · A or Start: START · Y: camera · Back: restart' : MOBILE ? `${pickHint()} · tap START` : pickRace ? `${pickHint()} · Enter or click START` : `${pickHint()} · Enter or click START · B: back to the lab`;   // v0.61   // v0.48 pickers in every race
     rd.box.classList.add('on');
   }
   /** race / battle camera distance (11 = the desktop camera; v0.60 phones the same) */
@@ -1513,7 +1535,7 @@ async function main() {
   function chooseMode(i: number) {
     modeEl.classList.remove('on'); document.body.classList.remove('choosing');
     if (modeOf(raceTrack) !== i) {
-      raceTrack = i === 0 ? BIG_ID : i === 2 ? BOSS_ID : TESTER_SET.track;
+      raceTrack = i === 0 ? BIG_ID : i === 2 ? BOSS_ID : lastRaceTrack;   // v0.61 Race Mode: your last race track
       sync();
       try { localStorage.setItem(TESTER_KEY, JSON.stringify({ track: raceTrack, car: testerCar })); } catch { /* ignore */ }
       startRace();
