@@ -298,9 +298,9 @@ export class Combat {
     const order = up < 0 ? ['armor', 'armor_1', 'armor_2', 'weapon', 'motor'] : ['wheels', 'armor_1', 'armor_2', 'armor', 'motor'];
     const socket = this.cubeSocket(self, ev.point ?? undefined) ?? order.find(alive) ?? Object.keys(self.state.parts).find(alive);   // v0.29 HP = cubes
     if (!socket) return;
-    const dealt = hurt(self, socket, raw, ev.point ?? undefined);
     const by = touch.by;
-    if (this.peace?.(by, self)) return;   // v0.58 friendly fire off
+    if (this.peace?.(by, self)) return;   // v0.58 friendly fire off -- v0.59c (user) checked BEFORE the damage (it used to hurt anyway, just uncredited); the landing itself is untouched
+    const dealt = hurt(self, socket, raw, ev.point ?? undefined);
     this.log.push({ t: now, attacker: by.id, victim: self.id, socket, dmg: dealt });
     this.stats[by.id].hits++;
     this.stats[by.id].dmg += dealt;
@@ -385,7 +385,7 @@ export class Combat {
 
   private spinHit(attacker: Bot, defender: Bot, c: SpinContact) {
     if (this.peace?.(attacker, defender)) return;   // v0.58 friendly fire off (they still shove each other)
-    const raw = canAttack(attacker.state) ? Math.round(c.lost / (c.jPerDmg ?? SPIN_DMG.joulesPerDmg) * (DMG_SCALE[attacker.weaponKind ?? ''] ?? 1) * (attacker.dmgMul ?? 1)) : 0;   // v0.31 DMG_SCALE; v0.40 weapon upgrade
+    const raw = canAttack(attacker.state) ? Math.round(c.lost / (c.jPerDmg ?? SPIN_DMG.joulesPerDmg) * (DMG_SCALE[attacker.weaponKind ?? ''] ?? 1) * (attacker.dmgMul ?? 1) * (attacker.odMul ?? 1)) : 0;   // v0.31 DMG_SCALE; v0.40 weapon upgrade
     if (raw < SPIN_DMG.minDmg) return;
     const alive = (id: string) => (defender.state.parts[id]?.hp ?? 0) > 0;
     // crusher pierces the top: top armor, then the insides (weapon motor, drive motor)
@@ -405,7 +405,7 @@ export class Combat {
 
   /** v0.58 a real weapon hit on the boss: same damage rule as spinHit, the boss picks the part it lands on. */
   private extHit(attacker: Bot, t: ExtTarget, c: SpinContact) {
-    const raw = canAttack(attacker.state) ? Math.round(c.lost / (c.jPerDmg ?? SPIN_DMG.joulesPerDmg) * (DMG_SCALE[attacker.weaponKind ?? ''] ?? 1) * (attacker.dmgMul ?? 1)) : 0;
+    const raw = canAttack(attacker.state) ? Math.round(c.lost / (c.jPerDmg ?? SPIN_DMG.joulesPerDmg) * (DMG_SCALE[attacker.weaponKind ?? ''] ?? 1) * (attacker.dmgMul ?? 1) * (attacker.odMul ?? 1)) : 0;
     if (raw < SPIN_DMG.minDmg) return;
     const dealt = t.hit(attacker, raw, c.point);
     if (dealt <= 0) return;

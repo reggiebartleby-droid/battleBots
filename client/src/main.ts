@@ -8,7 +8,7 @@ import type { BotBuild } from '../../src/core/types.js';
 import { canAttack, isDestroyed, isImmobilized } from '../../src/core/state.js';
 import { catalog } from './catalog.js';
 import { buildArena, WALL_H, ARENA_SIZE, ARENA_COLOURS, FLOOR_GRIDS, type ArenaStyle } from './arena.js';
-import { buildBot, forward, upVector, driveSpinner, spinOmega, applyGyro, disposeBot, freezeBot, snapSpinner, driveArm, armBefore, armAfter, applyMagnets, driveFlipper, driveControl, hingesBefore, driveWheels, wheelsBefore, carryWheels, botMeshes, dropBot, DRIVE, type Bot, type BotId } from './bot.js';
+import { buildBot, forward, upVector, driveSpinner, spinOmega, applyGyro, disposeBot, freezeBot, snapSpinner, driveArm, armBefore, armAfter, applyMagnets, driveFlipper, driveControl, hingesBefore, driveWheels, wheelsBefore, carryWheels, botMeshes, dropBot, kickSpinner, DRIVE, type Bot, type BotId } from './bot.js';
 import { applyEnvironment, castShadows, makeShadows } from './look.js';
 import { setupPerf } from './perf.js';   // v0.44 FPS / triangles / draw calls readout
 import { readDrive, isDown, KEYS, type Drive, padConnected, onPadButton, onPadChange, pressKey } from './input.js';   // v0.43 controller
@@ -25,6 +25,7 @@ import { aiDrive, type Difficulty } from './ai.js';
 import { MOBILE, MobileMenu, setupTouchControls, goFullscreen, TOUCH, tapKey } from './mobile.js';
 import { CUBES } from './cubes.js';
 import { Upgrades } from './upgrades.js';
+import { Overdrive, SUPER } from './overdrive.js';   // v0.59 Boss Battle super meter, weapon overdrive, combos
 import { Celebrate, CELEBRATE } from './celebrate.js';   // v0.52 first-place sign + fireworks   // v0.40 race upgrades (SCRAP meter)
 import { BossFight, BOSS } from './boss.js';   // v0.58 Boss Battle
 import { Race, RACE, TRACK_IDS, ordinal, fmtTime, flatRacePhysics, raceSpinGiveBack, autoFireAt, type Racer, type TrackId } from './race.js';
@@ -494,6 +495,26 @@ async function main() {
   const upg = new Upgrades(scene, fx, { sign: (t, ms, c) => hud.sign(t, ms, c), isPlayer: id => playerId() === id, shadows,
     onBox: id => { if (brawl && inRace(id)) boxesTaken[id] = (boxesTaken[id] ?? 0) + 1; },   // v0.51 Big Arena points
     ally: () => !!brawl?.boss });   // v0.58 Boss Battle: everyone's on your team
+  // v0.59 Boss Battle super: points fill the meter, E / pad Y = weapon overdrive; 2+ at once = a combo
+  const od = new Overdrive(scene, {
+    sign: (t, ms, c) => hud.sign(t, ms, c),
+    onFire: f => { if (f.bot.spinner) { f.bot.weapon.spinning = true; kickSpinner(f.bot.spinner, SUPER.spin); } },
+    onCombo: (_n, bs) => {
+      const boss = brawl?.boss;
+      if (!boss) return;
+      if (boss.stun(SUPER.stunMs, SUPER.stunCooldownMs)) hud.sign('STINGWHEEL STUNNED!', 1300, '#36f1ff');
+      for (const b of bs) boss.popMinisNear(b.root.position, SUPER.popR);
+      fx.kick(0.3);
+    },
+  });
+  /** v0.59 E / pad Y: your overdrive (Boss Battle, while fighting) */
+  const fireOverdrive = () => {
+    const B = brawl, me = brawlPlayer();
+    if (!B?.boss || !me || phase !== 'fight' || B.over) return;
+    if (!od.fire(me, B.racers, performance.now()) && !od.active(me.id, performance.now()))
+      hud.sign(`OVERDRIVE ${Math.floor(od.meterOf(me.id))}%`, 600, '#8fa3ad');
+  };
+  const odArmNext = new WeakMap<Bot, number>();   // v0.59 overdrive: when a hammer / saw may swing again
   const inRace = (id: string) => {
     if (brawl) return phase === 'fight' && !brawl.over && brawl.racers.some(f => f.id === id);   // v0.49 Big Arena
     const r = race.racers.find(x => x.id === id); return !!r && r.finished === undefined && phase === 'fight';
@@ -591,7 +612,7 @@ async function main() {
   }
   onPadButton(btn => {
     if (btn === 0 || btn === 9) { if (btn === 9 || cardUp()) pressKey('Enter'); }   // A only on a card (A is the weapon in a race)
-    else if (btn === 3) pressKey('KeyQ');
+    else if (btn === 3) { if (brawl?.boss && phase === 'fight' && !cardUp()) fireOverdrive(); else pressKey('KeyQ'); }   // v0.59 Y = overdrive in the Boss Battle (camera everywhere else)
     else if (btn === 8) tapKey('KeyR');
     else if (btn === 4 || btn === 5) padPick('track', btn === 5 ? 1 : -1);
     else if (btn === 14 || btn === 15) padPick('car', btn === 15 ? 1 : -1);
@@ -665,7 +686,7 @@ async function main() {
     if (!raceBuild) return;
     leaveCourse();
     if (mode === 'race') { endBrawl(); race.dispose(); bots = []; fx.clear(); } else clearBots();
-    clearLoot(); LOOT.on = true; tally = {}; paid = null; cubePulse = 0; boxesTaken = {}; bossPts = {}; launches = {}; party.stop();
+    clearLoot(); LOOT.on = true; tally = {}; paid = null; cubePulse = 0; boxesTaken = {}; bossPts = {}; launches = {}; party.stop(); od.reset();   // v0.59
     const bossMode = raceTrack === BOSS_ID;   // v0.58
     race.setVisible(false);
     applyTrackTheme(null);   // the arena's black + neon
@@ -679,7 +700,8 @@ async function main() {
     const boss = bossMode ? new BossFight(scene, bigBox.center, bigBox.half, {
       team: () => brawl?.racers.filter(f => !f.down) ?? [], combat: () => combat, fx,
       sign: (t, ms, c) => hud.sign(t, ms, c), isPlayer: id => playerId() === id, shadows,
-      onPoints: (id, pts, why) => { const b = bossPt(id); if (why === 'boss') b.boss += pts; else if (why === 'mini') b.minis++; else b.final += pts; },
+      onPoints: (id, pts, why) => { const b = bossPt(id); if (why === 'boss') b.boss += pts; else if (why === 'mini') b.minis++; else b.final += pts;
+        if (brawl) od.teamPoints(brawl.racers.find(f => f.id === id), brawl.racers, pts, why === 'boss', performance.now()); },   // v0.59 points fill the super meter; v0.59c + 20% to teammates, ASSIST bonus
     }) : undefined;
     if (boss) { combat.ext.push(boss.target3); combat.peace = () => true; }
     // the race settings (bots are built with them)
@@ -723,6 +745,7 @@ async function main() {
     for (const f of brawl.racers) { if (!f.gone) disposeBot(f.bot); f.flight?.chute?.dispose(); if (f.flight?.camMaxR !== undefined) cam.upperRadiusLimit = f.flight.camMaxR; }   // v0.58d   // v0.58b parachutes too
     brawl.boss?.dispose();   // v0.58
     hideBossBar();
+    od.reset(); supEl.style.display = 'none';   // v0.59
     brawl = null; bots = [];
     upg.clear();
     bigBox.setVisible(false);
@@ -733,9 +756,10 @@ async function main() {
   /** One frame of the Big Arena. */
   function brawlFrame(dt: number, now: number) {
     const B = brawl!;
-    helpEl.innerHTML = `WASD drive &nbsp;·&nbsp; SPACE weapon &nbsp;·&nbsp; Q camera &nbsp;·&nbsp; R restart` + (pickRace ? '' : ` &nbsp;·&nbsp; B lab`);
+    helpEl.innerHTML = `WASD drive &nbsp;·&nbsp; SPACE weapon${B.boss ? ' &nbsp;·&nbsp; E overdrive' : ''} &nbsp;·&nbsp; Q camera &nbsp;·&nbsp; R restart` + (pickRace ? '' : ` &nbsp;·&nbsp; B lab`);
     if (phase === 'countdown' && tickCountdown(now)) phase = 'fight';
     const waiting = phase !== 'fight';
+    if (B.boss) od.update(B.racers, now, !waiting && !B.over);   // v0.59 overdrive flags + multipliers onto the bots, AI firing, combos
     scene.getPhysicsEngine()?.setTimeStep(PHYS_STEP);
     const live = B.racers.filter(f => !f.down && !f.bot.eliminated);
     for (const f of live) {
@@ -856,8 +880,8 @@ async function main() {
     if (!f.target) return NO_DRIVE;
     return aiDrive(f.bot, f.target.bot, bigBox.half, dt, raceDiff, { center: bigBox.center, speedLook: BIG.speedLook, round: true });
   }
-  /** v0.58 AI ally in the Boss Battle: minis on itself = turn hard to shake them off; a teammate with minis on it close by
-   *  = go help (its weapon pops them); a free mini close by = get it; otherwise the boss (the nearest point of its hull --
+  /** v0.58 AI ally in the Boss Battle: minis on itself = turn hard to shake them off; (v0.59b: no more going to help a
+   *  teammate with minis -- parked); a free mini close by = get it; otherwise the boss (the nearest point of its hull --
    *  the arena AI flanks a live disc on its own). */
   const shakeT = new Map<string, number>();
   function bossAi(f: Fighter, live: Fighter[], boss: BossFight, dt: number, now: number): Drive {
@@ -868,11 +892,11 @@ async function main() {
     }
     shakeT.delete(f.id);
     const p = f.bot.root.position;
-    const buddy = live.find(o => o !== f && boss.latchedOn(o.bot) > 0 && Vector3.Distance(o.bot.root.position, p) < 7);
-    const mini = buddy ? undefined : boss.miniNear(p, 4);
-    if (buddy || mini) {
+    // v0.59b (user) "help a teammate" (drive at a teammate with minis on it) removed for now -- too confusing; parked to come back later
+    const mini = boss.miniNear(p, 4);
+    if (mini) {
       const n = (bossAiNode ??= new TransformNode('boss_aiPoint', scene));
-      n.position.copyFrom(buddy ? buddy.bot.root.position : mini!);
+      n.position.copyFrom(mini);
       return aiDrive(f.bot, { root: n, weapon: { power: () => 0 } } as unknown as Bot, bigBox.half, dt, raceDiff, opts);
     }
     return aiDrive(f.bot, boss.aimFor(f.id, p), bigBox.half, dt, raceDiff, opts);
@@ -1087,12 +1111,15 @@ async function main() {
       ['BOSS', `A giant scorpion (${BOSS.hp.chassis + BOSS.hp.carapace + BOSS.hp.tail + BOSS.hp.pincerL + BOSS.hp.pincerR + BOSS.hp.disc} HP). Its tail holds a huge spinning disc in front of its face — hit it from the sides and the back. Pincers grab and throw you at the disc. At 66% it gets faster and SLAMS (red ring = get out); at 33% it's ENRAGED and spins.`],
       ['MINIS', `Mini scorpions crawl out of the burrows. Hit one or run it over (fast) to pop it. On you they slow you down and nibble — turn hard or hit a wall to shake them off; a teammate's weapon pops them too.`],
       ['POINTS', `+1 per HP you knock off the boss · +${BOSS.mini.pts} per mini · +${BOSS.pts.final} for the final hit. Most points = top of the podium.`],
+      ['SUPER', `Points fill your OVERDRIVE meter (${SUPER.full}). ${pad ? 'Y' : 'E'} = ${SUPER.ms / 1000} s of WEAPON OVERDRIVE: x${SUPER.dmg} damage; spinners jump to ${SUPER.spin}x speed, hammers and saws swing on their own, flippers get unlimited gas and ${SUPER.flipPower}x power, lifters / grabbers / crushers ${SUPER.controlTorque}x torque.`],
+      ['TEAMWORK', `${Math.round(SUPER.share * 100)}% of every point a teammate earns goes into your meter too. Hit the boss within ${SUPER.assist.windowMs / 1000} s of a teammate = ASSIST: +${SUPER.assist.meter} meter for you both.`],
+      ['COMBO', `2 or more bots in overdrive at once = COMBO: x3 damage (x4 for 3 bots, x5 for all 4), STINGWHEEL is stunned ${SUPER.stunMs / 1000} s and minis near you pop. Your allies follow your lead: fire yours and theirs go too (if full).`],
       ['CUBES', `Boss cubes you knock loose are loot: vacuum them up (they repair you and fill your SCRAP meter). You earn cubes for your place.`],
       ['WALLET', `${CUBE_ICON}<b class="cubes">${walletCubes()}</b> cubes`],
-      pad ? ['BUTTONS', 'Y: camera · Back / View: restart'] : MOBILE ? ['BUTTONS', 'CAM: change the view · RESTART: start over'] : ['KEYS', pickRace ? 'R: restart · Q: camera' : 'R: restart · B: lab · Q: camera'],
+      pad ? ['BUTTONS', 'Y: OVERDRIVE (camera before START) · Back / View: restart'] : MOBILE ? ['BUTTONS', 'CAM: change the view · RESTART: start over'] : ['KEYS', pickRace ? 'E: overdrive · R: restart · Q: camera' : 'E: overdrive · R: restart · B: lab · Q: camera'],   // v0.59
     ];
     const shown = MOBILE ? rows.filter(([k]) => (raceSeen ? ['WALLET'] : ['DRIVE', 'WEAPON', 'WALLET']).includes(k))
-      : raceSeen ? rows.filter(([k]) => k === 'TO WIN' || k === 'WALLET') : rows;
+      : raceSeen ? rows.filter(([k]) => k === 'TO WIN' || k === 'SUPER' || k === 'WALLET') : rows;
     rd.table.innerHTML = shown.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
     rd.start.style.display = '';
     rd.small.textContent = pad ? 'LB / RB: track · D-pad ◀ ▶: car · A or Start: START · Y: camera · Back: restart' : MOBILE ? 'Pick a car · tap START' : pickRace ? 'Pick a car · Enter or click START' : 'Pick a car · Enter or click START · B: back to the lab';
@@ -1105,15 +1132,26 @@ async function main() {
     const f = Math.max(0, boss.hp / boss.maxHp);
     bossBar.querySelector<HTMLElement>('.bf')!.style.width = `${(f * 100).toFixed(1)}%`;
     bossBar.querySelector<HTMLElement>('.bh')!.textContent = `${Math.ceil(boss.hp)} / ${boss.maxHp}`;
-    bossBar.querySelector<HTMLElement>('.bp')!.textContent = boss.dead ? 'DESTROYED' : boss.state === 'stagger' ? 'STAGGERED!' : `PHASE ${boss.phase}`;
+    bossBar.querySelector<HTMLElement>('.bp')!.textContent = boss.dead ? 'DESTROYED' : boss.stunned ? 'STUNNED!' : boss.state === 'stagger' ? 'STAGGERED!' : `PHASE ${boss.phase}`;
     bossBar.classList.toggle('p2', boss.phase === 2); bossBar.classList.toggle('p3', boss.phase === 3);
   }
   function hideBossBar() { document.body.classList.remove('bossfight'); }
+  /** v0.59 your super meter (bottom centre): fills with points; full = E / Y; running = time left + the multiplier */
+  const supEl = document.getElementById('supbar')!;
+  function drawSuperBar(pf: Fighter, now: number) {
+    supEl.style.display = 'block';
+    const on = od.active(pf.id, now), full = od.ready(pf.id);
+    const pct = on ? od.leftMs(pf.id, now) / SUPER.ms * 100 : od.meterOf(pf.id) / SUPER.full * 100;
+    supEl.className = on ? 'on' : full ? 'full' : '';
+    supEl.querySelector<HTMLElement>('.sf')!.style.width = `${pct.toFixed(1)}%`;
+    const key = padConnected() ? 'Y' : 'E', mul = od.mulOf(pf.id, now);
+    supEl.querySelector<HTMLElement>('.sk')!.textContent = on ? (od.n >= 2 ? `COMBO x${mul}!` : `OVERDRIVE x${mul}`) : full ? `${key}: OVERDRIVE!` : `${Math.floor(od.meterOf(pf.id))}%`;
+  }
 
   function drawBrawlHud(now: number) {
     const B = brawl!, pf = brawlPlayer();
     if (!pf) return;
-    if (B.boss) drawBossBar(B.boss); else hideBossBar();
+    if (B.boss) { drawBossBar(B.boss); drawSuperBar(pf, now); } else { hideBossBar(); supEl.style.display = 'none'; }   // v0.59 super meter
     const st = B.standings();
     const tag = (f: Fighter) => f.down ? ` <i class="x">${f.down.why === 'off' ? 'OUT' : f.down.why === 'launch' ? 'LAUNCHED' : f.down.why === 'ko' ? 'WRECK' : 'STUCK'}</i>`
       : B.over ? (f.place === 1 ? ' <i>WIN</i>' : '')
@@ -1166,6 +1204,7 @@ async function main() {
       const name = f.human ? (pickRace ? 'YOU' : f.name) : f.name;
       return `<div class="pd${f.human ? ' me' : ''}" style="--c:${c}">`
         + `<div class="pn">${name}${tag(f)}</div><div class="pk">${pointsOf(f)}</div>`
+        + (brawl?.boss ? `<div class="pm${od.active(f.id, now) ? ' on' : od.ready(f.id) ? ' full' : ''}"><b style="width:${od.active(f.id, now) ? od.leftMs(f.id, now) / SUPER.ms * 100 : od.meterOf(f.id) / SUPER.full * 100}%"></b></div>` : '')   // v0.59 everyone's super meter
         + `<div class="ps${r >= 4 ? ' dots' : ''}" style="height:${[46, 34, 24, 15][r - 1] ?? 15}px">${ordinal(r)}</div></div>`;
     }).join('');
   }
@@ -1508,7 +1547,7 @@ async function main() {
     raceSeen = true; sync(); startRace();
   }
   (window as unknown as { __bb: unknown }).__bb = { get race() { return race; }, get phase() { return phase; }, scene, cam,
-    get tally() { return tally; }, get brawl() { return brawl; }, get combat() { return combat; }, bigBox, get knockFree() { return knockFree; }, get paid() { return paid; }, upg, skinCount: (id: string) => { const r = race.racers.find(x => x.id === id); return r ? cubeSkinOf(r.bot.root)?.count : undefined; } };   // v0.38   // v0.35b scene + cam for sandbox screenshots   // v0.35 race changes with the track
+    get tally() { return tally; }, get brawl() { return brawl; }, od, get combat() { return combat; }, bigBox, get knockFree() { return knockFree; }, get paid() { return paid; }, upg, skinCount: (id: string) => { const r = race.racers.find(x => x.id === id); return r ? cubeSkinOf(r.bot.root)?.count : undefined; } };   // v0.38   // v0.35b scene + cam for sandbox screenshots   // v0.35 race changes with the track
 
   // v0.8 real spinner damage: weapon energy measured around every physics step
   scene.onBeforePhysicsObservable.add(() => {
@@ -1597,6 +1636,7 @@ async function main() {
   window.addEventListener('keydown', e => {
     if (e.repeat || inMenu()) return;
     if (e.code === 'KeyK') runProbe();
+    else if (e.code === 'KeyE') fireOverdrive();   // v0.59 Boss Battle super
     else if (e.code === 'KeyT' && brawl && !brawl.boss) {   // (v0.58 not in the Boss Battle)   // v0.51 target points (Big Arena test aid): off -> 150 -> 300 -> 500 -> off
       const T = BIG.targets; bigTarget = T[(T.indexOf(bigTarget) + 1) % T.length];
       hud.sign(bigTarget ? `TARGET: ${bigTarget} POINTS` : 'TARGET OFF — MOST POINTS AT THE CLOCK', 1400, '#36f1ff');
@@ -1731,7 +1771,7 @@ async function main() {
     if (b.spinner) {
       const motorAlive = (b.state.parts['weapon_motor']?.hp ?? 0) > 0;
       b.weapon.motorDead = !motorAlive;
-      driveSpinner(b, b.weapon.spinning && !b.weapon.suppressed && canAttack(b.state), motorAlive, b.spinner, preSpin ? PRESPIN_BOOST : 1);
+      driveSpinner(b, (b.weapon.spinning || !!b.overdrive) && !b.weapon.suppressed && canAttack(b.state), motorAlive, b.spinner, preSpin ? PRESPIN_BOOST : 1, b.overdrive ? SUPER.spin : 1);   // v0.59 overdrive: 1.5x top speed
       b.weapon.spinLevel = Math.min(1, Math.max(0, spinOmega(b) / b.spinner.omegaMax));
     }
     // v0.10 real overhead arm: tap = swing, hold = pin; the saw on the arm spins whenever it can
@@ -1739,7 +1779,10 @@ async function main() {
       const motorAlive = (b.state.parts['weapon_motor']?.hp ?? 0) > 0;
       const usable = !b.weapon.suppressed && canAttack(b.state);
       b.weapon.motorDead = !motorAlive;
-      driveArm(b, b.weapon.fireHeld, b.weapon.pressed, usable, motorAlive, dt);
+      // v0.59 overdrive: it swings on its own, 3 times a second
+      let auto = false;
+      if (b.overdrive && b.arm.state === 'ready' && now >= (odArmNext.get(b) ?? 0)) { auto = true; odArmNext.set(b, now + SUPER.armEveryMs); }
+      driveArm(b, b.weapon.fireHeld, b.weapon.pressed || auto, usable, motorAlive, dt, !!b.overdrive);
       b.weapon.armState = b.arm.state;
       if (b.saw) driveSpinner(b, usable && (!over || preSpin), motorAlive, b.saw, preSpin ? PRESPIN_BOOST : 1);
     }
@@ -1749,12 +1792,12 @@ async function main() {
       const motorAlive = (b.state.parts['weapon_motor']?.hp ?? 0) > 0;
       b.weapon.motorDead = !motorAlive;
       const press = b.weapon.pressed || (!!b.inverted && b.id !== 'A' && !p2Human && mode !== 'course');   // the AI self-rights at once (v0.33: race too)
-      driveFlipper(b, press, !b.rightingUntil && canAttack(b.state) && !over, motorAlive, !!b.inverted, dt);
+      driveFlipper(b, press, !b.rightingUntil && canAttack(b.state) && !over, motorAlive, !!b.inverted, dt, b.overdrive ? { power: SUPER.flipPower } : undefined);   // v0.59 overdrive: unlimited gas, 1.5x power
     } else if (b.hinges) {
       // v0.12 real control weapon: hold = lift / clamp / crush
       const motorAlive = (b.state.parts['weapon_motor']?.hp ?? 0) > 0;
       b.weapon.motorDead = !motorAlive;
-      driveControl(b, b.weapon.held, !b.weapon.suppressed && canAttack(b.state) && !over, motorAlive, dt);
+      driveControl(b, b.weapon.held, !b.weapon.suppressed && canAttack(b.state) && !over, motorAlive, dt, b.overdrive ? SUPER.controlTorque : 1);   // v0.59 overdrive: 2x torque
     }
 
     // v0.21 real wheels: tank-mixed stick into each wheel's drive motor (wheelsBefore); tyre friction does the rest

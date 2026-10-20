@@ -111,6 +111,10 @@ export interface Bot {
   driveMul?: number;
   dmgMul?: number;
   shield?: (raw: number, point: Vector3 | undefined) => number;
+  /** v0.59 Boss Battle super: weapon overdrive is on (overdrive.ts sets it every frame); odMul = its damage
+   *  multiplier (x2 alone, x3 / x4 / x5 in a combo). Unset = off / x1. */
+  overdrive?: boolean;
+  odMul?: number;
 }
 
 /** v0.21 one tyre on its powered axle. */
@@ -320,6 +324,7 @@ export const ARM = {
   flywheelBrake: 120,            // N m: max torque bleeding the flywheel into the chassis (headless: 400 tipped the bot
                                  // over once the magnets lost grip; 120 kept it within ~10 deg)
   retractEase: 4,                // return speed (rad/s) per rad left to rest: eases the arm onto its rest stop
+  odRetract: 3,                  // v0.59 overdrive: the arm comes back this many times faster (so it can swing 3 times a second)
 }
 
 export interface RealSpinner {
@@ -942,7 +947,7 @@ export function hingeRaise(bot: Bot, h: RealHinge): number {
 
 /** Per frame (v0.12 flippers): tap = fire. Pneumatic uses gas and needs its buffer refilled; electric doesn't.
  *  selfRight = the bot is upside down: the shot goes into the floor at reduced power (srimech). */
-export function driveFlipper(bot: Bot, pressed: boolean, usable: boolean, motorAlive: boolean, selfRight: boolean, dt: number) {
+export function driveFlipper(bot: Bot, pressed: boolean, usable: boolean, motorAlive: boolean, selfRight: boolean, dt: number, od?: { power: number }) {   // v0.59 od = overdrive: unlimited gas, x power
   const h = bot.hinges?.find(x => x.role === 'flipper');
   if (!h) return;
   const cfg = FLIP[bot.weaponKind as 'pneumatic_flipper'];
@@ -953,10 +958,10 @@ export function driveFlipper(bot: Bot, pressed: boolean, usable: boolean, motorA
   const go = (s: HingeState) => { h.state = s; h.t = 0; };
   switch (h.state) {
     case 'ready':
-      if (pressed && usable && w.refill <= 0 && w.gas >= (selfRight ? FLIP.selfRightGas : 1)) {
-        w.gas -= selfRight ? FLIP.selfRightGas : 1;
+      if (pressed && usable && w.refill <= 0 && (od || w.gas >= (selfRight ? FLIP.selfRightGas : 1))) {
+        if (!od) w.gas -= selfRight ? FLIP.selfRightGas : 1;
         w.refill = cfg.refillS;
-        w.firePower = selfRight ? FLIP.selfRightPower : 1;
+        w.firePower = (selfRight ? FLIP.selfRightPower : 1) * (od?.power ?? 1);
         go('fire');
       }
       break;
@@ -978,7 +983,7 @@ export function driveFlipper(bot: Bot, pressed: boolean, usable: boolean, motorA
 }
 
 /** Per frame (v0.12 control weapons): hold = lift (lifter), clamp + lift (grappler), crush (crusher). */
-export function driveControl(bot: Bot, held: boolean, usable: boolean, motorAlive: boolean, dt: number) {
+export function driveControl(bot: Bot, held: boolean, usable: boolean, motorAlive: boolean, dt: number, torqueMul = 1) {   // v0.59 torqueMul: overdrive x2
   const hs = bot.hinges;
   if (!hs) return;
   const kind = bot.weaponKind;
@@ -991,13 +996,13 @@ export function driveControl(bot: Bot, held: boolean, usable: boolean, motorAliv
     if (h.role === 'fork') {
       const omega = kind === 'grappler' ? CONTROL.grappler.fork.omega : CONTROL.lifter.fork.omega;
       const lift = on && (kind !== 'grappler' || bot.weapon.holdT > CONTROL.grappler.forkDelayS);
-      if (lift) { h.state = 'hold'; setHinge(h, omega, h.torque); }
+      if (lift) { h.state = 'hold'; setHinge(h, omega, h.torque * torqueMul); }
       else if (raise > 0.05) { h.state = 'lower'; setHinge(h, -omega, h.torque * CONTROL.lowerTorque); }
       else { h.state = 'ready'; setHinge(h, -1, h.torque * CONTROL.idleTorque); }
     } else {
       // jaw / beak: rest = open (raise 0); closing = negative raise
       const omega = h.role === 'jaw' ? CONTROL.grappler.jaw.omega : CONTROL.crusher.beak.omega;
-      if (on) { h.state = 'hold'; setHinge(h, -omega, h.torque); }
+      if (on) { h.state = 'hold'; setHinge(h, -omega, h.torque * torqueMul); }
       else if (raise < -0.05) { h.state = 'lower'; setHinge(h, omega * 1.5, h.torque * CONTROL.lowerTorque); }
       else { h.state = 'ready'; setHinge(h, 1, h.torque * CONTROL.idleTorque); }
     }
@@ -1160,7 +1165,7 @@ export function armEnergy(bot: Bot): number {
 
 /** Per frame: run the arm. Tap fire = swing (returns on its own); fire still held when the swing
  *  ends = pin (press down). Motor dead = limp. */
-export function driveArm(bot: Bot, fire: boolean, pressed: boolean, usable: boolean, motorAlive: boolean, dt: number) {
+export function driveArm(bot: Bot, fire: boolean, pressed: boolean, usable: boolean, motorAlive: boolean, dt: number, od = false) {   // v0.59 od = overdrive: no pin, fast full-torque return (it swings on its own, 3 a second)
   const a = bot.arm;
   if (!a) return;
   const A = PhysicsConstraintAxis.ANGULAR_X;
@@ -1180,7 +1185,7 @@ export function driveArm(bot: Bot, fire: boolean, pressed: boolean, usable: bool
       a.maxAngle = Math.max(a.maxAngle, ang);
       const reachedEnd = ang - restRad >= ARM.swingRad - 0.05;
       const stalled = a.t > ARM.stallAfterS && w < ARM.stallRad;
-      if (reachedEnd || stalled || a.t > ARM.maxSwingS) go(fire ? 'pin' : 'retract');
+      if (reachedEnd || stalled || a.t > ARM.maxSwingS) go(fire && !od ? 'pin' : 'retract');
       break;
     }
     case 'pin': if (!fire) go('retract'); break;
@@ -1193,8 +1198,9 @@ export function driveArm(bot: Bot, fire: boolean, pressed: boolean, usable: bool
     case 'pin':     a.joint.setAxisMotorTarget(A, S * 2);   a.joint.setAxisMotorMaxForce(A, a.torque * ARM.pinTorque); break;
     case 'retract': {
       // v0.11: ease into the rest stop (slamming into it at full return speed kicked the nose up)
-      const speed = Math.min(1.5 * ARM.swingRad / ARM.retractS, ARM.retractEase * Math.max(0, ang - restRad) + 0.3);
-      a.joint.setAxisMotorTarget(A, -S * speed); a.joint.setAxisMotorMaxForce(A, a.torque * ARM.retractTorque); break;
+      const k = od ? ARM.odRetract : 1;
+      const speed = Math.min(1.5 * ARM.swingRad / ARM.retractS * k, ARM.retractEase * k * Math.max(0, ang - restRad) + 0.3);
+      a.joint.setAxisMotorTarget(A, -S * speed); a.joint.setAxisMotorMaxForce(A, a.torque * (od ? 1 : ARM.retractTorque)); break;
     }
   }
 }
@@ -1312,16 +1318,24 @@ export function spinOmega(bot: Bot): number { return bot.spinner ? omegaOf(bot.s
 export function spinEnergy(bot: Bot): number { return bot.spinner ? energyOf(bot.spinner) : 0; }
 
 /** Per frame: point the weapon motor at full speed (on), braking (off) or bearing drag only (motor dead). */
-export function driveSpinner(bot: Bot, on: boolean, motorAlive: boolean, s: RealSpinner | undefined = bot.spinner, boost = 1) {
+export function driveSpinner(bot: Bot, on: boolean, motorAlive: boolean, s: RealSpinner | undefined = bot.spinner, boost = 1, speedMul = 1) {   // v0.59 speedMul: overdrive top speed
   if (!s) return;
   const A = PhysicsConstraintAxis.ANGULAR_X;
   if (on && motorAlive) {
-    s.joint.setAxisMotorTarget(A, s.dir * s.omegaMax);
+    s.joint.setAxisMotorTarget(A, s.dir * s.omegaMax * speedMul);
     s.joint.setAxisMotorMaxForce(A, s.torque * boost);   // v0.31: boost > 1 during the countdown (top speed by FIGHT!)
   } else {
     s.joint.setAxisMotorTarget(A, 0);
     s.joint.setAxisMotorMaxForce(A, s.torque * (motorAlive ? SPINNER.brake : SPINNER.bearing));
   }
+}
+
+/** v0.59 overdrive: the spinner jumps straight to `mul` x its top speed (set outside the physics step, so the
+ *  race spin give-back doesn't twist the chassis for it). */
+export function kickSpinner(s: RealSpinner, mul: number) {
+  const axis = Vector3.TransformNormal(s.axis, s.parentNode.getWorldMatrix()).normalize();
+  const w = s.parentBody.getAngularVelocity().add(axis.scale(s.dir * s.omegaMax * mul));
+  s.body.setAngularVelocity(w);
 }
 
 /**

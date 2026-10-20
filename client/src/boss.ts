@@ -337,6 +337,26 @@ export class BossFight {
     return { root: n, weapon: { power: () => (this.discLive ? 1 : 0) } } as unknown as Bot;
   }
   /** a free mini near `p` (AI allies go for the close ones), or a teammate with minis on it */
+  /** v0.59 combo: every mini within r of p pops (no points -- the team gets none for these). Returns how many. */
+  popMinisNear(p: Vector3, r: number): number {
+    let n = 0;
+    for (const m of [...this.minis]) if (m.state !== 'rise' && Math.hypot(m.pos.x - p.x, m.pos.z - p.z) <= r) { this.killMini(m, undefined); n++; }
+    return n;
+  }
+  /** v0.59 combo stun: can't drive or attack for ms (the disc keeps spinning). Not while one is running (a bigger combo
+   *  doesn't restart it) and not again until cooldownMs after one ends. true = it took. */
+  private stunUntil = 0; private stunFree = 0;
+  get stunned(): boolean { return !this.dead && performance.now() < this.stunUntil; }
+  stun(ms: number, cooldownMs: number, now = performance.now()): boolean {
+    if (this.dead || now < this.stunUntil || now < this.stunFree) return false;
+    this.stunUntil = now + ms; this.stunFree = this.stunUntil + cooldownMs;
+    if (this.grab) { this.pincerReady[this.grab.side] = this.stunUntil + 500; this.grab = undefined; }   // lets go (no throw)
+    if (this.state === 'slamWarn' || this.state === 'slamAir' || this.state === 'sweep') { this.ring.setEnabled(false); this.setState('chase'); }
+    this.slamAt = Math.max(this.slamAt, this.stunUntil + 1500); this.sweepAt = Math.max(this.sweepAt, this.stunUntil + 2000);
+    this.hooks.fx.poof(this.pos.add(new Vector3(0, 2.2, 0)), '#36f1ff');
+    this.hooks.fx.text(this.pos.add(new Vector3(0, 3, 0)), 'STUNNED!', '#36f1ff', ms / 1000);
+    return true;
+  }
   miniNear(p: Vector3, r: number): Vector3 | undefined {
     let best: Vector3 | undefined, bd = r * r;
     for (const m of this.minis) if (m.state === 'walk') { const d = Vector3.DistanceSquared(m.pos, p); if (d < bd) { bd = d; best = m.pos; } }
@@ -504,7 +524,8 @@ export class BossFight {
       for (const t of team) { const d = Vector3.DistanceSquared(t.bot.root.position, this.pos); if (d < bd) { bd = d; best = t.bot; } }
       this.target = best; this.targetAt = now;
     }
-    switch (this.state) {
+    if (now < this.stunUntil && this.state !== 'stagger') { this.cmd.speed = 0; this.cmd.yaw = 0; this.discOn = true; }   // v0.59 combo stun
+    else switch (this.state) {
       case 'stagger':
         this.discOn = false; this.cmd.speed = 0; this.cmd.yaw = 0;
         if (this.stateT >= BOSS.staggerMs) { this.discOn = true; this.setState('chase'); }

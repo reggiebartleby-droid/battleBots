@@ -227,6 +227,22 @@
     #bossbar .bt i { position: absolute; top: 0; bottom: 0; width: 2px; background: rgba(255,255,255,.7); }
     #bossbar .bh { position: absolute; right: 6px; top: 19px; font-size: 10px; color: #fff; }
     body.choosing #bossbar, body.inlab #bossbar { display: none !important; }
+    /* v0.59 super meter (bottom centre) + everyone's meter on the podium */
+    #supbar { position: absolute; bottom: 22px; left: 50%; transform: translateX(-50%); width: clamp(220px, 32vw, 380px); display: none; pointer-events: none; font: 800 13px/1 system-ui, sans-serif; color: #fff; text-shadow: 0 0 6px #000; letter-spacing: .12em; text-align: center; }
+    #supbar .sl { font-size: 10px; color: #ffd23f; margin-bottom: 4px; }
+    #supbar .st { position: relative; height: 12px; background: rgba(30,24,6,.7); border: 1px solid #a8862a; border-radius: 3px; overflow: hidden; }
+    #supbar .sf { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: linear-gradient(90deg, #a8862a, #ffd23f); transition: width .12s; }
+    #supbar .sk { margin-top: 5px; font-size: 12px; color: #d8c690; }
+    #supbar.full .st { border-color: #ffd23f; box-shadow: 0 0 12px #ffd23f; animation: suppulse .5s ease-in-out infinite alternate; }
+    #supbar.full .sk { color: #ffd23f; font-size: 18px; }
+    #supbar.on .sf { background: linear-gradient(90deg, #ff2ee6, #ffd23f); box-shadow: 0 0 14px #ff2ee6; }
+    #supbar.on .sk { color: #ff7af0; font-size: 20px; }
+    @keyframes suppulse { from { box-shadow: 0 0 4px #ffd23f; } to { box-shadow: 0 0 18px #ffd23f; } }
+    body.choosing #supbar, body.inlab #supbar { display: none !important; }
+    #kopod .pm { width: 100%; height: 4px; margin-top: 2px; background: rgba(0,0,0,.45); border-radius: 2px; overflow: hidden; }
+    #kopod .pm b { display: block; height: 100%; background: #a8862a; }
+    #kopod .pm.full b { background: #ffd23f; box-shadow: 0 0 6px #ffd23f; }
+    #kopod .pm.on b { background: #ff2ee6; box-shadow: 0 0 6px #ff2ee6; }
     #rmap { position: absolute; top: 12px; right: 12px; background: rgba(14,16,20,.6); border: 1px solid rgba(120,130,145,.35); border-radius: 6px; display: none; pointer-events: none; }
     #rresults { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); background: #141b20; border: 2px solid #2a363f; border-radius: 6px; box-shadow: 0 0 0 1px #0a0e11, 0 20px 50px rgba(0,0,0,.6); font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; color: #d7e3e6; display: none; width: min(560px, calc(100% - 32px)); }
     #rresults.on { display: block; }
@@ -431,6 +447,7 @@
   <canvas id="rmap" width="260" height="130"></canvas>
   <div id="kopod"></div>
   <div id="firstplace"><b>1ST</b> PLACE!</div>
+  <div id="supbar"><div class="sl">OVERDRIVE</div><div class="st"><div class="sf"></div></div><div class="sk"></div></div>
   <div id="bossbar"><div class="bn"><span>STINGWHEEL</span><span class="bp">PHASE 1</span></div><div class="bt"><div class="bf"></div><i style="left:66%"></i><i style="left:33%"></i></div><div class="bh"></div></div>
   <div id="modepick"><div class="mp-card">
     <h1>ROBOT REVOLUTION</h1>
@@ -493,6 +510,6 @@
     <div class="board" id="board2"></div>
   </div>
   <script type="module" src="/src/main.ts"></script>
-  <div id="ver">v0.58b</div>
+  <div id="ver">v0.59c</div>
 </body>
 </html>
