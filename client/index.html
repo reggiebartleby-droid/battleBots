@@ -4,6 +4,14 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
   <title>Robot Revolution</title>
+  <!-- v0.60 (user) phone "Add to Home Screen": opens full screen like an app (no address bar, no side bars) -->
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="icon-180.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Robot Rev" />
+  <meta name="theme-color" content="#0b0d10" />
   <style>
     html, body { margin: 0; height: 100%; background: #0b0d10; overflow: hidden; font-family: system-ui, sans-serif; color: #eee; }
     #c { width: 100%; height: 100%; display: block; outline: none; }
@@ -366,6 +374,43 @@
     #rr-cubes table.rw td:last-child { text-align: right; }
     #rr-cubes table.rw tr.tot td { color: #ffc400; border-bottom: 0; }
     #ready b.cubes { color: #00e5ff; }
+
+    /* ---- v0.60 phone fixes (user screenshots, iPhone landscape) ---- */
+    /* A: the podium becomes one thin row (name + points, place by colour, 4th = polka dots) */
+    body.mobile #kopod { top: 4px; gap: 4px; padding: 2px 4px; align-items: center; opacity: .9; }
+    body.mobile.bossfight #kopod { top: 40px; }
+    body.mobile #kopod .pd { flex-direction: row; align-items: baseline; gap: 4px; min-width: 0; padding: 1px 6px 2px; border-bottom: 3px solid var(--c); border-radius: 3px; background: color-mix(in srgb, var(--c) 14%, rgba(14,16,20,.35)); }
+    body.mobile #kopod .pd.r4 { background-image: radial-gradient(rgba(255,255,255,.35) 22%, transparent 28%); background-size: 7px 7px; }
+    body.mobile #kopod .pn, body.mobile #kopod .me .pn { font-size: 9px; font-weight: 800; }
+    body.mobile #kopod .pk { font-size: 12px; font-weight: 900; }
+    body.mobile #kopod .me .pk { font-size: 15px; }
+    body.mobile #kopod .ps { display: none; }
+    body.mobile #kopod .pm { width: 22px; height: 3px; margin: 0; align-self: center; }
+    body.mobile #kopod i { font-size: 8px; }
+    body.mobile #bossbar { top: 4px; width: 220px; font-size: 10px; }
+    body.mobile #bossbar .bn { margin-bottom: 2px; }
+    body.mobile #bossbar .bt { height: 10px; }
+    body.mobile #bossbar .bh { top: 13px; font-size: 9px; }
+    body.mobile #sign { top: 40% !important; }
+    /* C: overdrive bar sits above the points line, clear of the phone's home bar */
+    body.mobile #supbar { bottom: calc(76px + env(safe-area-inset-bottom)); width: clamp(160px, 26vw, 240px); }
+    body.mobile #supbar .sl { font-size: 9px; margin-bottom: 2px; }
+    body.mobile #supbar .st { height: 8px; }
+    body.mobile #supbar .sk { margin-top: 3px; font-size: 10px; }
+    body.mobile #supbar.full .sk { font-size: 13px; } body.mobile #supbar.on .sk { font-size: 14px; }
+    body.mobile.inrace #rhud { bottom: calc(40px + env(safe-area-inset-bottom)); }
+    body.mobile.inrace #m-left, body.mobile.inrace #m-right { bottom: calc(22px + env(safe-area-inset-bottom)); }
+    body.mobile.inrace #m-brake { bottom: calc(22px + env(safe-area-inset-bottom)); }
+    /* B: OVERDRIVE button above BRAKE, only when the meter is full (body.odready, main.ts) */
+    #m-od { display: none; }
+    body.mobile.inrace.odready #m-od { display: block; position: absolute; right: calc(max(20px, env(safe-area-inset-right)) + 128px); bottom: calc(122px + env(safe-area-inset-bottom)); width: 86px; height: 86px; border-radius: 50%; border: 3px solid #ffd23f; background: rgba(255,210,63,.35); color: #fff; font: 900 11px/1 system-ui, sans-serif; letter-spacing: .04em; text-shadow: 0 0 6px #000; pointer-events: auto; touch-action: none; animation: odglow .5s ease-in-out infinite alternate; }
+    body.mobile.pad #m-od { display: none !important; }
+    @keyframes odglow { from { box-shadow: 0 0 6px #ffd23f; } to { box-shadow: 0 0 26px #ffd23f, 0 0 8px #ffd23f inset; } }
+    /* G: start card / results: no podium, overdrive bar or button on top */
+    body.mobile:has(#ready.on) #kopod, body.mobile:has(#ready.on) #supbar, body.mobile:has(#rresults.on) #kopod, body.mobile:has(#rresults.on) #supbar { display: none !important; }
+    /* D: fill the whole screen (home-screen app: under the notch; buttons keep the safe-area margins) */
+    body.mobile { background: #000; }
+    #ver { right: max(6px, env(safe-area-inset-right)); }
   </style>
 </head>
 <body>
@@ -489,6 +534,7 @@
     <div id="m-stick"><div id="m-knob"></div></div>
     <button id="m-fire" type="button">FIRE</button>
     <button id="m-brake" type="button">BRAKE</button>
+    <button id="m-od" type="button">OVER<br>DRIVE</button>
     <button id="m-left" type="button">&#9664;&#xFE0E;</button>
     <button id="m-right" type="button">&#9654;&#xFE0E;</button>
     <div id="m-btns"><button id="m-cam" type="button">CAM</button><button id="m-restart" type="button">RESTART</button><button id="m-menu" type="button">MENU</button></div>
@@ -510,6 +556,6 @@
     <div class="board" id="board2"></div>
   </div>
   <script type="module" src="/src/main.ts"></script>
-  <div id="ver">v0.59d</div>
+  <div id="ver">v0.60</div>
 </body>
 </html>

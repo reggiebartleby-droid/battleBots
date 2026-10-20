@@ -44,8 +44,7 @@ const TESTER = QS0.get('lab') !== '1' || MOBILE;   // v0.46: the picker race is 
 const TESTER_SET = { boost: 3, raceSpeed: 3, ai: 'normal' as Difficulty, track: 'oval' as TrackId | 'random', car: 'Flip Side' };
 /** v0.41 phone (user: x3 is too hard on a phone): drive boost x2, race speed x2. Par stretches with the race speed (parFor). */
 const PHONE_SET = { boost: 2, raceSpeed: 2 };
-/** v0.41 phone: the race camera sits this much further back, and a bit higher (CHASE), so more of the track shows. */
-const PHONE_CAM = { zoom: 1.5, maxBeta: 1.05 };
+/** v0.60 (user): phones use the same default chase camera as the PC (the v0.41 phone camera -- further back + higher -- is gone). */
 const TESTER_KEY = 'bb.tester.v1';   // last track + car picked, remembered in this browser
 const RACE_TEST = { autopilot: false };
 /** v0.49 BIG ARENA (user, 2026-10-19): a second BattleBox twice as wide (32 m, the original stays 16 m) with the race
@@ -138,7 +137,9 @@ const INVERT = {
 async function main() {
   const canvas = document.getElementById('c') as HTMLCanvasElement;
   const engine = new Engine(canvas, true);
-  if (MOBILE) { engine.setHardwareScalingLevel(1.5); CUBES.size = 'big'; }   // v0.32 phone: lower resolution, big cubes (not saved)
+  // v0.32 phone: big cubes (not saved). v0.60 (user: the far view looked fuzzy) full screen resolution instead of 1/1.5;
+  // ?res=N tries another sharpness (2 = twice as sharp, 0.67 = the old v0.32 setting), ?perf=1 shows the frame rate.
+  if (MOBILE) { const res = Number(QS0.get('res')) || 1; engine.setHardwareScalingLevel(1 / Math.min(3, Math.max(0.5, res))); CUBES.size = 'big'; }
 
   // ---- Match scene (arena + physics) ----
   const scene = new Scene(engine);
@@ -514,6 +515,8 @@ async function main() {
     if (!od.fire(me, B.racers, performance.now()) && !od.active(me.id, performance.now()))
       hud.sign(`OVERDRIVE ${Math.floor(od.meterOf(me.id))}%`, 600, '#8fa3ad');
   };
+  // v0.60 phone: OVERDRIVE button (only shown, glowing gold, when your meter is full)
+  document.getElementById('m-od')?.addEventListener('pointerdown', e => { e.preventDefault(); fireOverdrive(); });
   const odArmNext = new WeakMap<Bot, number>();   // v0.59 overdrive: when a hammer / saw may swing again
   const inRace = (id: string) => {
     if (brawl) return phase === 'fight' && !brawl.over && brawl.racers.some(f => f.id === id);   // v0.49 Big Arena
@@ -733,7 +736,6 @@ async function main() {
     const p = racers[0].bot;
     camCtl.startDefaults(boss ? 'boss' : 'brawl');   // v0.57 own camera per mode; v0.58 (user) back to the defaults at every start
     cam.target = p.root.position.clone(); cam.radius = camCtl.radius(raceCamR());
-    if (MOBILE && camCtl.view === 'chase') cam.beta = Math.min(cam.beta, PHONE_CAM.maxBeta);
     sun.position = p.root.position.add(SUN_OFFSET);
     drawRaceHud(performance.now(), true);
     if (!skipCard) showRaceReady();   // pickers before every START (as the races)
@@ -746,7 +748,7 @@ async function main() {
     for (const f of brawl.racers) { if (!f.gone) disposeBot(f.bot); f.flight?.chute?.dispose(); if (f.flight?.camMaxR !== undefined) cam.upperRadiusLimit = f.flight.camMaxR; }   // v0.58d   // v0.58b parachutes too
     brawl.boss?.dispose();   // v0.58
     hideBossBar();
-    od.reset(); supEl.style.display = 'none';   // v0.59
+    od.reset(); supEl.style.display = 'none'; document.body.classList.remove('odready');   // v0.59; v0.60 phone button
     brawl = null; bots = [];
     upg.clear();
     bigBox.setVisible(false);
@@ -1146,13 +1148,15 @@ async function main() {
     supEl.className = on ? 'on' : full ? 'full' : '';
     supEl.querySelector<HTMLElement>('.sf')!.style.width = `${pct.toFixed(1)}%`;
     const key = padConnected() ? 'Y' : 'E', mul = od.mulOf(pf.id, now);
-    supEl.querySelector<HTMLElement>('.sk')!.textContent = on ? (od.n >= 2 ? `COMBO x${mul}!` : `OVERDRIVE x${mul}`) : full ? `${key}: OVERDRIVE!` : `${Math.floor(od.meterOf(pf.id))}%`;
+    const touch = MOBILE && !padConnected();   // v0.60 phone: tap the OVERDRIVE button
+    supEl.querySelector<HTMLElement>('.sk')!.textContent = on ? (od.n >= 2 ? `COMBO x${mul}!` : `OVERDRIVE x${mul}`) : full ? (touch ? 'OVERDRIVE READY!' : `${key}: OVERDRIVE!`) : `${Math.floor(od.meterOf(pf.id))}%`;
+    document.body.classList.toggle('odready', touch && full && !on);
   }
 
   function drawBrawlHud(now: number) {
     const B = brawl!, pf = brawlPlayer();
     if (!pf) return;
-    if (B.boss) { drawBossBar(B.boss); drawSuperBar(pf, now); } else { hideBossBar(); supEl.style.display = 'none'; }   // v0.59 super meter
+    if (B.boss) { drawBossBar(B.boss); drawSuperBar(pf, now); } else { hideBossBar(); supEl.style.display = 'none'; document.body.classList.remove('odready'); }   // v0.59 super meter
     const st = B.standings();
     const tag = (f: Fighter) => f.down ? ` <i class="x">${f.down.why === 'off' ? 'OUT' : f.down.why === 'launch' ? 'LAUNCHED' : f.down.why === 'ko' ? 'WRECK' : 'STUCK'}</i>`
       : B.over ? (f.place === 1 ? ' <i>WIN</i>' : '')
@@ -1203,7 +1207,7 @@ async function main() {
     podEl.innerHTML = order.map(f => {
       const r = koRank(f), c = POD_COL[r - 1] ?? POD_COL[3];
       const name = f.human ? (pickRace ? 'YOU' : f.name) : f.name;
-      return `<div class="pd${f.human ? ' me' : ''}" style="--c:${c}">`
+      return `<div class="pd${f.human ? ' me' : ''}${r >= 4 ? ' r4' : ''}" style="--c:${c}">`   /* v0.60 r4: phone row polka dots */
         + `<div class="pn">${name}${tag(f)}</div><div class="pk">${pointsOf(f)}</div>`
         + (brawl?.boss ? `<div class="pm${od.active(f.id, now) ? ' on' : od.ready(f.id) ? ' full' : ''}"><b style="width:${od.active(f.id, now) ? od.leftMs(f.id, now) / SUPER.ms * 100 : od.meterOf(f.id) / SUPER.full * 100}%"></b></div>` : '')   // v0.59 everyone's super meter
         + `<div class="ps${r >= 4 ? ' dots' : ''}" style="height:${[46, 34, 24, 15][r - 1] ?? 15}px">${ordinal(r)}</div></div>`;
@@ -1283,7 +1287,6 @@ async function main() {
     const p = race.player()!.bot;
     camCtl.startDefaults('race');   // v0.57 races have their own camera; v0.58 (user) back to the defaults at every start
     cam.target = p.root.position.clone(); cam.radius = camCtl.radius(raceCamR());
-    if (MOBILE && camCtl.view === 'chase') cam.beta = Math.min(cam.beta, PHONE_CAM.maxBeta);   // v0.41 phone: a bit higher
     sun.position = p.root.position.add(SUN_OFFSET);
     drawRaceHud(performance.now(), true);
     if (!skipCard) showRaceReady();   // v0.37 track + car pickers before every START (first load, R); v0.48 every race
@@ -1337,8 +1340,8 @@ async function main() {
     rd.small.textContent = pad ? 'LB / RB: track · D-pad ◀ ▶: car · A or Start: START · Y: camera · Back: restart' : MOBILE ? 'Pick a track and a car · tap START' : pickRace ? 'Pick a track and a car · Enter or click START' : 'Pick a track and a car · Enter or click START · B: back to the lab';   // v0.48 pickers in every race
     rd.box.classList.add('on');
   }
-  /** v0.41 phone race camera distance (11 = the desktop race camera). */
-  function raceCamR() { return MOBILE ? 11 * PHONE_CAM.zoom : 11; }
+  /** race / battle camera distance (11 = the desktop camera; v0.60 phones the same) */
+  function raceCamR() { return 11; }
   /** v0.39 phone race drive: auto-gas (BRAKE held = brake / reverse).
    *  v0.41 (user): ◀ ▶ buttons steer (with the keyboard steering ramp: tap = small turn, hold = full turn);
    *  no FIRE button -- the weapon fires on its own when a bot is close in front (race.autoFire). */
