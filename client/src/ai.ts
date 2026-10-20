@@ -39,7 +39,7 @@ const mem = new WeakMap<Bot, Mem>();
 
 /** v0.49 center: the arena's centre (the Big Arena isn't at 0,0); speedLook: look further ahead for the wall the faster it
  *  goes (race-speed bots in the Big Arena). Leaving both out = the arena AI exactly as before. */
-export function aiDrive(self: Bot, target: Bot, arenaHalf: number, dt: number, difficulty: Difficulty = 'hard', opts: { center?: Vector3; speedLook?: number } = {}): Drive {
+export function aiDrive(self: Bot, target: Bot, arenaHalf: number, dt: number, difficulty: Difficulty = 'hard', opts: { center?: Vector3; speedLook?: number; round?: boolean } = {}): Drive {
   const D = DIFFICULTY[difficulty];
   let m = mem.get(self);
   if (!m) { m = { stuckT: 0, escapeT: 0, escapeTurn: 1, nextThink: 0, last: { throttle: 0, turn: 0, fire: false } }; mem.set(self, m); }
@@ -100,7 +100,7 @@ export function aiDrive(self: Bot, target: Bot, arenaHalf: number, dt: number, d
   const flat = self.body.getLinearVelocity(); const flatSpeed = Math.hypot(flat.x, flat.z);
   const look = pos.add(fwd.scale(2.2 + (opts.speedLook ?? 0) * flatSpeed)).subtract(c0);
   const margin = arenaHalf - WALL_MARGIN;
-  const nearWall = Math.abs(look.x) > margin || Math.abs(look.z) > margin;
+  const nearWall = opts.round ? Math.hypot(look.x, look.z) > margin : Math.abs(look.x) > margin || Math.abs(look.z) > margin;   // v0.52 round arena
   if (nearWall && dist > 2.5) aim = c0.clone();
 
   // ---- steer toward the aim point ----

@@ -24,7 +24,8 @@ import { Course, STATIONS, COURSE_ORIGIN, COURSE, type StationId, type RunResult
 import { aiDrive, type Difficulty } from './ai.js';
 import { MOBILE, MobileMenu, setupTouchControls, goFullscreen, TOUCH, tapKey } from './mobile.js';
 import { CUBES } from './cubes.js';
-import { Upgrades } from './upgrades.js';   // v0.40 race upgrades (SCRAP meter)
+import { Upgrades } from './upgrades.js';
+import { Celebrate, CELEBRATE } from './celebrate.js';   // v0.52 first-place sign + fireworks   // v0.40 race upgrades (SCRAP meter)
 import { Race, RACE, TRACK_IDS, ordinal, fmtTime, flatRacePhysics, raceSpinGiveBack, autoFireAt, type Racer, type TrackId } from './race.js';
 
 const MATCH_SECONDS = 180;
@@ -57,7 +58,9 @@ const RACE_TEST = { autopilot: false };
  *  box. 2:00 clock, most points wins (tie: least damage taken); optional target points (T: off/150/300/500, first to it
  *  wins). KO credit window 1 s. The podium shows points. AI bots never pick the same preset as you or each other. */
 const BIG = {
-  size: 32,                                  // m inner width (the original: ARENA_SIZE = 16)
+  size: 36,                                  // v0.52 (user) ROUND: m across (about the 32 m square's floor area; the original: ARENA_SIZE = 16)
+  spawnR: 0.72,                              // v0.52 random spawns within this much of the radius
+  spawnTries: 24,                            // v0.52 random picks per spawn; the one furthest from the others wins
   origin: new Vector3(-250, 0, 0),           // far from the arena (0,0), the course (0,200) and the tracks (z <= -260)
   seconds: 120,                              // v0.51 (user) 2:00 (was MATCH_SECONDS, 3:00)
   stuckMs: 4000,                             // can't drive (drive parts dead) or upside down this long = out
@@ -74,8 +77,9 @@ const BIG = {
 };
 /** v0.51 Big Arena target points (T, test aid): 0 = off -- most points at the clock wins */
 let bigTarget = 0;
-/** v0.50 KO tracker podium colours, by place: 1st green, 2nd blue, 3rd yellow, 4th red */
-const POD_COL = ['#39ff14', '#36a2ff', '#ffd23f', '#ff4d4d'];
+/** v0.50 KO tracker podium colours, by place -- v0.53 (user): 1st gold, 2nd silver, 3rd bronze, 4th polka-dot underwear pink
+ *  (the 4th step also gets white polka dots, see .ps.dots in index.html) */
+const POD_COL = ['#ffd700', '#d4dae2', '#d08a45', '#ff6fae'];
 const BIG_ID = 'bigarena';
 type TrackPick = TrackId | 'random' | typeof BIG_ID;
 /** v0.21: the drive is real wheels now -- see DRIVE / driveWheels in bot.ts. */
@@ -138,7 +142,7 @@ async function main() {
 
   const arena = buildArena(scene);
   scene.getMeshByName('floor')!.receiveShadows = true;
-  const bigBox = arena.addBox(BIG.size, BIG.origin, 'big');   // v0.49 Big Arena (hidden until it's picked)
+  const bigBox = arena.addRing(BIG.size, BIG.origin, 'big');   // v0.52 round   // v0.49 Big Arena (hidden until it's picked)
   setupArenaPicker(arena.setStyle, canvas);          // v0.18: neon colour + floor grid (in-match, top right)
   // v0.8: real spinners spin at up to ~70 rad/s -- make sure Havok's speed cap is well above that
   havokPlugin.setVelocityLimits(200, 400);
@@ -147,6 +151,7 @@ async function main() {
   const course = new Course(scene);                  // v0.23 test course (own floor, far from the arena)
   const SUN_OFFSET = sun.position.clone();
   const fx = new Fx(scene, document.getElementById('fxlayer')!);
+  const party = new Celebrate(scene);   // v0.52
   // v0.33 race track (own floor too, far from the arena and the course); v0.35 one per track, the race picks one
   const races = Object.fromEntries(TRACK_IDS.map(id => [id, new Race(scene, fx, id)])) as Record<TrackId, Race>;
   let race = races.gp;
@@ -586,6 +591,20 @@ async function main() {
   const NO_DRIVE: Drive = { throttle: 0, turn: 0, fire: false };
   /** SCRAP boxes: one on each axis, a third of the way in from the walls */
   const bigBoxSpots = () => [[0, -1], [0, 1], [-1, 0], [1, 0]].map(([x, z]) => BIG.origin.add(new Vector3(x * bigBox.half * 0.45, 0.6, z * bigBox.half * 0.45)));
+  /** v0.52 (user) a random spawn point on the round floor: the best of BIG.spawnTries random picks = the one furthest
+   *  from the other bots (none: just random); nose toward the centre. */
+  function bigSpawn(others: Vector3[]): { pos: Vector3; facing: number } {
+    const c = bigBox.center, R = bigBox.half * BIG.spawnR;
+    let best: Vector3 | null = null, bd = -1;
+    for (let i = 0; i < (others.length ? BIG.spawnTries : 1); i++) {
+      const a = Math.random() * Math.PI * 2, r = R * Math.sqrt(0.15 + 0.85 * Math.random());
+      const p = new Vector3(c.x + Math.sin(a) * r, c.y + 0.6, c.z + Math.cos(a) * r);
+      const d = others.length ? Math.min(...others.map(o => Math.hypot(o.x - p.x, o.z - p.z))) : 0;
+      if (d > bd) { bd = d; best = p; }
+    }
+    const pos = best!;
+    return { pos, facing: Math.atan2(c.x - pos.x, c.z - pos.z) };
+  }
   /** v0.51 (user) three AI presets, all different and none the bot you drive (lab build: any 3) */
   const rivalPresets = () => {
     const mine = raceBuild ? JSON.stringify(raceBuild) : '';
@@ -615,7 +634,7 @@ async function main() {
     if (!raceBuild) return;
     leaveCourse();
     if (mode === 'race') { endBrawl(); race.dispose(); bots = []; fx.clear(); } else clearBots();
-    clearLoot(); LOOT.on = true; tally = {}; paid = null; cubePulse = 0; boxesTaken = {};
+    clearLoot(); LOOT.on = true; tally = {}; paid = null; cubePulse = 0; boxesTaken = {}; party.stop();
     race.setVisible(false);
     applyTrackTheme(null);   // the arena's black + neon
     mode = 'race';
@@ -636,9 +655,10 @@ async function main() {
       { id: 'A', human: true, build: raceBuild },
       ...names.map((n, i) => ({ id: RIVAL_IDS[i] as BotId, human: false, build: JSON.parse(JSON.stringify(PRESETS[n])) as BotBuild })),
     ];
-    const spots = bigBox.spawns(entries.length);
-    const racers = entries.map((e, i): Fighter => {
-      const bot = buildBot(e.id, e.build, catalog, scene, spots[i].pos, spots[i].facing, { breakableWeapons: false });
+    const taken: Vector3[] = [];   // v0.52 (user) random spawns, each as far as it can be from the bots already placed
+    const racers = entries.map((e): Fighter => {
+      const spot = bigSpawn(taken); taken.push(spot.pos);
+      const bot = buildBot(e.id, e.build, catalog, scene, spot.pos, spot.facing, { breakableWeapons: false });
       castShadows(shadows, botMeshes(bot)); skinBot(bot, shadows); upg.attach(bot);
       combat.replaceBot(undefined, bot);
       return { id: e.id, human: e.human, name: e.build.cosmetics.name, paint: e.build.cosmetics.paint ?? '#fff', bot, lapsDone: 0, targetAt: 0, build: e.build, taken: 0 };
@@ -726,6 +746,7 @@ async function main() {
     if (!pf.down) camCtl.chase(pf.bot.root.rotationQuaternion, dt);
     sun.position = target.add(SUN_OFFSET);
     fx.focus = target;
+    fx.me = pf.bot;   // v0.53 big-hit camera shake only when your bot is in the hit
     fx.update(dt, cam);
     drawRaceHud(now);
 
@@ -736,7 +757,8 @@ async function main() {
       if (!B.over) hud.sign(`${signed(paid.total)} CUBES`, 1800, paid.total >= 0 ? '#39ff14' : '#ff4d4d');
     }
     const doneAt = B.over ? B.overAt : -1;   // v0.50 results only at the end (you respawn)
-    if (paid && doneAt > 0 && now - doneAt > BIG.resultsMs && (raceShown < 0 || now - raceShown > 500)) showRaceResults(now);
+    const wait = pf.place === 1 ? CELEBRATE.resultsMs : BIG.resultsMs;   // v0.52 a win: let the fireworks finish first
+    if (paid && doneAt > 0 && now - doneAt > wait && (raceShown < 0 || now - raceShown > 500)) showRaceResults(now);
   }
 
   /** AI: go after the nearest rival (picked again every BIG.retargetMs, or when it's out), the arena AI does the rest. */
@@ -748,13 +770,13 @@ async function main() {
       f.target = best; f.targetAt = now;
     }
     if (!f.target) return NO_DRIVE;
-    return aiDrive(f.bot, f.target.bot, bigBox.half, dt, raceDiff, { center: bigBox.center, speedLook: BIG.speedLook });
+    return aiDrive(f.bot, f.target.bot, bigBox.half, dt, raceDiff, { center: bigBox.center, speedLook: BIG.speedLook, round: true });
   }
   /** v0.50 back in the fight (every bot; v0.49b was the practice respawn): a fresh bot at the spawn point furthest
    *  from the bots still in, SCRAP upgrades back on (lost ones wait in the rebuild queue, as a race wreck), spawn protection. */
   function brawlRespawn(f: Fighter, now: number) {
     const B = brawl!, live = B.racers.filter(o => !o.down);
-    const spot = bigBox.spawns(4).map(s => ({ s, d: Math.min(99, ...live.map(o => Vector3.Distance(o.bot.root.position, s.pos))) })).sort((a, b) => b.d - a.d)[0].s;
+    const spot = bigSpawn(live.filter(o => o !== f).map(o => o.bot.root.position));   // v0.52 random, furthest from the others
     const bot = buildBot(f.id, f.build, catalog, scene, spot.pos, spot.facing, { breakableWeapons: false });
     castShadows(shadows, botMeshes(bot)); skinBot(bot, shadows); upg.attach(bot);
     combat.replaceBot(undefined, bot);
@@ -782,7 +804,7 @@ async function main() {
   /** out of the Big Arena: past a wall plane and under the floor (or fallen off the world) */
   function isBigOut(b: Bot): boolean {
     const p = b.root.position, c = bigBox.center, lim = bigBox.half + OUT.wallMargin;
-    return ((Math.abs(p.x - c.x) > lim || Math.abs(p.z - c.z) > lim) && p.y < c.y + OUT.belowFloor) || p.y < c.y - 12;
+    return (Math.hypot(p.x - c.x, p.z - c.z) > lim && p.y < c.y + OUT.belowFloor) || p.y < c.y - 12;   // v0.52 round: past the ring
   }
   /** A bot is out: blown apart (Cube Bots: its cubes are loot for the others); v0.50 it respawns BIG.goneMs later. */
   function brawlOut(f: Fighter, now: number, why: 'ko' | 'off' | 'stuck') {
@@ -811,7 +833,9 @@ async function main() {
     const B = brawl!;
     B.standings().forEach((f, i) => { f.place = i + 1; });   // v0.50 by KOs, tie = least damage taken
     B.over = true; B.overAt = now; over = true;
-    hud.sign(text, 2600, color);
+    const me = brawlPlayer();
+    if (me?.place === 1) { hud.clearSign(); party.start(() => me.bot.root.position); }   // v0.52 you won: the big sign + fireworks
+    else hud.sign(text, 2600, color);
   }
   const clock = (t: number) => { const s = Math.ceil(t), m = Math.floor(s / 60); return `${m}:${String(s % 60).padStart(2, '0')}`; };
 
@@ -828,7 +852,7 @@ async function main() {
       ['DAMAGE', `DMG = cubes you knock off the other bots (+${REWARD.koBonus} for each one you put out).`],
       ['CUBES', `Your bot's cubes are your money. This battle's count starts at 0: +1 for each loose cube from another bot you vacuum up (they repair you too), −1 for each one knocked off you, never below 0. Out = back to 0. You earn cubes for your place and your damage.`],
       ['UPGRADES', 'Vacuumed cubes, damage and the gold SCRAP boxes fill your SCRAP meter: 25 = MOTOR, 60 = ARMOR plating, 100 = WEAPON power, 150 = a spiked RAM on your back that punches the first bot to get close behind you (once). Upgrades are cubes: hits knock them off. 25 more scrap rebuilds a lost one.'],
-      ['ARENA', `A ${BIG.size} m BattleBox — twice as wide as the arena — at race speed with the race handling.`],
+      ['ARENA', `A round ${BIG.size} m BattleBox — no corners to get stuck in — at race speed with the race handling.`],
       ['WALLET', `${CUBE_ICON}<b class="cubes">${walletCubes()}</b> cubes`],
       pad ? ['BUTTONS', 'Y: camera · Back / View: restart'] : MOBILE ? ['BUTTONS', 'CAM: change the view · RESTART: start over'] : ['KEYS', pickRace ? 'R: restart · Q: camera' : 'R: restart · B: lab · Q: camera'],
     ];
@@ -865,8 +889,8 @@ async function main() {
     const ox = (cv.width - side) / 2, oy = (cv.height - side) / 2;
     const X = (x: number) => ox + (x - bigBox.center.x + bigBox.half) * k, Y = (z: number) => oy + side - (z - bigBox.center.z + bigBox.half) * k;
     g.clearRect(0, 0, cv.width, cv.height);
-    g.fillStyle = 'rgba(20,26,30,.85)'; g.fillRect(ox, oy, side, side);
-    g.strokeStyle = 'rgba(0,229,255,.7)'; g.lineWidth = 1.5; g.strokeRect(ox, oy, side, side);
+    g.fillStyle = 'rgba(20,26,30,.85)'; g.strokeStyle = 'rgba(0,229,255,.7)'; g.lineWidth = 1.5;   // v0.52 round
+    g.beginPath(); g.arc(ox + side / 2, oy + side / 2, side / 2, 0, Math.PI * 2); g.fill(); g.stroke();
     for (const f of [...B.racers].sort((a, c) => Number(a.human) - Number(c.human))) {
       if (f.down) continue;
       const p = f.bot.root.position;
@@ -875,17 +899,17 @@ async function main() {
     }
   }
 
-  /** v0.50 KO tracker: a simple podium at the top (2nd 1st 3rd 4th), steps sized + coloured by place (tied KOs share
+  /** v0.50 KO tracker: a simple podium at the top (v0.52: 1st 2nd 3rd 4th, left to right), steps sized + coloured by place (tied KOs share
    *  a place); your name + count bold and twice as big. Testers' "name" is YOU (their car is a preset, a rival may share it). */
   function drawPodium(st: Fighter[], now: number, tag: (f: Fighter) => string) {
     podEl.style.display = 'flex';
-    const order = [st[1], st[0], st[2], st[3]].filter(Boolean);
+    const order = st;   // v0.52 (user) 1-2-3-4, left to right
     podEl.innerHTML = order.map(f => {
       const r = koRank(f), c = POD_COL[r - 1] ?? POD_COL[3];
       const name = f.human ? (pickRace ? 'YOU' : f.name) : f.name;
       return `<div class="pd${f.human ? ' me' : ''}" style="--c:${c}">`
         + `<div class="pn">${name}${tag(f)}</div><div class="pk">${pointsOf(f)}</div>`
-        + `<div class="ps" style="height:${[46, 34, 24, 15][r - 1] ?? 15}px">${ordinal(r)}</div></div>`;
+        + `<div class="ps${r >= 4 ? ' dots' : ''}" style="height:${[46, 34, 24, 15][r - 1] ?? 15}px">${ordinal(r)}</div></div>`;
     }).join('');
   }
 
@@ -916,7 +940,7 @@ async function main() {
     leaveCourse();
     if (brawl) { endBrawl(); fx.clear(); }
     if (mode === 'race') { race.dispose(); bots = []; fx.clear(); } else clearBots();
-    clearLoot(); LOOT.on = true; tally = {}; paid = null; cubePulse = 0;   // v0.38
+    clearLoot(); LOOT.on = true; tally = {}; paid = null; cubePulse = 0; party.stop();   // v0.38; v0.52
     race.setVisible(false);
     race = races[raceTrack === 'random' ? TRACK_IDS[Math.floor(Math.random() * TRACK_IDS.length)] : raceTrack as TrackId] ?? races.gp;   // v0.35
     mapOutline = race.outline();
@@ -965,6 +989,7 @@ async function main() {
     canvas.focus();
   }
   function leaveRace() {
+    party.stop();   // v0.52
     DRIVE.raceSpeed = 1;   // v0.34: arena / course / lab at normal speed
     DRIVE.raceWeaponsNeutral = false;
     DRIVE.raceSteer = false;
@@ -1074,15 +1099,17 @@ async function main() {
     if (!pr.down) camCtl.chase(pr.bot.root.rotationQuaternion, dt);
     sun.position = target.add(SUN_OFFSET);
     fx.focus = target;
+    fx.me = pr.bot;   // v0.53 big-hit camera shake only when your bot is in the hit
     fx.update(dt, cam);
     drawRaceHud(now);
     // v0.38 the player's race reward goes into the wallet the moment they cross the line
     if (race.playerFinishedAt > 0 && !paid) {
       paid = rewardOf(pr);
       walletAfter = payWallet(paid.total);
-      hud.sign(`${signed(paid.total)} CUBES`, 1800, paid.total >= 0 ? '#39ff14' : '#ff4d4d');
+      if (paid.place === 1) { hud.clearSign(); party.start(() => pr.bot.root.position); }   // v0.52 1st: the big sign + fireworks
+      else hud.sign(`${signed(paid.total)} CUBES`, 1800, paid.total >= 0 ? '#39ff14' : '#ff4d4d');
     }
-    if (race.playerFinishedAt > 0 && now - race.playerFinishedAt > 1500 && (raceShown < 0 || now - raceShown > 500)) showRaceResults(now);
+    if (race.playerFinishedAt > 0 && now - race.playerFinishedAt > (paid?.place === 1 ? CELEBRATE.resultsMs : 1500) && (raceShown < 0 || now - raceShown > 500)) showRaceResults(now);
   }
 
   /** Race HUD (position, lap, times, order) + minimap. Redrawn ~10x a second. */
@@ -1216,7 +1243,7 @@ async function main() {
     raceSeen = true; startRace();
   }
   (window as unknown as { __bb: unknown }).__bb = { get race() { return race; }, get phase() { return phase; }, scene, cam,
-    get tally() { return tally; }, get brawl() { return brawl; }, bigBox, get knockFree() { return knockFree; }, get paid() { return paid; }, upg, skinCount: (id: string) => { const r = race.racers.find(x => x.id === id); return r ? cubeSkinOf(r.bot.root)?.count : undefined; } };   // v0.38   // v0.35b scene + cam for sandbox screenshots   // v0.35 race changes with the track
+    get tally() { return tally; }, get brawl() { return brawl; }, get combat() { return combat; }, bigBox, get knockFree() { return knockFree; }, get paid() { return paid; }, upg, skinCount: (id: string) => { const r = race.racers.find(x => x.id === id); return r ? cubeSkinOf(r.bot.root)?.count : undefined; } };   // v0.38   // v0.35b scene + cam for sandbox screenshots   // v0.35 race changes with the track
 
   // v0.8 real spinner damage: weapon energy measured around every physics step
   scene.onBeforePhysicsObservable.add(() => {
@@ -1391,6 +1418,7 @@ async function main() {
       end(w ? `${w.build.cosmetics.name} WINS — ${justOut[0].build.cosmetics.name} OUT OF THE ARENA` : 'DOUBLE OUT — DRAW', w?.build.cosmetics.paint ?? '#fff');
     }
 
+    fx.me = bots[0] ?? null;   // v0.53 P1 is you
     fx.update(dt, cam);
 
     // Clock + end conditions

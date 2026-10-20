@@ -21,7 +21,8 @@
  *    the next nearest part
  *  - each part keeps exactly its share of cubes: cubes left = cubes at the start x HP left / max HP (at least
  *    one while it's alive), knocked off nearest the hit first, so hits dig in. Shares, not counts, so the
- *    cube size never changes the balance. Chassis cubes (no HP of their own) still chip for feedback.
+ *    cube size never changes the balance. (v0.56: the chassis has its own HP pool now -- state.chassis -- and keeps its
+ *    share of cubes the same way; no free feedback chips.)
  *  - a part that falls off flies as a real body for PART_FLY.lifeS (option 4): it shoves whatever it hits and
  *    does a little damage (combat.ts), then breaks up into ordinary debris
  *
@@ -35,7 +36,7 @@ import {
 import { botMeshes, chassisFor, dropPart, loosePartFilter, spinOmega, weaponBodies, BOT_IDS, type Bot, type BotId } from './bot.js';
 import { castShadows } from './look.js';
 import { catalog } from './catalog.js';
-import { isProtected, type BotState } from '../../src/core/state.js';
+import { isProtected, CHASSIS } from '../../src/core/state.js';
 import { partWeight } from '../../src/core/weight.js';
 
 // ---------------- settings (lab deploy bar, remembered in this browser) ----------------
@@ -68,15 +69,6 @@ const PAL: Record<'armor' | 'neon', Pal> = {
     wear: 0.2, scratch: 0.05, scratchCol: '#e2eeff' },
 };
 const KEEP_DEPTH = 3;
-const CHIP = {
-  base: 0.03,          // share of the cubes a bot may lose before it has taken any damage (hit feedback)
-  perDamage: 0.5,      // + this share x the fraction of its breakable HP that is gone
-  maxRemoved: 0.6,     // never more than this by chipping (a part dying / KO can go further)
-  minPerHit: 2,        // every hit knocks at least this many loose (if the cap allows)
-  radius: 1.4,         // search radius in cubes ...
-  radiusPerDmg: 1 / 20,// ... + 1 cube per 20 damage ...
-  radiusMax: 3.5,      // ... up to this many more
-};
 /** v0.28 a part at 0 HP flies off as one piece (shared push + spin), breaking up as it goes. */
 const PART_OFF = { speed: [2.5, 4.5], up: [2.5, 4.5], spin: [4, 9], noise: 0.5 };
 /** v0.29 option 4: the part that fell off is a real body this long, then breaks up into debris.
@@ -303,8 +295,11 @@ export class Skin {
   /** v0.40 upgrade cubes (upgrades.ts): built from the scrap meter, not the wallet -- knocked off they cost the owner
    *  nothing (still loot for the others) */
   free = false;
-  /** v0.38 one cube's worth of money: 1 for an 8-bit (big) cube, less for smaller cubes */
-  readonly cubeValue: number;
+  // v0.38 cubeValue (1 per 8-bit cube) -- v0.56 (user): replaced by HP, each cube is worth its share of its part's HP (valueOf)
+  /** v0.56 HP each cube that came off was worth (points / money / scrap use this) */
+  private val!: Float32Array;
+  /** v0.56 upgrade addon skins (no bot): HP per cube, set by upgrades.ts (addon HP / its cubes) */
+  hpPerCube = 1;
   private active: number[] = [];
   private dDirtyM = false; private dDirtyC = false;
   // v0.29 HP = cubes: per part, its holders, cubes at the start, cubes still on
@@ -322,7 +317,6 @@ export class Skin {
 
   constructor(private scene: Scene, readonly root: Mesh, meshes: AbstractMesh[], paintHex: string, socketOf: (m: AbstractMesh) => string | null, shadows?: ShadowGenerator) {
     this.v = CUBE_SIZE[CUBES.size] ?? 0.08;
-    this.cubeValue = (this.v / CUBE_SIZE.big) ** 2;   // v0.38 the cube shell is ~3 cubes deep: cube count goes with 1 / size^2
     this.style = CUBES.style in STYLE ? CUBES.style : 'glow';
     const st = STYLE[this.style], v = this.v;
     // v0.31 armoured / weathered palette: team hue kept, paint darker and less saturated (industrial paint)
@@ -440,7 +434,7 @@ export class Skin {
     this.dq = new Float32Array(total * 4); this.dw = new Float32Array(total * 3);
     this.yaw = new Float32Array(total); this.calm = new Float32Array(total); this.walled = new Uint8Array(total);
     this.age = new Float32Array(total); this.lapOff = new Int16Array(total); this.pullV = new Float32Array(total);
-    this.noLoot = new Uint8Array(total);
+    this.noLoot = new Uint8Array(total); this.val = new Float32Array(total);
 
     if (shadows) castShadows(shadows, [...this.holders.map(h => h.mesh), this.debris]);
     this.follow();
@@ -506,9 +500,7 @@ export class Skin {
     this.follow();
     const bot = this.bot;
     if (bot && !this.ko) {
-      for (const [sid, ps] of Object.entries(bot.state.parts)) {
-        if (ps.hp <= 0 && !this.deadSockets.has(sid)) { this.deadSockets.add(sid); this.killPart(sid); }
-      }
+      this.reap();
       this.sync(this.lastPoint ?? this.root.getAbsolutePosition());   // v0.29 HP = cubes (any HP change, any source)
     }
     // hit flash
@@ -573,6 +565,19 @@ export class Skin {
         }
       }
     }
+    // v0.56 the chassis is a target too (its own HP pool)
+    if (this.bot?.state.chassis && ok(CHASSIS)) for (const h of this.holders) {
+      if (h.socket || !h.mesh.isEnabled()) continue;
+      h.mesh.computeWorldMatrix(true);
+      h.mesh.getWorldMatrix().invertToRef(inv);
+      Vector3.TransformCoordinatesToRef(point, inv, q);
+      for (const g of h.cubes) {
+        if (this.st[g] !== 0) continue;
+        const dx = this.lp[g * 3] - q.x, dy = this.lp[g * 3 + 1] - q.y, dz = this.lp[g * 3 + 2] - q.z;
+        const d = dx * dx + dy * dy + dz * dz;
+        if (d < bd) { bd = d; best = CHASSIS; }
+      }
+    }
     // a part too thin to get any cubes of its own at this cube size (8-bit Flip Side's top armor, flush under the
     // plate) is hit by where its mesh is -- otherwise it could never be damaged and the bot never KO'd
     if (this.bot) for (const [sid, m] of Object.entries(this.bot.partMeshes)) {
@@ -585,64 +590,100 @@ export class Skin {
   }
 
   /** v0.29 HP = cubes: every living part keeps its share of cubes (start x HP / max HP, at least 1);
-   *  extra cubes come off nearest `point` first. */
+   *  extra cubes come off nearest `point` first. v0.56: the chassis too, from its own HP pool (state.chassis). */
   private sync(point: Vector3) {
     const bot = this.bot;
     if (!bot) return;
-    const inv = new Matrix(), q = new Vector3();
     for (const [sid, hs] of this.sockHolders) {
       const ps = bot.state.parts[sid];
       if (!ps || ps.hp <= 0 || this.deadSockets.has(sid)) continue;
       const init = this.sockInit.get(sid) ?? 0;
       const want = Math.max(1, Math.ceil(init * ps.hp / Math.max(1, ps.maxHp)));
       const extra = (this.sockAlive.get(sid) ?? 0) - want;
-      if (extra <= 0) continue;
-      const near: { g: number; d: number }[] = [];
-      for (const h of hs) {
-        h.mesh.computeWorldMatrix(true);
-        h.mesh.getWorldMatrix().invertToRef(inv);
-        Vector3.TransformCoordinatesToRef(point, inv, q);
-        for (const g of h.cubes) {
-          if (this.st[g] !== 0) continue;
-          const dx = this.lp[g * 3] - q.x, dy = this.lp[g * 3 + 1] - q.y, dz = this.lp[g * 3 + 2] - q.z;
-          near.push({ g, d: dx * dx + dy * dy + dz * dz });
-        }
-      }
-      near.sort((a, b) => a.d - b.d);
-      for (const { g } of near.slice(0, extra)) this.loosen(g, 1);
+      if (extra > 0) this.takeNearest(hs, point, extra);
+    }
+    const c = bot.state.chassis;
+    if (c && c.hp > 0 && this.chassisN) {
+      const want = Math.max(1, Math.ceil(this.chassisN * c.hp / Math.max(1, c.maxHp)));
+      const extra = (this.chassisN - this.chassisOff) - want;
+      if (extra > 0) this.takeNearest(this.holders.filter(h => !h.socket && h.mesh.isEnabled()), point, extra);
     }
   }
-
-  /** A hit at `point` (world) that did `dmg` (already applied to the bot's state). */
-  hit(point: Vector3, dmg: number) {
-    if (this.ko || !this.n) return;
-    this.flash = 0.15;
-    this.lastPoint = point.clone();
-    this.sync(point);                       // v0.29 the part that took it loses its share of cubes
-    // chassis cubes (no HP of their own): a few chip off near the hit, capped by the bot's overall damage
-    if (!this.chassisN) return;
-    const frac = this.bot ? damageFraction(this.bot.state) : 0;
-    const cap = Math.floor(this.chassisN * CHIP.maxRemoved) - this.chassisOff;
-    if (cap <= 0) return;
-    const allowed = Math.floor(this.chassisN * (CHIP.base + CHIP.perDamage * frac)) - this.chassisOff;
-    const take = Math.min(cap, Math.max(CHIP.minPerHit, allowed));
-    const r = this.v * (CHIP.radius + Math.min(CHIP.radiusMax, dmg * CHIP.radiusPerDmg));
-    const near: { g: number; d: number }[] = [];
+  /** knock the n intact cubes of these holders nearest `point` (world) loose */
+  private takeNearest(hs: Holder[], point: Vector3, n: number) {
     const inv = new Matrix(), q = new Vector3();
-    for (const h of this.holders) {
-      if (h.socket || !h.mesh.isEnabled()) continue;
+    const near: { g: number; d: number }[] = [];
+    for (const h of hs) {
       h.mesh.computeWorldMatrix(true);
       h.mesh.getWorldMatrix().invertToRef(inv);
       Vector3.TransformCoordinatesToRef(point, inv, q);
       for (const g of h.cubes) {
         if (this.st[g] !== 0) continue;
         const dx = this.lp[g * 3] - q.x, dy = this.lp[g * 3 + 1] - q.y, dz = this.lp[g * 3 + 2] - q.z;
-        const d = dx * dx + dy * dy + dz * dz;
-        if (d <= r * r) near.push({ g, d });
+        near.push({ g, d: dx * dx + dy * dy + dz * dz });
       }
     }
     near.sort((a, b) => a.d - b.d);
-    for (const { g } of near.slice(0, take)) this.loosen(g, 1);
+    for (const { g } of near.slice(0, n)) this.loosen(g, 1);
+  }
+  /** parts that just reached 0 HP fall off */
+  private reap() {
+    const bot = this.bot;
+    if (!bot || this.ko) return;
+    for (const [sid, ps] of Object.entries(bot.state.parts)) {
+      if (ps.hp <= 0 && !this.deadSockets.has(sid)) { this.deadSockets.add(sid); this.killPart(sid); }
+    }
+  }
+
+  /** A hit at `point` (world) that did `dmg` (already applied to the bot's state). Returns how many cubes came off
+   *  (-1 = nothing to show: no cubes / KO'd). v0.56 (user): no more free chassis chips -- the chassis has its own HP,
+   *  so every cube that comes off is real HP; a hit too small for a whole cube returns 0 (fx.ts shows dust). */
+  hit(point: Vector3, _dmg: number): number {
+    if (this.ko || !this.n) return -1;
+    this.flash = 0.15;
+    this.lastPoint = point.clone();
+    const before = this.offCount;
+    const ch = this.bot?.state.chassis;
+    if (ch && ch.hp <= 0) {
+      // chassis gone = KO (main.ts blows the bot up, credited to nobody): the hit that did it still knocks off the
+      // chassis cubes it emptied (its last share of HP), so they count for the attacker like any other hit
+      this.takeNearest(this.holders.filter(h => !h.socket && h.mesh.isEnabled()), point, this.chassisN);
+      return this.offCount - before;
+    }
+    this.reap();
+    this.sync(point);                       // v0.29 the part that took it loses its share of cubes
+    return this.offCount - before;
+  }
+  /** v0.56 cubes that have come off so far (hit() counts the ones a hit knocked off) */
+  private offCount = 0;
+
+  /** v0.56 set the chassis HP pool (once, when a match bot is cubed): the bot's average HP per cube over its breakable
+   *  parts x the chassis cubes, so a chassis cube is worth the same as an average part cube. Already set (the test
+   *  course dummy) = left alone. */
+  initChassis() {
+    const bot = this.bot;
+    if (!bot || !this.chassisN || bot.state.chassis) return;
+    let hp = 0, n = 0;
+    for (const [sid, init] of this.sockInit) {
+      const ps = bot.state.parts[sid];
+      if (!ps || init <= 0 || isProtected(bot.state, ps)) continue;
+      hp += ps.maxHp; n += init;
+    }
+    const max = Math.max(1, Math.round(this.chassisN * (n > 0 ? hp / n : 1)));
+    bot.state.chassis = { hp: max, maxHp: max };
+  }
+
+  /** v0.56 (user) currency = HP: the HP cube g is worth -- its part's max HP / that part's cubes at the start; chassis
+   *  cubes = chassis max HP / chassis cubes; upgrade addon cubes = the addon's HP / its cubes. */
+  private valueOf(g: number): number {
+    if (this.free || !this.bot) return this.hpPerCube;
+    const h = this.holders[this.hOf[g]];
+    if (h.socket) {
+      const ps = this.bot.state.parts[h.socket];
+      return ps ? ps.maxHp / Math.max(1, this.sockInit.get(h.socket) ?? 1) : 0;
+    }
+    const c = this.bot.state.chassis;
+    return c && this.chassisN ? c.maxHp / this.chassisN : 0;
   }
 
   /** v0.28 A part reached 0 HP: it falls off for real -- its collider goes (bot.ts dropPart) and its cubes
@@ -836,11 +877,12 @@ export class Skin {
     // v0.38 cube currency: it cost its racer one cube; remember the lap it came off on (own cubes: next lap on)
     this.age[g] = 0; this.pullTo[g] = undefined;
     this.noLoot[g] = 0;
-    if (LOOT.on && this.ownerId && !this.freeLoss && !this.free) { this.lapOff[g] = LOOT.lapOf(this.ownerId); LOOT.onLost(this.ownerId, this.cubeValue); }
+    this.val[g] = this.valueOf(g); this.offCount++;   // v0.56 currency = HP
+    if (LOOT.on && this.ownerId && !this.freeLoss && !this.free) { this.lapOff[g] = LOOT.lapOf(this.ownerId); LOOT.onLost(this.ownerId, this.val[g]); }
     // v0.47 damage = cubes: knocked off by a rival's hit just now (not the KO explosion, not a hazard)
     if (LOOT.on && this.ownerId && !this.noCredit) {
       const c = CREDIT.get(this.ownerId);
-      if (c && performance.now() - c.t <= LOOT.creditMs) LOOT.onKnocked(c.by, this.ownerId, this.cubeValue, this.free);
+      if (c && performance.now() - c.t <= LOOT.creditMs) LOOT.onKnocked(c.by, this.ownerId, this.val[g], this.free);
     }
   }
 
@@ -950,7 +992,7 @@ export class Skin {
           this.st[g] = 3; this.hide(g); this.pullTo[g] = undefined;
           const by = this.pullBy[g];
           const repaired = skins.get(b.root)?.repairOne() ?? false;
-          if (by) LOOT.onCollect(by, this.cubeValue, repaired);
+          if (by) LOOT.onCollect(by, this.val[g], repaired);
           continue;
         }
         const k = sp * dt / d;
@@ -981,7 +1023,7 @@ export class Skin {
   }
 
   /** v0.38 a vacuumed cube snaps back on as repair: the most damaged living part gets one cube's share of its HP back
-   *  (and one of its missing cubes back on); undamaged parts but chipped chassis = a chassis cube back. false = nothing
+   *  (and one of its missing cubes back on). v0.56: the chassis is one of the parts (its HP pool). false = nothing
    *  to repair (it's money only then). */
   repairOne(): boolean {
     const bot = this.bot;
@@ -992,15 +1034,18 @@ export class Skin {
       const f = ps.hp / ps.maxHp;
       if (f < bf) { bf = f; best = sid; }
     }
+    const c = bot.state.chassis;
+    if (c && c.hp > 0 && c.hp < c.maxHp && this.chassisN && c.hp / c.maxHp < bf) {   // v0.56 chassis most damaged
+      c.hp = Math.min(c.maxHp, c.hp + c.maxHp / this.chassisN);
+      const g = this.missing(this.holders.filter(h => !h.socket && h.mesh.isEnabled()));
+      if (g >= 0) this.restore(g);
+      return true;
+    }
     if (best) {
       const ps = bot.state.parts[best], init = this.sockInit.get(best) ?? 0;
       ps.hp = Math.min(ps.maxHp, ps.hp + ps.maxHp / Math.max(1, init));
       if (init > 0) { const g = this.missing(this.sockHolders.get(best) ?? []); if (g >= 0) this.restore(g); }
       return true;
-    }
-    if (this.chassisOff > 0) {
-      const g = this.missing(this.holders.filter(h => !h.socket && h.mesh.isEnabled()));
-      if (g >= 0) { this.restore(g); return true; }
     }
     return false;
   }
@@ -1110,13 +1155,6 @@ function disposeRide(r: Ride) {
 /** Glow-layer colour: the cubes' colour, brightest channel capped so pale parts don't bloom into a white blob. */
 function glowOf(c: Color3, k: number): Color3 { const m = Math.max(c.r, c.g, c.b, 1e-3); return c.scale(Math.min(k, 0.4 / m)); }
 
-/** Fraction of the bot's breakable HP that is gone (0..1). */
-function damageFraction(s: BotState): number {
-  let max = 0, left = 0;
-  for (const p of Object.values(s.parts)) { if (isProtected(s, p)) continue; max += p.maxHp; left += Math.max(0, p.hp); }
-  return max > 0 ? 1 - left / max : 0;
-}
-
 // ---------------- entry points ----------------
 /** Lab preview: cube the assembled bot (no state; nothing breaks in the lab). */
 export function skinPreview(scene: Scene, root: Mesh, partMeshes: Record<string, Mesh>, paint: string, shadows?: ShadowGenerator): Skin | null {
@@ -1140,6 +1178,7 @@ export function skinBot(bot: Bot, shadows?: ShadowGenerator): Skin | null {
   const sk = new Skin(scene, bot.root, botMeshes(bot), bot.build.cosmetics.paint ?? (bot.id === 'A' ? '#e63946' : '#1d7cf2'), socketOf, shadows);
   sk.bot = bot;
   sk.ownerId = bot.id;   // v0.38 cube currency
+  sk.initChassis();      // v0.56 chassis HP pool
   return sk;
 }
 
@@ -1148,6 +1187,7 @@ function socketByAncestry(m: AbstractMesh, partMeshes: Record<string, Mesh>): st
   return null;
 }
 
-export function cubeHit(bot: Bot, point: Vector3, dmg: number) { skins.get(bot.root)?.hit(point, dmg); }
+/** v0.56 returns the cubes the hit knocked off (0 = too small for a whole cube; -1 = no cube skin / KO'd) */
+export function cubeHit(bot: Bot, point: Vector3, dmg: number): number { return skins.get(bot.root)?.hit(point, dmg) ?? -1; }
 export function cubeKnockout(bot: Bot, loot = true) { skins.get(bot.root)?.knockout(loot); }
 export function cubeSkinOf(root: Node): Skin | undefined { return skins.get(root); }

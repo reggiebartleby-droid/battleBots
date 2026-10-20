@@ -5,6 +5,7 @@
  *  - the wallet (saved in this browser) takes the reward; a bad race can't push it below 0
  * v0.47: see REWARD below (count floored at 0, crash = reset to 0, damage = cubes knocked off rivals, clean-race bonus).
  * Amounts are in 8-bit (big) cubes (smaller cube sizes count each cube for less -- cubes.ts cubeValue).
+ * v0.56 (user): currency = HP -- each cube is worth its share of its part's HP (cubes.ts valueOf), so amounts are HP.
  */
 /** v0.38 the user's "Balanced" mix (60/40/25/15, +1 per 10 dmg, +1 per s under par up to 20) x10: a bot turned out to be
  *  ~1,250 cubes (8-bit), so a few hits cost 50-150 cubes and a wreck (the whole bot blows apart) ~1,250. At x1 the

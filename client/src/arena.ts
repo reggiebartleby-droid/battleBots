@@ -30,7 +30,8 @@ export const WALL_BIT = 1 << 7;
 
 /** v0.49 one BattleBox built by buildArena (the 16 m original, or the 32 m Big Arena). */
 export interface ArenaBox {
-  half: number;
+  half: number;            // v0.52 round arena: the radius
+  round?: boolean;         // v0.52 the Big Arena is a circle (no corners to get stuck in)
   center: Vector3;
   /** n spawn points (corners, then edge midpoints), y = 0.6, with the facing toward the centre */
   spawns(n: number): { pos: Vector3; facing: number }[];
@@ -197,6 +198,78 @@ export function buildArena(scene: Scene) {
     };
   };
 
+  /** v0.52 (user) a ROUND BattleBox (the Big Arena): no corners for bots to get stuck in. Cylinder floor collider,
+   *  a ring of RING_PANELS flat wall panels (each its own collider), same black + neon look; floor grid clipped to the circle. */
+  const RING_PANELS = 48;
+  const buildRing = (diameter: number, origin: Vector3, prefix: string): ArenaBox => {
+    const R = diameter / 2, k = diameter / ARENA_SIZE;
+    const N = (n: string) => prefix + n[0].toUpperCase() + n.slice(1);
+    const O = (x: number, y: number, z: number) => new Vector3(origin.x + x, origin.y + y, origin.z + z);
+    const own: Mesh[] = [];
+
+    // floor: a disc collider a little wider than the wall ring (a bot over the wall drops past its edge)
+    const floor = MeshBuilder.CreateCylinder(N('floor'), { diameter: diameter + 0.6, height: 0.5, tessellation: RING_PANELS }, scene);
+    floor.position = O(0, -0.25, 0);
+    floor.material = black;
+    floor.receiveShadows = true;
+    new PhysicsAggregate(floor, PhysicsShapeType.CYLINDER, { mass: 0, friction: 0.8, restitution: 0.1 }, scene).shape.filterMembershipMask = SURFACE_BIT;
+    glow.addExcludedMesh(floor); own.push(floor);
+
+    // walls: RING_PANELS flat panels, tangent to the circle, overlapping a touch so there's no gap
+    const step = Math.PI * 2 / RING_PANELS, rw = R + 0.125;
+    const panelW = 2 * rw * Math.tan(step / 2) + 0.06;
+    const at = (a: number, r: number, y: number) => O(Math.sin(a) * r, y, Math.cos(a) * r);
+    for (let i = 0; i < RING_PANELS; i++) {
+      const a = i * step;
+      const wall = MeshBuilder.CreateBox(N(`wall${i}`), { width: panelW, depth: 0.25, height: WALL_H }, scene);
+      wall.position = at(a, rw, WALL_H / 2);
+      wall.rotation.y = a;   // the panel's width runs along the tangent
+      wall.material = glass;
+      new PhysicsAggregate(wall, PhysicsShapeType.BOX, { mass: 0, friction: 0.3, restitution: 0.4 }, scene).shape.filterMembershipMask = WALL_BIT;
+      glow.addExcludedMesh(wall); own.push(wall);
+    }
+    // neon: top ring, faint mid ring, kick rail, an upright every 4 panels
+    for (let i = 0; i < RING_PANELS; i++) {
+      const a0 = (i - 0.5) * step, a1 = (i + 0.5) * step, edge = R + 0.125 / Math.cos(step / 2);
+      bar(at(a0, edge, WALL_H), at(a1, edge, WALL_H), 0.06, M.frame);
+      bar(at(a0, edge, WALL_H * 0.62), at(a1, edge, WALL_H * 0.62), 0.025, M.faint);
+      bar(at(a0, R - 0.02, 0.25), at(a1, R - 0.02, 0.25), 0.05, M.frame);
+      if (i % 4 === 0) bar(at(i * step - step / 2, edge, 0), at(i * step - step / 2, edge, WALL_H), 0.05, M.frame);
+    }
+    // killsaw strips (visual), as in the square box
+    for (const z of [-2.5 * k, 2.5 * k]) bar(O(-2.7 * k, 0.045, z), O(2.7 * k, 0.045, z), 0.06, M.hot);
+    own.push(...flush(N('arenaNeon')));
+
+    // floor grid: the square grid clipped to the circle + the outer edge ring
+    let gridMeshes: Mesh[] = [];
+    let visible = true;
+    gridBuilders.push((n0: number) => {
+      for (const m of gridMeshes) { neonMeshes.delete(m); m.dispose(); }
+      const n = Math.max(1, Math.round(n0 * k)), stepG = diameter / n;
+      for (let i = 1; i < n; i++) {
+        const v = -R + i * stepG, c = Math.sqrt(Math.max(0, R * R - v * v));
+        if (c < 0.05) continue;
+        const major = Math.abs((v + R) % 4) < 1e-6;
+        const m = major ? M.major : M.minor, t = major ? 0.05 : 0.025;
+        bar(O(v, 0.01, -c), O(v, 0.01, c), t, m);
+        bar(O(-c, 0.01, v), O(c, 0.01, v), t, m);
+      }
+      for (let i = 0; i < RING_PANELS; i++) bar(at((i - 0.5) * step, R, 0.01), at((i + 0.5) * step, R, 0.01), 0.05, M.major);
+      gridMeshes = flush(N('arenaGrid'));
+      for (const m of gridMeshes) m.setEnabled(visible);
+    });
+
+    return {
+      half: R, round: true, center: origin.clone(),
+      spawns: (n: number) => Array.from({ length: n }, (_, i) => {
+        const a = (i / n) * Math.PI * 2 + Math.PI / 4;
+        return { pos: at(a, R * 0.62, 0.6), facing: a + Math.PI };   // nose toward the centre
+      }),
+      setVisible: (on: boolean) => { visible = on; for (const m of [...own, ...gridMeshes]) m.setEnabled(on); },
+      debrisFloor: { cx: origin.x, cz: origin.z, half: R, wallH: WALL_H },
+    };
+  };
+
   const main = buildBox(ARENA_SIZE, Vector3.Zero(), '');
 
   const setColour = (hex: string) => {
@@ -228,5 +301,13 @@ export function buildArena(scene: Scene) {
     return box;
   };
 
-  return { half: main.half, spawnA: new Vector3(-4.5, 0.6, -4.5), spawnB: new Vector3(4.5, 0.6, 4.5), setStyle, addBox };
+  /** v0.52 the round Big Arena, same look + colour + grid picker. Starts hidden. */
+  const addRing = (diameter: number, origin: Vector3, prefix: string): ArenaBox => {
+    const box = buildRing(diameter, origin, prefix);
+    if (current.grid) gridBuilders[gridBuilders.length - 1](current.grid);
+    box.setVisible(false);
+    return box;
+  };
+
+  return { half: main.half, spawnA: new Vector3(-4.5, 0.6, -4.5), spawnB: new Vector3(4.5, 0.6, 4.5), setStyle, addBox, addRing };
 }

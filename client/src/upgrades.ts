@@ -307,6 +307,7 @@ export class Upgrades {
       skin.free = true;
     }
     const a: Addon = { kind: k, anchor, skin, hp: UPG.hp[k], init: Math.max(1, skin?.alive() ?? 1), center, ramNode };
+    if (skin) skin.hpPerCube = UPG.hp[k] / a.init;   // v0.56 currency = HP: each addon cube is worth its share of the addon's HP
     s.addons.set(k, a);
     this.effects(s);
     if (fresh) this.fx.bump(bot.root.getAbsolutePosition().add(new Vector3(0, 0.6, 0)));

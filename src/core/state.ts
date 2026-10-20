@@ -18,7 +18,13 @@ export interface BotState {
   parts: Record<string, PartState>;   // by socketId
   totalDamageTaken: number;
   breakableWeapons: boolean;          // v0.17: false = weapon + weapon motor stop at 1 HP
+  /** v0.56 (user) the chassis' own HP pool (Cube Bots look sets it: cubes.ts). Undefined = no chassis HP.
+   *  Hit through applyDamage(state, CHASSIS, dmg); no armour of its own; 0 HP = KO. */
+  chassis?: { hp: number; maxHp: number };
 }
+
+/** v0.56 socket id used for the chassis in hits / logs (it isn't in `parts`). */
+export const CHASSIS = 'chassis';
 
 export interface StateOptions {
   /** v0.17 match setting. Default true (parts break as normal); the client defaults it to false. */
@@ -60,6 +66,17 @@ export const HIT = { maxDealt: Infinity, immobilizedMult: 1 };
  * damage was dealt). Returns actual HP lost. Engines decide WHICH socket is hit.
  */
 export function applyDamage(state: BotState, socketId: string, rawDamage: number): number {
+  if (socketId === CHASSIS) {                       // v0.56 chassis HP: no armour, same per-hit rules
+    const c = state.chassis;
+    if (!c || c.hp <= 0 || rawDamage <= 0) return 0;
+    let dealt = Math.max(1, rawDamage);
+    if (isImmobilized(state)) dealt = Math.round(dealt * HIT.immobilizedMult);
+    dealt = Math.min(dealt, HIT.maxDealt);
+    const lost = Math.min(c.hp, dealt);
+    c.hp -= lost;
+    state.totalDamageTaken += lost;
+    return lost;
+  }
   const ps = state.parts[socketId];
   if (!ps || ps.hp <= 0 || rawDamage <= 0) return 0;
   let dealt = Math.max(1, rawDamage - socketArmor(ps));
@@ -97,9 +114,15 @@ export function isImmobilized(state: BotState): boolean {
   return !(wheelsOk && motorOk);
 }
 
-/** Every part at 0 HP -> KO. v0.17: unbreakable weapon parts don't count. */
+/** Every part at 0 HP -> KO. v0.17: unbreakable weapon parts don't count. v0.56: chassis at 0 HP -> KO too. */
 export function isDestroyed(state: BotState): boolean {
+  if (state.chassis && state.chassis.hp <= 0) return true;
   return Object.values(state.parts).filter(p => !isProtected(state, p)).every(p => p.hp <= 0);
+}
+
+/** v0.56 the bot's starting total HP: every part + the chassis pool. */
+export function totalMaxHp(state: BotState): number {
+  return Object.values(state.parts).reduce((a, p) => a + p.maxHp, 0) + (state.chassis?.maxHp ?? 0);
 }
 
 /** Current speed (0 if immobilized). */

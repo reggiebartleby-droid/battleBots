@@ -42,7 +42,7 @@
  *    takes a little damage (PART_HIT), credited to whoever knocked the part off
  */
 import { Vector3, type IPhysicsCollisionEvent, PhysicsEventType } from '@babylonjs/core';
-import { applyDamage, canAttack, isProtected, HIT } from '../../src/core/state.js';
+import { applyDamage, canAttack, isProtected, HIT, CHASSIS, totalMaxHp } from '../../src/core/state.js';
 import { cubeSkinOf, isLooseBody, creditCubes } from './cubes.js';
 import { forward, spinEnergy, armEnergy, energyOf, weaponBodies, chassisBodies, isChassis, CONTROL, type Bot, type BotId } from './bot.js';
 import type { PhysicsBody } from '@babylonjs/core';
@@ -116,9 +116,14 @@ export const PART_HIT = {
   maxDmg: 8,           // small: one flying part never does more than this
 };
 
-/** v0.40 every hit goes through here: race upgrades (armour plating, rear ram) soak part of it first. */
+/** v0.40 every hit goes through here: race upgrades (armour plating, rear ram) soak part of it first.
+ *  v0.56 lastSoak = HP the upgrade addons soaked on the latest hit (their cubes are worth it): the points number
+ *  shows dealt + soaked, so it matches the cubes that come off. */
+let lastSoak = 0;
 function hurt(victim: Bot, socket: string, raw: number, point: Vector3 | undefined): number {
-  return applyDamage(victim.state, socket, victim.shield ? Math.round(victim.shield(raw, point)) : raw);
+  const left = victim.shield ? Math.round(victim.shield(raw, point)) : raw;
+  lastSoak = Math.max(0, raw - left);
+  return applyDamage(victim.state, socket, left);
 }
 
 export class Combat {
@@ -135,7 +140,7 @@ export class Combat {
     this.lastBy.set(defender.id, { by: attacker.id, t: performance.now() });
     if (dealt <= 0) return;
     this.score[attacker.id] += SCORE.perHit + dealt;
-    const startHp = Object.values(defender.state.parts).reduce((a, p) => a + p.maxHp, 0);
+    const startHp = totalMaxHp(defender.state);   // v0.56 + chassis
     if (dealt >= startHp * SCORE.bigHitFrac) this.bonus(attacker, 'BIG HIT', SCORE.bigHitBonus);
   }
   /** v0.47 the rival that last hit each bot, and when (race: who gets the KO bonus) */
@@ -192,7 +197,7 @@ export class Combat {
     this.credit(attacker, victim, dealt);
     victim.lastHit = { socket, t: now };
     this.lastWeaponTouch.set(victim.id, { t: now, by: attacker });
-    this.fx.hit(point, dealt, victim, attacker.build.cosmetics.paint ?? '#fff');
+    this.fx.hit(point, dealt + lastSoak, victim, attacker.build.cosmetics.paint ?? '#fff', attacker);
     return dealt;
   }
 
@@ -204,7 +209,7 @@ export class Combat {
     const dealt = hurt(victim, socket, raw, point);
     victim.lastHit = { socket, t: performance.now() };
     creditCubes(victim.id, undefined); this.lastBy.delete(victim.id);   // v0.47 hazards: nobody's damage, nobody's KO
-    this.fx.hit(point, dealt, victim, color);
+    this.fx.hit(point, dealt + lastSoak, victim, color);
     return dealt;
   }
 
@@ -278,7 +283,7 @@ export class Combat {
     this.credit(by, self, dealt);
     self.lastHit = { socket, t: now };
     this.slams++;
-    this.fx.hit(ev.point ?? self.root.position, dealt, self, by.build.cosmetics.paint ?? '#fff');
+    this.fx.hit(ev.point ?? self.root.position, dealt + lastSoak, self, by.build.cosmetics.paint ?? '#fff', by);
   }
   slams = 0;
 
@@ -360,7 +365,7 @@ export class Combat {
     this.stats[attacker.id].dmg += dealt;
     this.credit(attacker, defender, dealt);
     defender.lastHit = { socket, t: now };
-    this.fx.hit(c.point, dealt, defender, attacker.build.cosmetics.paint ?? '#fff');
+    this.fx.hit(c.point, dealt + lastSoak, defender, attacker.build.cosmetics.paint ?? '#fff', attacker);
     this.bigKnock(attacker, defender, c.point, dealt);
   }
 
@@ -371,6 +376,7 @@ export class Combat {
     if (!sk?.bot || !point) return undefined;
     const st = defender.state;
     return sk.target(point, sid => {
+      if (sid === CHASSIS) return (st.chassis?.hp ?? 0) > 0;   // v0.56 chassis HP pool
       const ps = st.parts[sid];
       return !!ps && ps.hp > 0 && !isProtected(st, ps);   // v0.31: hits go straight past unbreakable weapons (they were free armour)
     });
@@ -420,7 +426,7 @@ export class Combat {
       this.stats[knocker.id].dmg += dealt;
       this.credit(knocker, victim, dealt);
     }
-    this.fx.hit(point, dealt, victim, (knocker ?? owner).build.cosmetics.paint ?? '#fff');
+    this.fx.hit(point, dealt + lastSoak, victim, (knocker ?? owner).build.cosmetics.paint ?? '#fff', knocker ?? owner);
     return true;
   }
   partHits = 0;

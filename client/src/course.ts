@@ -321,6 +321,7 @@ export class Course {
       this.r.crateKg = kg;
     }
     if (dummy) for (const ps of Object.values(dummy.state.parts)) { ps.hp = COURSE.dummyHp; ps.maxHp = COURSE.dummyHp; }
+    if (dummy) dummy.state.chassis = { hp: COURSE.dummyHp, maxHp: COURSE.dummyHp };   // v0.56 its chassis never breaks either
     this.paintGates();
     // steel block meter: energy the player's real weapons lose while touching the block
     if (this.block) {

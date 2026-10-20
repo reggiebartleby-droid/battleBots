@@ -91,7 +91,8 @@ export class Hud {
   private board(b: Bot, other: Bot | undefined, st?: Stats, sc?: HudScore) {
     const now = performance.now();
     const parts = Object.values(b.state.parts);
-    const hp = parts.reduce((a, p) => a + Math.max(0, p.hp), 0), hpMax = parts.reduce((a, p) => a + p.maxHp, 0);
+    const ch = b.state.chassis;   // v0.56 the chassis HP pool counts in the HP bar too (no hidden HP)
+    const hp = parts.reduce((a, p) => a + Math.max(0, p.hp), 0) + Math.max(0, ch?.hp ?? 0), hpMax = parts.reduce((a, p) => a + p.maxHp, 0) + (ch?.maxHp ?? 0);
     const armor = parts.filter(p => p.socketType === 'armor');
     const arHp = armor.reduce((a, p) => a + Math.max(0, p.hp), 0), arMax = armor.reduce((a, p) => a + p.maxHp, 0);
     const pctCls = (pct: number) => pct <= 0 ? 'dead' : pct < 30 ? 'low' : pct < 60 ? 'mid' : '';
@@ -114,7 +115,11 @@ export class Hud {
         const pct = (p.hp / p.maxHp) * 100;
         const flash = b.lastHit && b.lastHit.socket === p.socketId && now - b.lastHit.t < FLASH_MS ? ' flash' : '';
         return `<div class="part${flash}"><span>${ICON[p.socketType]} ${p.socketId}</span><div class="bar"><i class="${pctCls(pct)}" style="width:${pct}%"></i></div><span>${p.hp}</span></div>`;
-      }).join('');
+      }).join('') + (ch ? (() => {   // v0.56 chassis row
+        const pct = (ch.hp / ch.maxHp) * 100;
+        const flash = b.lastHit && b.lastHit.socket === 'chassis' && now - b.lastHit.t < FLASH_MS ? ' flash' : '';
+        return `<div class="part${flash}"><span>■ chassis</span><div class="bar"><i class="${pctCls(pct)}" style="width:${pct}%"></i></div><span>${ch.hp}</span></div>`;
+      })() : '');
       const ws = b.weapon.status(canAttack(b.state));
       const weaponRow = `<div class="part wpn ${ws.cls}"><span>weapon</span><div class="bar"><i class="w" style="width:${ws.pct}%"></i></div><span class="lbl">${ws.label}</span></div>`;
       const statRow = st ? `<div class="part stats"><span>hits ${st.hits}</span><span>bumps ${st.bumps}</span><span>hit ${st.maxImpulse} m/s</span></div>` : '';
