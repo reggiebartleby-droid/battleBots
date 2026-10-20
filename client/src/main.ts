@@ -81,11 +81,18 @@ const BIG = {
  *  show the arena and how far you flew; at the top of the arc the bot blows up and a cube driver parachutes out; then the
  *  normal respawn. */
 const LAUNCH = {
-  ms: 3000,            // detection -> respawn
-  popMaxMs: 1000,      // the bot blows up at the top of its arc, or this long after it left (whichever first)
+  // v0.58c (user: the chute came out too soon, big launches fly much further) YOU fly free: SPACE / pad A / phone FIRE
+  // = blow up + parachute; no press = it pops on its own at youMaxMs / maxOut / floor height (v0.58e). AI bots: 1 s past the
+  // top of their arc (or floor height, or aiMaxMs). Respawn = chuteMs after the pop.
+  aiAfterTopMs: 1000,  // AI: pop this long after the top of the arc
+  aiMaxMs: 3000,       // AI: pop at the latest this long after leaving
+  maxMs: 12000,        // anyone: pop at the latest this long after leaving (safety)
+  youMaxMs: 3000,      // v0.58e (user) YOU: the chute opens on its own 3 s after the launch...
+  maxOut: 20,          // v0.58e (user) ...or once you're this many m past the wall (keeps the overhead view close enough to see the chute)
+  chuteMs: 2000,       // pop -> respawn (the parachute show; v0.58d user: 2 s)
+  promptMs: 1400,      // YOU: the PARACHUTE prompt shows after the LAUNCHED BY sign
   bonus: 25,           // points on top of BIG.pts.ko
   wallGap: 0.3,        // m past the wall (beyond OUT.wallMargin) while still above the floor = launched
-  camBeta: 0.95,       // camera angle while you fly (higher up, sees the arena)
   chuteFall: 1.6,      // m/s
 };
 /** v0.51 Big Arena target points (T, test aid): 0 = off -- most points at the clock wins */
@@ -460,8 +467,8 @@ async function main() {
   interface Fighter {
     id: BotId; human: boolean; name: string; paint: string; bot: Bot;
     lapsDone: number; finished?: number;                          // for upgrades.ts (no laps here; never "finished")
-    down?: { at: number; why: 'ko' | 'off' | 'stuck' | 'launch' };   // out (v0.50: respawns BIG.goneMs later; v0.58b launch: LAUNCH.ms)
-    flight?: { t0: number; popped: boolean; chute?: TransformNode; drift: Vector3; camBeta: number };   // v0.58b launched
+    down?: { at: number; why: 'ko' | 'off' | 'stuck' | 'launch' };   // out (v0.50: respawns BIG.goneMs later; v0.58c launch: LAUNCH.chuteMs after the pop)
+    flight?: { t0: number; popped: boolean; chute?: TransformNode; drift: Vector3; camBeta: number; topAt?: number; maxY: number; popAt?: number; fireWas: boolean; camMaxR?: number };   // v0.58b launched
     place?: number;                                               // v0.50 set at the end (by KOs)
     outT?: number;                                                // battle time when it last went out, s
     gone?: boolean;                                               // v0.49b its bot has been deleted (bodies and all)
@@ -713,7 +720,7 @@ async function main() {
   /** Leaving the Big Arena (another track, the lab): bots, upgrades and the box go. */
   function endBrawl() {
     if (!brawl) return;
-    for (const f of brawl.racers) { if (!f.gone) disposeBot(f.bot); f.flight?.chute?.dispose(); }   // v0.58b parachutes too
+    for (const f of brawl.racers) { if (!f.gone) disposeBot(f.bot); f.flight?.chute?.dispose(); if (f.flight?.camMaxR !== undefined) cam.upperRadiusLimit = f.flight.camMaxR; }   // v0.58d   // v0.58b parachutes too
     brawl.boss?.dispose();   // v0.58
     hideBossBar();
     brawl = null; bots = [];
@@ -745,7 +752,9 @@ async function main() {
     // v0.49b an out bot is deleted 2 s later (as a race wreck is at its respawn). Frozen + hidden it still had a
     // working collider: an invisible wall where it died (user found it with the K probe: "botB STATIC HIDDEN").
     for (const f of B.racers) if (f.flight) updateFlight(f, now, dt);   // v0.58b launched: pop at the top of the arc, the parachute
-    for (const f of B.racers) if (f.down && !f.gone && now - f.down.at >= (f.down.why === 'launch' ? LAUNCH.ms : BIG.goneMs)) {
+    for (const f of B.racers) if (f.down && !f.gone && (f.down.why === 'launch'
+        ? (f.flight?.popAt !== undefined && now - f.flight.popAt >= LAUNCH.chuteMs) || now - f.down.at >= LAUNCH.maxMs + LAUNCH.chuteMs
+        : now - f.down.at >= BIG.goneMs)) {
       if (f.flight && !f.flight.popped) popFlight(f, now);
       combat.removeBot(f.bot); disposeBot(f.bot); f.gone = true;
     }
@@ -787,17 +796,33 @@ async function main() {
     let target = pf.down ? (pf.bot.eliminated?.pos ?? pf.bot.root.position) : pf.bot.root.position;
     const flying = pf.flight && pf.down?.why === 'launch' && !pf.gone;   // v0.58b you were launched: show the arena + you
     if (flying) {
-      const me = pf.flight!.chute?.position ?? pf.bot.root.position, c = bigBox.center;
-      target = Vector3.Lerp(c, me, 0.55);
-      const span = Math.hypot(me.x - c.x, me.z - c.z) + Math.max(0, me.y - c.y) * 0.6;
-      cam.radius += (Math.min(44, 16 + span * 0.9) - cam.radius) * 0.08;
-      cam.beta += (LAUNCH.camBeta - cam.beta) * 0.08;
-      // swing round behind the arena, looking out toward where you flew (arena in front, you beyond it)
-      const want = Math.atan2(c.z - me.z, c.x - me.x);
-      let da = want - cam.alpha; da = Math.atan2(Math.sin(da), Math.cos(da));
-      cam.alpha += da * 0.08;
+      // v0.58d (user: the v0.58c view was mostly black -- the black void, a bit of arena, no bot: the CamControl radius
+      // limit (45) capped the pull-back and the slow target lag let the bot fly out of frame)
+      const fl = pf.flight!, c = bigBox.center;
+      fl.camMaxR ??= cam.upperRadiusLimit ?? 45;
+      cam.upperRadiusLimit = 400;
+      const turn = (want: number, k: number) => { let da = want - cam.alpha; da = Math.atan2(Math.sin(da), Math.cos(da)); cam.alpha += da * k; };
+      if (!fl.chute) {
+        // in the air: chase YOUR bot from beyond it, looking back at the arena (bot in the middle, arena behind it)
+        const me = pf.bot.root.position;
+        target = me.clone();
+        cam.radius += (16 - cam.radius) * 0.12;
+        cam.beta += (1.05 - cam.beta) * 0.12;
+        turn(Math.atan2(me.z - c.z, me.x - c.x), 0.12);
+      } else {
+        // parachute: straight above, looking down -- the chute, the driver and the whole arena in view
+        const me = fl.chute.position, dx = me.x - c.x, dz = me.z - c.z, dist = Math.hypot(dx, dz);
+        target = new Vector3((me.x + c.x) / 2, c.y, (me.z + c.z) / 2);
+        const tanH = Math.tan(cam.fov / 2), aspect = engine.getAspectRatio(cam) || 1.6;
+        const along = dist / 2 + bigBox.half + 3, across = bigBox.half + 3;   // the arena-to-chute line runs across the screen
+        let r = Math.max(along / (tanH * aspect), across / tanH) * 1.1;
+        r = Math.max(r, (me.y - c.y) / 0.8 + 8);                               // always well above the chute
+        cam.radius += (r - cam.radius) * 0.15;
+        cam.beta += (0.22 - cam.beta) * 0.15;
+        turn(Math.atan2(dz, dx) + Math.PI / 2, 0.15);
+      }
     } else if (pf.down && now - pf.down.at > 2000) { const s = B.standings().find(f => !f.down); if (s) target = s.bot.root.position; }
-    cam.target = Vector3.Lerp(cam.target, target, flying ? 0.08 : 0.1).add(fx.shakeOffset());
+    cam.target = Vector3.Lerp(cam.target, target, flying ? 0.2 : 0.1).add(fx.shakeOffset());
     camGuard(target, brawl?.boss ? 'boss' : 'brawl');
     if (!flying) cam.radius += (camCtl.radius(raceCamR()) - cam.radius) * 0.05;
     if (!pf.down) camCtl.chase(pf.bot.root.rotationQuaternion, dt);
@@ -873,7 +898,7 @@ async function main() {
     castShadows(shadows, botMeshes(bot)); skinBot(bot, shadows); upg.attach(bot);
     combat.replaceBot(undefined, bot);
     if (bot.weapon.mode === 'spinner') bot.weapon.spinning = true;
-    if (f.flight) { f.flight.chute?.dispose(); if (f.human) cam.beta = f.flight.camBeta; f.flight = undefined; }   // v0.58b
+    if (f.flight) { f.flight.chute?.dispose(); if (f.human) { cam.beta = f.flight.camBeta; if (f.flight.camMaxR !== undefined) cam.upperRadiusLimit = f.flight.camMaxR; } f.flight = undefined; }   // v0.58b
     f.bot = bot; f.down = undefined; f.stuckSince = undefined; f.gone = false; f.target = undefined;
     // spawn protection: no damage for BIG.protectMs (wraps the upgrades' armour shield)
     f.protUntil = now + BIG.protectMs; f.blink = bot.root.getChildMeshes(false);
@@ -912,7 +937,7 @@ async function main() {
     const koBy = by && by !== f.id ? by : undefined;
     const label = why === 'ko' ? 'WRECKED!' : why === 'off' ? 'OUT!' : 'IMMOBILIZED!';
     if (why === 'launch') {   // v0.58b still flying: it blows up at the top of its arc (updateFlight)
-      f.flight = { t0: now, popped: false, drift: Vector3.Zero(), camBeta: cam.beta };
+      f.flight = { t0: now, popped: false, drift: Vector3.Zero(), camBeta: cam.beta, maxY: b.root.position.y, fireWas: true };   // fireWas: let go of FIRE first
     } else {
       if (why !== 'off' && cubeSkinOf(b.root)) { cubeKnockout(b, true); dropBot(b); }
       else { fx.explode(b, pos, label); freezeBot(b); }
@@ -938,12 +963,24 @@ async function main() {
     const p = b.root.position, c = bigBox.center;
     return Math.hypot(p.x - c.x, p.z - c.z) > bigBox.half + OUT.wallMargin + LAUNCH.wallGap && p.y > c.y - 0.2;
   }
-  /** v0.58b per frame while launched: pop at the top of the arc (or LAUNCH.popMaxMs), then the parachute drifts down */
+  /** v0.58c per frame while launched: YOU pop it (FIRE), AI 1 s past the top; anyone at floor height; then the chute drifts down */
   function updateFlight(f: Fighter, now: number, dt: number) {
     const fl = f.flight!;
     if (!fl.popped) {
-      const vy = f.gone ? 0 : f.bot.body.getLinearVelocity().y;
-      if ((vy <= 0 && now - fl.t0 > 150) || now - fl.t0 >= LAUNCH.popMaxMs) popFlight(f, now);
+      if (f.gone) return;
+      const p = f.bot.root.position, vy = f.bot.body.getLinearVelocity().y, age = now - fl.t0;
+      fl.maxY = Math.max(fl.maxY, p.y);
+      if (fl.topAt === undefined && vy <= 0 && age > 150) fl.topAt = now;
+      const floor = fl.topAt !== undefined && p.y <= bigBox.center.y + 0.3;   // back down to floor height
+      const out = Math.hypot(p.x - bigBox.center.x, p.z - bigBox.center.z) - bigBox.half;
+      let pop = floor || age >= LAUNCH.maxMs || out >= LAUNCH.maxOut;
+      if (f.human) {
+        const fire = readDrive('A').fire;   // SPACE, pad A / RT, phone FIRE -- a fresh press
+        if ((fire && !fl.fireWas) || age >= LAUNCH.youMaxMs) pop = true;
+        fl.fireWas = fire;
+        if (!pop && age >= LAUNCH.promptMs) hud.sign(`${padConnected() ? 'A' : MOBILE ? 'FIRE' : 'SPACE'}: PARACHUTE!`, 300, '#ffd23f');
+      } else if ((fl.topAt !== undefined && now - fl.topAt >= LAUNCH.aiAfterTopMs) || age >= LAUNCH.aiMaxMs) pop = true;
+      if (pop) popFlight(f, now);
       return;
     }
     const ch = fl.chute;
@@ -956,14 +993,15 @@ async function main() {
   /** v0.58b the top of the arc: the bot blows up (its cubes fall away -- no loot out there), the driver bails out */
   function popFlight(f: Fighter, now: number) {
     const fl = f.flight!, b = f.bot;
-    fl.popped = true;
+    fl.popped = true; fl.popAt = now;
+    if (f.human) hud.clearSign();
     const pos = b.root.position.clone(), c = bigBox.center;
     const v = b.body.getLinearVelocity();
     if (cubeSkinOf(b.root)) { cubeKnockout(b, false); dropBot(b); } else { fx.explode(b, pos, ''); freezeBot(b); }
     if (!b.eliminated) b.eliminated = { t: now, pos, vel: Vector3.Zero(), reason: 'out' };
     fl.drift = new Vector3(v.x, 0, v.z).scale(0.25);
     fl.chute = makeChute(f.paint, pos.add(new Vector3(0, 0.6, 0)));
-    const out = Math.max(1, Math.round(Math.hypot(pos.x - c.x, pos.z - c.z) - bigBox.half)), up = Math.max(0, Math.round(pos.y - c.y));
+    const out = Math.max(1, Math.round(Math.hypot(pos.x - c.x, pos.z - c.z) - bigBox.half)), up = Math.max(0, Math.round(Math.max(fl.maxY, pos.y) - c.y));   // v0.58c the highest point, not where it popped
     fx.text(pos.add(new Vector3(0, 2.6, 0)), `LAUNCHED! ${out} m OUT · ${up} m UP`, '#ffd23f', 2.2);
     if (f.human) fx.kick(0.25);
   }
@@ -1021,7 +1059,7 @@ async function main() {
       ['WEAPON', pad ? p.weapon.hint('A') : MOBILE ? 'Fires on its own when a bot is close in front of you' : p.weapon.hint('SPACE')],
       ['TO WIN', `Every bot for itself — ${bigTarget ? `first to ${bigTarget} points wins; at ${clock(BIG.seconds)}` : `at ${clock(BIG.seconds)}`}, most points wins (tie: least damage taken).`],
       ['POINTS', `+${BIG.pts.dmg} per cube you knock off a bot · +${BIG.pts.ko} per KO (+${LAUNCH.bonus} more for a launch) · +${BIG.pts.vacuum} per cube of theirs you vacuum up · +${BIG.pts.box} per gold SCRAP box.`],
-      ['KO', `Wreck a bot, or knock it out of the arena: the KO goes to the last bot that damaged it (nobody = SELF PWN!). Launch one over the wall = +${LAUNCH.bonus} more. Every bot respawns right away, safe for ${BIG.protectMs / 1000} s (it blinks). Stuck upside down / can't drive for ${BIG.stuckMs / 1000} s = respawn, nobody's KO.`],
+      ['KO', `Wreck a bot, or knock it out of the arena: the KO goes to the last bot that damaged it (nobody = SELF PWN!). Launch one over the wall = +${LAUNCH.bonus} more. YOU got launched? SPACE (pad A) = parachute (it opens on its own after 3 s, 20 m past the wall, or back at floor height). Every bot respawns right away, safe for ${BIG.protectMs / 1000} s (it blinks). Stuck upside down / can't drive for ${BIG.stuckMs / 1000} s = respawn, nobody's KO.`],
       ['DAMAGE', `DMG = cubes you knock off the other bots (+${REWARD.koBonus} for each one you put out).`],
       ['CUBES', `Your bot's cubes are your money. This battle's count starts at 0: +1 for each loose cube from another bot you vacuum up (they repair you too), −1 for each one knocked off you, never below 0. Out = back to 0. You earn cubes for your place and your damage.`],
       ['UPGRADES', 'Vacuumed cubes, damage and the gold SCRAP boxes fill your SCRAP meter: 25 = MOTOR, 60 = ARMOR plating, 100 = WEAPON power, 150 = a spiked RAM on your back that punches the first bot to get close behind you (once). Upgrades are cubes: hits knock them off. 25 more scrap rebuilds a lost one.'],
