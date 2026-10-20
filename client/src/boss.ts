@@ -14,6 +14,9 @@
  *  - HP = cubes, by part: chassis, carapace, tail, left / right pincer, disc. A hit lands on the nearest part; the disc
  *    and the tail (it holds the disc) stop at 1 HP like the bots' unbreakable weapons; the chassis stops at 1 until the
  *    carapace and both pincers are gone. Damage a part can't take goes on to the next nearest part. Chassis 0 = KO.
+ *  - v0.59d (user) TAIL CUT: tail cubes cut loose from the base of the tail explode into loot (no more floating tail);
+ *    if the cut leaves the disc's fork unattached the disc goes too (TAIL OFF!) and the stub can then be shot off. The
+ *    cutter gets the HP those cubes and the disc still had.
  *  - phases by total HP: 1 (100-66%) chase + disc + pincers; 2 (66-33%) 25% faster + a slam every ~10 s (red ring
  *    warning 1 s, shoves bots in 4.5 m, small damage); 3 (<33%) disc faster, + spin sweeps, shorter cooldowns.
  *    Each phase change: roar + 1.5 s stagger (no drive, disc motor off) and a new wave of minis.
@@ -63,7 +66,14 @@ export const BOSS = {
 };
 export type PartId = 'chassis' | 'carapace' | 'tail' | 'pincerL' | 'pincerR' | 'disc';
 const BOSS_BIT = 1 << 14;
-const FLOORED: PartId[] = ['tail', 'disc'];          // stop at 1 HP (they hold / are the weapon)
+const FLOORED: PartId[] = ['tail', 'disc'];          // stop at 1 HP (they hold / are the weapon) -- v0.59d: not once the tail is cut
+/** v0.59d (user) tail cut: tail cubes still joined (cube to cube) to the BASE of the tail (boss local: low + at the back)
+ *  stay on; anything cut loose explodes into loot. The disc stays only while the kept tail still reaches its fork. */
+const TAIL_CUT = { baseY: 0.8, baseZ: -1.7, forkA: new Vector3(0, 1.65, 2.2), forkR: 0.5 };
+const segDist = (p: Vector3, a: Vector3, b: Vector3) => {
+  const ab = b.subtract(a), t = Math.max(0, Math.min(1, Vector3.Dot(p.subtract(a), ab) / Math.max(1e-6, ab.lengthSquared())));
+  return Vector3.Distance(p, a.add(ab.scale(t)));
+};
 
 export interface BossHooks {
   /** the team, still in play (not out) */
@@ -77,7 +87,7 @@ export interface BossHooks {
   shadows?: ShadowGenerator;
 }
 
-interface Part { id: PartId; root: Mesh; skin: Skin | null; hp: number; max: number; init: number; shapes: PhysicsShape[]; boxes: { c: Vector3; h: Vector3 }[] }
+interface Part { id: PartId; root: Mesh; skin: Skin | null; hp: number; max: number; init: number; shapes: PhysicsShape[]; boxes: { c: Vector3; h: Vector3 }[]; off: boolean[] }
 interface Leg { hip: Vector3; home: Vector3; foot: Vector3; from: Vector3; to: Vector3; t: number; stepping: boolean; group: number; femur: Mesh; tibia: Mesh }
 interface Mini {
   root: Mesh; skin: Skin | null; legs: Mesh[]; pos: Vector3; yaw: number; vy: number; vel: Vector3;
@@ -113,6 +123,8 @@ export class BossFight {
   private slamAt = 0; private sweepAt = 0;
   private cmd = { speed: 0, yaw: 0 };
   private discOn = false;
+  /** v0.59d the tail was cut: the disc is gone (no body, no motor) */
+  private discGone = false;
   private discBoost = 1;
   private grab?: { bot: Bot; side: 'L' | 'R'; t: number };
   private pincerReady = { L: 0, R: 0 };
@@ -213,7 +225,7 @@ export class BossFight {
       shape.addChild(s); return s;
     };
     const P = (id: PartId, r: Mesh, boxes: { c: Vector3; h: Vector3 }[], collide = true): Part => ({
-      id, root: r, skin: null, hp: BOSS.hp[id], max: BOSS.hp[id], init: 0, boxes,
+      id, root: r, skin: null, hp: BOSS.hp[id], max: BOSS.hp[id], init: 0, boxes, off: boxes.map(() => false),
       shapes: collide ? boxes.map(b => add(b.c, b.h.scale(2))) : [] });
     const bx = (x: number, y: number, z: number, w: number, h: number, d: number) => ({ c: new Vector3(x, y, z), h: new Vector3(w / 2, h / 2, d / 2) });
     add(new Vector3(0, -0.36, -0.1), new Vector3(1.9, 0.18, 3.4), 0.02);   // skid: the hidden base glides on the floor
@@ -317,6 +329,7 @@ export class BossFight {
   get hp(): number { return this.dead ? 0 : Object.values(this.parts).reduce((a, p) => a + Math.max(0, p.hp), 0); }
   get discLive(): boolean { return !this.dead && this.discOmega() > BOSS.disc.omega[0] * 0.3; }
   private discOmega(): number {
+    if (this.discGone) return 0;   // v0.59d
     const axis = Vector3.TransformNormal(Vector3.Right(), this.root.getWorldMatrix()).normalize();
     const rel = this.disc.body.getAngularVelocity().subtract(this.body.getAngularVelocity());
     return -Vector3.Dot(rel, axis);   // front edge up = positive
@@ -372,23 +385,26 @@ export class BossFight {
     const dist = (p: Part) => {
       if (p.id === 'disc') return Math.max(0, Vector3.Distance(point, this.disc.hub.position) - BOSS.disc.r);
       let d = Infinity;
-      for (const b of p.boxes) {
+      for (const [i, b] of p.boxes.entries()) {
+        if (p.off[i]) continue;   // v0.59d that bit of the tail is gone
         const dx = Math.max(0, Math.abs(l.x - b.c.x) - b.h.x), dy = Math.max(0, Math.abs(l.y - b.c.y) - b.h.y), dz = Math.max(0, Math.abs(l.z - b.c.z) - b.h.z);
         d = Math.min(d, Math.hypot(dx, dy, dz));
       }
       return d;
     };
     const order = Object.values(this.parts).filter(p => p.hp > this.floorOf(p)).sort((a, b) => dist(a) - dist(b));
-    let dealt = 0;
+    let dealt = 0, tailHit = false;
     for (const p of order) {
       const room = p.hp - this.floorOf(p);
       if (room <= 0) continue;
       const take = Math.min(room, left);
       p.hp -= take; left -= take; dealt += take;
       this.syncCubes(p, point);
+      if (p.id === 'tail') tailHit = true;
       if (left <= 0) break;
     }
     if (dealt <= 0) return 0;
+    if (tailHit) dealt += this.checkTail(point);   // v0.59d cut it? the cutter gets what the cut piece (+ disc) still had
     this.lastHitBy = attacker.id;
     this.hooks.onPoints(attacker.id, dealt, 'boss');
     this.hooks.fx.hitAt(point, dealt, 'boss', this.hooks.isPlayer(attacker.id));
@@ -396,6 +412,7 @@ export class BossFight {
     return dealt;
   }
   private floorOf(p: Part): number {
+    if (p.id === 'tail' && this.discGone) return 0;   // v0.59d nothing left to hold: the stub can be shot off
     if (FLOORED.includes(p.id)) return 1;
     if (p.id === 'chassis') return this.parts.carapace.hp > 0 || this.parts.pincerL.hp > 0 || this.parts.pincerR.hp > 0 ? 1 : 0;
     return 0;
@@ -417,6 +434,57 @@ export class BossFight {
     const extra = p.skin.alive() - want;
     if (extra > 0) p.skin.chip(point, extra);
   }
+  /** v0.59d (user) is the tail still in one piece? Tail cubes no longer joined (cube to cube) to the base of the tail
+   *  explode into loot. If what's left no longer reaches the disc's fork, the disc goes too: TAIL OFF! Tail colliders
+   *  with no cubes left in them go (no invisible tail). Returns the HP that came off this way (the cutter's points). */
+  private checkTail(point: Vector3): number {
+    const t = this.parts.tail, sk = t.skin;
+    if (!sk || t.hp <= 0 || this.dead) return 0;
+    const anchored = (pc: { at: Vector3[] }) => pc.at.some(a => a.y < TAIL_CUT.baseY && a.z < TAIL_CUT.baseZ);
+    const pieces = sk.pieces();
+    const keep = pieces.filter(anchored), cut = pieces.filter(pc => !anchored(pc));
+    const forkOn = keep.some(pc => pc.at.some(a => segDist(a, TAIL_CUT.forkA, BOSS.disc.center) < TAIL_CUT.forkR));
+    let got = 0;
+    if (!forkOn && !this.discGone) got += this.dropDisc();
+    if (cut.length) {
+      const list = cut.flatMap(pc => pc.cubes), at = cut.flatMap(pc => pc.at);
+      const n = sk.burst(list, 1.6);
+      const hp = Math.max(0, Math.min(t.hp - this.floorOf(t), n * sk.hpPerCube));
+      t.hp -= hp; got += hp;
+      if (n) {
+        const c = at.reduce((s, a) => s.addInPlace(a), Vector3.Zero()).scaleInPlace(1 / at.length);
+        t.root.computeWorldMatrix(true);
+        this.hooks.fx.poof(Vector3.TransformCoordinates(c, t.root.getWorldMatrix()), BOSS.core);
+      }
+    }
+    if (!keep.length && t.hp > 0) { got += t.hp; t.hp = 0; }
+    if (t.hp <= 0) { this.syncCubes(t, point); for (const i of t.off.keys()) t.off[i] = true; return got; }
+    // colliders: a tail box with none of the kept cubes in it goes
+    const pad = sk.v;
+    t.boxes.forEach((b, i) => {
+      if (t.off[i]) return;
+      const inside = keep.some(pc => pc.at.some(a => Math.abs(a.x - b.c.x) <= b.h.x + pad && Math.abs(a.y - b.c.y) <= b.h.y + pad && Math.abs(a.z - b.c.z) <= b.h.z + pad));
+      if (!inside) { t.off[i] = true; const s = t.shapes[i]; if (s) { s.filterMembershipMask = 0; s.filterCollideMask = 0; } }
+    });
+    return got;
+  }
+  /** v0.59d the tail was cut: the disc blows apart (loot), its body + motor go. Returns the HP it still had. */
+  private dropDisc(): number {
+    const d = this.parts.disc, hp = Math.max(0, d.hp);
+    this.discGone = true; this.discOn = false;
+    d.hp = 0;
+    const at = this.disc.hub.position.clone();
+    if (d.skin) d.skin.knockout(true); else d.root.setEnabled(false);
+    for (const m of this.disc.hub.getChildMeshes()) m.isVisible = false;
+    try { this.disc.joint.dispose(); } catch { /* already gone */ }
+    this.disc.body.dispose();
+    this.dc.active = false; this.dc.touching = false;
+    this.hooks.sign('TAIL OFF!', 1400, '#ffd23f');
+    this.hooks.fx.poof(at, '#ff5a1f');
+    this.hooks.fx.poof(at.add(new Vector3(0, 0.6, 0)), BOSS.core);
+    this.hooks.fx.kick(0.35);
+    return hp;
+  }
   private ko(by: BotId) {
     if (this.dead) return;
     this.dead = true; this.deadAt = performance.now(); this.state = 'dead';
@@ -428,9 +496,9 @@ export class BossFight {
     this.hooks.fx.poof(at.add(new Vector3(0, 1, 0)), '#ff5a1f');
     this.hooks.fx.poof(at.add(new Vector3(0, 1.5, 1.5)), BOSS.core);
     this.hooks.fx.kick(0.6);
-    // the collider goes with it (nothing left to hit); the disc too
-    this.disc.joint.dispose();
-    this.disc.body.dispose(); this.body.dispose();
+    // the collider goes with it (nothing left to hit); the disc too (v0.59d: unless the tail cut took it already)
+    if (!this.discGone) { this.disc.joint.dispose(); this.disc.body.dispose(); }
+    this.body.dispose();
     this.ring.setEnabled(false);
     for (const m of this.minis) this.killMini(m, undefined);
     this.miniSpawns = [];
@@ -442,7 +510,7 @@ export class BossFight {
     return this.hooks.team().map(t => t.bot).find(b => !b.eliminated && (isChassis(b, body) || weaponBodies(b).some(w => w.body === body)));
   }
   private onDiscTouch(ev: IPhysicsCollisionEvent) {
-    if (this.dead) return;
+    if (this.dead || this.discGone) return;
     const v = this.teamOwner(ev.collidedAgainst);
     if (!v) return;
     this.dc.touching = true; this.dc.victim = v;
@@ -454,7 +522,8 @@ export class BossFight {
     if (this.dead) return;
     // disc motor
     const D = BOSS.disc, A = PhysicsConstraintAxis.ANGULAR_X, omega = D.omega[this.phase - 1];
-    if (this.discOn) { this.disc.joint.setAxisMotorTarget(A, -omega); this.disc.joint.setAxisMotorMaxForce(A, this.disc.torque * this.discBoost * omega / D.omega[0]); }
+    if (this.discGone) { /* v0.59d no disc, no motor */ }
+    else if (this.discOn) { this.disc.joint.setAxisMotorTarget(A, -omega); this.disc.joint.setAxisMotorMaxForce(A, this.disc.torque * this.discBoost * omega / D.omega[0]); }
     else { this.disc.joint.setAxisMotorTarget(A, 0); this.disc.joint.setAxisMotorMaxForce(A, this.disc.torque * D.brake); }
     this.dc.eB = this.discE(); this.dc.touching = false;
     // arcade base: horizontal speed + yaw toward what the AI wants; roll / pitch held near level
@@ -594,7 +663,7 @@ export class BossFight {
       g.t += this.scene.getEngine().getDeltaTime();
       if (g.bot.eliminated || g.t >= P.holdMs) {   // throw it at the disc
         if (!g.bot.eliminated) {
-          const at = this.disc.hub.position.subtract(g.bot.root.position); at.y = 0; at.normalize();
+          const at = (this.discGone ? this.toWorld(new Vector3(0, 0, 2.6)) : this.disc.hub.position).subtract(g.bot.root.position); at.y = 0; at.normalize();   // v0.59d no disc: just thrown forward
           g.bot.body.setLinearVelocity(at.scale(P.throwV).add(new Vector3(0, P.throwUp, 0)));
         }
         this.pincerReady[g.side] = now + P.cooldownMs[ph];
@@ -792,8 +861,8 @@ export class BossFight {
   }
 
   dispose() {
-    try { this.disc.joint.dispose(); } catch { /* gone with the KO */ }
-    if (!this.dead) { this.disc.body.dispose(); this.body.dispose(); }
+    try { if (!this.discGone) this.disc.joint.dispose(); } catch { /* gone with the KO */ }
+    if (!this.dead) { if (!this.discGone) this.disc.body.dispose(); this.body.dispose(); }
     for (const m of this.minis) m.root.dispose();
     this.minis = [];
     for (const p of Object.values(this.parts)) p.root.dispose();

@@ -664,11 +664,11 @@ async function main() {
   let boxesTaken: Record<string, number> = {};
   /** v0.51 battle points: damage + KO bonus + rival cubes vacuumed + SCRAP boxes */
   /** v0.58 Boss Battle points: +1 per HP dealt to the boss, +5 per mini, +50 for the final hit */
-  let bossPts: Record<string, { boss: number; minis: number; final: number }> = {};
+  let bossPts: Record<string, { boss: number; minis: number; final: number; team: number }> = {};   // v0.59d team = shared points
   let launches: Record<string, number> = {};   // v0.58b launch KOs per bot (+LAUNCH.bonus each)
-  const bossPt = (id: string) => (bossPts[id] ??= { boss: 0, minis: 0, final: 0 });
+  const bossPt = (id: string) => (bossPts[id] ??= { boss: 0, minis: 0, final: 0, team: 0 });
   const pointsOf = (f: Fighter) => {
-    if (brawl?.boss) { const b = bossPt(f.id); return Math.round(b.boss + b.minis * BOSS.mini.pts + b.final); }
+    if (brawl?.boss) { const b = bossPt(f.id); return Math.round(b.boss + b.minis * BOSS.mini.pts + b.final + b.team); }
     const t = tally[f.id] ?? newTally();
     return Math.round(t.dmg * BIG.pts.dmg + t.kos * BIG.pts.ko + (launches[f.id] ?? 0) * LAUNCH.bonus + t.got * BIG.pts.vacuum + (boxesTaken[f.id] ?? 0) * BIG.pts.box);
   };
@@ -701,6 +701,7 @@ async function main() {
       team: () => brawl?.racers.filter(f => !f.down) ?? [], combat: () => combat, fx,
       sign: (t, ms, c) => hud.sign(t, ms, c), isPlayer: id => playerId() === id, shadows,
       onPoints: (id, pts, why) => { const b = bossPt(id); if (why === 'boss') b.boss += pts; else if (why === 'mini') b.minis++; else b.final += pts;
+        if (brawl) for (const o of brawl.racers) if (o.id !== id) bossPt(o.id).team += pts * SUPER.share;   // v0.59d (user) shared points: every teammate +20% (same share as the meter); only points a bot earns itself are shared, never the shares
         if (brawl) od.teamPoints(brawl.racers.find(f => f.id === id), brawl.racers, pts, why === 'boss', performance.now()); },   // v0.59 points fill the super meter; v0.59c + 20% to teammates, ASSIST bonus
     }) : undefined;
     if (boss) { combat.ext.push(boss.target3); combat.peace = () => true; }
@@ -1108,9 +1109,9 @@ async function main() {
       ['DRIVE', pad ? 'Controller: RT gas · LT brake, then reverse · left stick steers' : MOBILE ? 'It drives itself forward: ◀ ▶ steer · BRAKE held = slow down, then reverse' : 'W A S D (or gamepad left stick)'],
       ['WEAPON', pad ? p.weapon.hint('A') : MOBILE ? 'Fires on its own when a bot is close in front of you' : p.weapon.hint('SPACE')],
       ['TO WIN', `Your team destroys STINGWHEEL before ${clock(BOSS.seconds)} — or the boss wins. Friendly fire is off. Wrecked = back in right away (safe for ${BIG.protectMs / 1000} s).`],
-      ['BOSS', `A giant scorpion (${BOSS.hp.chassis + BOSS.hp.carapace + BOSS.hp.tail + BOSS.hp.pincerL + BOSS.hp.pincerR + BOSS.hp.disc} HP). Its tail holds a huge spinning disc in front of its face — hit it from the sides and the back. Pincers grab and throw you at the disc. At 66% it gets faster and SLAMS (red ring = get out); at 33% it's ENRAGED and spins.`],
+      ['BOSS', `A giant scorpion (${BOSS.hp.chassis + BOSS.hp.carapace + BOSS.hp.tail + BOSS.hp.pincerL + BOSS.hp.pincerR + BOSS.hp.disc} HP). Its tail holds a huge spinning disc in front of its face — hit it from the sides and the back. Pincers grab and throw you at the disc. Cut through its tail and the disc goes with it. At 66% it gets faster and SLAMS (red ring = get out); at 33% it's ENRAGED and spins.`],
       ['MINIS', `Mini scorpions crawl out of the burrows. Hit one or run it over (fast) to pop it. On you they slow you down and nibble — turn hard or hit a wall to shake them off; a teammate's weapon pops them too.`],
-      ['POINTS', `+1 per HP you knock off the boss · +${BOSS.mini.pts} per mini · +${BOSS.pts.final} for the final hit. Most points = top of the podium.`],
+      ['POINTS', `+1 per HP you knock off the boss · +${BOSS.mini.pts} per mini · +${BOSS.pts.final} for the final hit · +${Math.round(SUPER.share * 100)}% of every point a teammate earns. Most points = top of the podium.`],
       ['SUPER', `Points fill your OVERDRIVE meter (${SUPER.full}). ${pad ? 'Y' : 'E'} = ${SUPER.ms / 1000} s of WEAPON OVERDRIVE: x${SUPER.dmg} damage; spinners jump to ${SUPER.spin}x speed, hammers and saws swing on their own, flippers get unlimited gas and ${SUPER.flipPower}x power, lifters / grabbers / crushers ${SUPER.controlTorque}x torque.`],
       ['TEAMWORK', `${Math.round(SUPER.share * 100)}% of every point a teammate earns goes into your meter too. Hit the boss within ${SUPER.assist.windowMs / 1000} s of a teammate = ASSIST: +${SUPER.assist.meter} meter for you both.`],
       ['COMBO', `2 or more bots in overdrive at once = COMBO: x3 damage (x4 for 3 bots, x5 for all 4), STINGWHEEL is stunned ${SUPER.stunMs / 1000} s and minis near you pop. Your allies follow your lead: fire yours and theirs go too (if full).`],
@@ -1162,7 +1163,7 @@ async function main() {
       rr.hud.innerHTML = `<b class="mp">${pointsOf(pf)}<span>${bigTarget ? `/${bigTarget}` : ''} PTS</span></b> · <b>${clock(B.timeLeft)}</b> · <span class="mc${lit}">${CUBE_ICON}<b>${signed(net)}</b></span>`;
     } else
     rr.hud.innerHTML = B.boss ? `<div class="pos">${pointsOf(pf)}<span> PTS</span></div>`   // v0.58 Boss Battle
-      + `<div>BOSS DMG <b>${Math.round(bossPt(pf.id).boss)}</b> &nbsp; MINIS <b>${bossPt(pf.id).minis}</b></div>`
+      + `<div>BOSS DMG <b>${Math.round(bossPt(pf.id).boss)}</b> &nbsp; MINIS <b>${bossPt(pf.id).minis}</b> &nbsp; TEAM <b>+${Math.round(bossPt(pf.id).team)}</b></div>`   // v0.59d
       + `<div>TIME <b>${clock(B.timeLeft)}</b>${bigPractice ? ' &nbsp; <b style="color:#36f1ff">PRACTICE</b>' : ''}</div>`
       + cubeLine(pf, now) + upg.hud(pf.id, now)
     : `<div class="pos">${pointsOf(pf)}<span>${bigTarget ? ` / ${bigTarget}` : ''} PTS</span></div>`
@@ -1213,9 +1214,9 @@ async function main() {
     const B = brawl!;
     rrTitle.textContent = B.boss ? (B.won ? 'BOSS BATTLE — STINGWHEEL DESTROYED!' : 'BOSS BATTLE — STINGWHEEL WINS') : 'BATTLE RESULTS';
     const st = B.standings();
-    if (B.boss) rr.table.innerHTML = `<tr><th></th><th>BOT</th><th>POINTS</th><th>BOSS DMG</th><th>MINIS</th><th>CUBES</th></tr>` + st.map((f, i) => {   // v0.58
+    if (B.boss) rr.table.innerHTML = `<tr><th></th><th>BOT</th><th>POINTS</th><th>BOSS DMG</th><th>MINIS</th><th>TEAM</th><th>CUBES</th></tr>` + st.map((f, i) => {   // v0.58
       const c = f.human && paid ? paid.total : brawlReward(f).total, b = bossPt(f.id);
-      return `<tr class="${f.human ? 'you' : ''}"><td>${ordinal(f.place ?? i + 1)}</td><td style="color:${f.paint}">${f.name}${f.human ? ' (YOU)' : ''}</td><td>${pointsOf(f)}${b.final ? ' · FINAL HIT' : ''}</td><td>${Math.round(b.boss)}</td><td>${b.minis}</td><td class="${c < 0 ? 'neg' : 'pos'}">${signed(c)}</td></tr>`;
+      return `<tr class="${f.human ? 'you' : ''}"><td>${ordinal(f.place ?? i + 1)}</td><td style="color:${f.paint}">${f.name}${f.human ? ' (YOU)' : ''}</td><td>${pointsOf(f)}${b.final ? ' · FINAL HIT' : ''}</td><td>${Math.round(b.boss)}</td><td>${b.minis}</td><td>+${Math.round(b.team)}</td><td class="${c < 0 ? 'neg' : 'pos'}">${signed(c)}</td></tr>`;
     }).join('');
     else rr.table.innerHTML = `<tr><th></th><th>BOT</th><th>POINTS</th><th>KOs</th><th>DAMAGE</th><th>CUBES</th></tr>` + st.map((f, i) => {
       const c = f.human && paid ? paid.total : brawlReward(f).total;

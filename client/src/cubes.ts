@@ -845,6 +845,43 @@ export class Skin {
     return take.length;
   }
 
+  /** v0.59d (boss tail cut) the cubes still on, split into connected pieces (cubes touching on the voxel grid, edges and
+   *  corners count); each cube's spot in the skin root's own space (m). */
+  pieces(): { cubes: number[]; at: Vector3[] }[] {
+    if (this.ko) return [];
+    const v = this.v, cell = new Map<number, number>();
+    const ijk = (g: number) => [Math.round(this.lp[g * 3] / v), Math.round(this.lp[g * 3 + 1] / v), Math.round(this.lp[g * 3 + 2] / v)];
+    for (let g = 0; g < this.n; g++) if (this.st[g] === 0) { const [i, j, k] = ijk(g); cell.set(KEY(i, j, k), g); }
+    const seen = new Set<number>(), out: { cubes: number[]; at: Vector3[] }[] = [];
+    for (const [k0, g0] of cell) {
+      if (seen.has(k0)) continue;
+      seen.add(k0);
+      const cubes: number[] = [], at: Vector3[] = [], todo = [g0];
+      while (todo.length) {
+        const g = todo.pop()!;
+        cubes.push(g); at.push(new Vector3(this.lp[g * 3], this.lp[g * 3 + 1], this.lp[g * 3 + 2]));
+        const [i, j, k] = ijk(g);
+        for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) {
+          if (!a && !b && !c) continue;
+          const nk = KEY(i + a, j + b, k + c), ng = cell.get(nk);
+          if (ng === undefined || seen.has(nk)) continue;
+          seen.add(nk); todo.push(ng);
+        }
+      }
+      out.push({ cubes, at });
+    }
+    return out;
+  }
+  /** v0.59d blow these cubes off (loot, worth hpPerCube each). Returns how many came off. */
+  burst(cubes: number[], power = 2): number {
+    if (this.ko) return 0;
+    for (const h of this.holders) h.mesh.computeWorldMatrix(true);
+    let k = 0;
+    for (const g of cubes) if (this.st[g] === 0) { this.loosen(g, power); k++; }
+    if (k) this.flash = 0.3;
+    return k;
+  }
+
   /** KO (v0.28: the whole bot, its collider goes too -- main.ts dropBot) or knocked out of the arena: every cube flies. */
   /** v0.38 loot = false (towed when stuck, or off the track): the bot still bursts into cubes, but they cost its racer
    *  nothing and nobody can vacuum them -- they're gone in a couple of seconds. A real wreck (KO) = every cube lost + loot. */
