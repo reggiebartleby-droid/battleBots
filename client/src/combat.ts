@@ -85,7 +85,20 @@ export const SLAM = {
 interface SpinContact { bot: Bot; body: PhysicsBody; mass: number; energy: () => number; eBefore: number; lost: number; touching: boolean; idle: number; start: number; point: Vector3; vsWeapon: boolean; active: boolean;
   gain?: boolean; jPerDmg?: number; maxHitMs?: number; crush?: boolean; eStart?: number;
   /** v0.33 (up to 4 bots): the bot this weapon is touching / last touched (hinged weapons: the nearest one before a touch) */
-  victim?: Bot }
+  victim?: Bot;
+  /** v0.58 boss battle: or a target that isn't a bot (the boss) */
+  ext?: ExtTarget }
+
+/** v0.58 boss battle: something the bots' real weapons can hurt that isn't a bot (the boss). Damage is measured the same
+ *  way as on a bot (energy the weapon lost / gave while touching it); the target decides where it lands. */
+export interface ExtTarget {
+  owns(body: PhysicsBody): boolean;
+  /** kinetic + potential energy, J (hinged weapons: what they gave it) */
+  energy(): number;
+  /** raw damage from `attacker` at `point`; returns the HP it really lost */
+  hit(attacker: Bot, raw: number, point: Vector3): number;
+  eBefore?: number;
+}
 
 export interface HitLog { t: number; attacker: BotId; victim?: BotId; socket: string; dmg: number }
 export interface Stats { hits: number; dmg: number; bumps: number; maxImpulse: number }
@@ -139,12 +152,17 @@ export class Combat {
     creditCubes(defender.id, attacker.id);   // v0.47 the cubes this hit knocks off are the attacker's damage
     this.lastBy.set(defender.id, { by: attacker.id, t: performance.now() });
     if (dealt <= 0) return;
+    this.lastDmg.set(defender, attacker.id);   // v0.58b
     this.score[attacker.id] += SCORE.perHit + dealt;
     const startHp = totalMaxHp(defender.state);   // v0.56 + chassis
     if (dealt >= startHp * SCORE.bigHitFrac) this.bonus(attacker, 'BIG HIT', SCORE.bigHitBonus);
   }
   /** v0.47 the rival that last hit each bot, and when (race: who gets the KO bonus) */
   private lastBy = new Map<string, { by: BotId; t: number }>();
+  /** v0.58b (user) KO credit: the last bot that damaged this bot -- this life (a respawn is a new Bot), however long ago.
+   *  Hazards / the boss / minis don't clear it. undefined = nobody ever did (SELF PWN!). */
+  private lastDmg = new WeakMap<Bot, BotId>();
+  lastDamager(victim: Bot): BotId | undefined { return this.lastDmg.get(victim); }
   /** v0.47 the rival whose hit landed on `victim` within `ms` -- undefined = nobody (or a hazard since) */
   lastAttacker(victim: Bot, ms: number): BotId | undefined {
     const l = this.lastBy.get(victim.id);
@@ -166,6 +184,10 @@ export class Combat {
   }
 
   private spin: SpinContact[] = [];
+  /** v0.58 boss battle: non-bot targets (the boss) */
+  ext: ExtTarget[] = [];
+  /** v0.58 boss battle (friendly fire off): true = this attacker's hits don't hurt this bot (teammates) */
+  peace?: (attacker: Bot, victim: Bot) => boolean;
 
   constructor(private bots: Bot[], private fx: Fx) {
     this.bots = [...bots];
@@ -184,6 +206,7 @@ export class Combat {
 
   /** v0.40 the rear spiked ram's piston punch (upgrades.ts): a scripted hit, credited to the ram's bot. */
   scriptedHit(attacker: Bot, victim: Bot, point: Vector3, raw: number): number {
+    if (this.peace?.(attacker, victim)) return 0;   // v0.58
     const alive = (id: string) => (victim.state.parts[id]?.hp ?? 0) > 0;
     const socket = this.cubeSocket(victim, point) ?? ['armor', 'armor_1', 'armor_2', 'front', 'wheels', 'motor'].find(alive) ?? Object.keys(victim.state.parts).find(alive);
     if (!socket) return 0;
@@ -232,7 +255,7 @@ export class Combat {
       if (b.saw) { const s = b.saw; add(s.body, s.mass, () => energyOf(s)); }
       if (b.hinges?.length) {
         // one contact for all hinged pieces (fork + jaw would double count): energy GIVEN to the opponent
-        const c: SpinContact = { bot: b, body: b.hinges[0].body, mass: b.hinges.reduce((a, h) => a + h.mass, 0), energy: () => (c.victim ? botEnergy(c.victim) : 0) + (this.pierceJ.get(b.id) ?? 0),
+        const c: SpinContact = { bot: b, body: b.hinges[0].body, mass: b.hinges.reduce((a, h) => a + h.mass, 0), energy: () => (c.ext ? c.ext.energy() : c.victim ? botEnergy(c.victim) : 0) + (this.pierceJ.get(b.id) ?? 0),
           eBefore: 0, lost: 0, touching: false, idle: 0, start: 0, point: Vector3.Zero(), vsWeapon: false, active: false,
           gain: true, jPerDmg: b.weaponKind === 'lifter' ? HINGE_DMG.lifterJoulesPerDmg : HINGE_DMG.joulesPerDmg, maxHitMs: b.weaponKind === 'crusher' ? CONTROL.crusher.hitMs : HINGE_DMG.maxHitMs, crush: b.weaponKind === 'crusher' };
         this.spin.push(c);
@@ -277,6 +300,7 @@ export class Combat {
     if (!socket) return;
     const dealt = hurt(self, socket, raw, ev.point ?? undefined);
     const by = touch.by;
+    if (this.peace?.(by, self)) return;   // v0.58 friendly fire off
     this.log.push({ t: now, attacker: by.id, victim: self.id, socket, dmg: dealt });
     this.stats[by.id].hits++;
     this.stats[by.id].dmg += dealt;
@@ -299,8 +323,9 @@ export class Combat {
   /** scene.onBeforePhysicsObservable: remember each real weapon's energy before the step. */
   beforePhysics() {
     for (const b of this.bots) this.vBefore.set(b.id, b.body.getLinearVelocity().clone());
+    for (const t of this.ext) t.eBefore = t.energy();                     // v0.58
     for (const c of this.spin) {
-      if (c.gain && !c.active) c.victim = this.nearest(c.bot);           // v0.33: hinged weapons measure the nearest bot
+      if (c.gain && !c.active) { c.victim = this.nearest(c.bot); c.ext = undefined; }   // v0.33: hinged weapons measure the nearest bot
       c.eBefore = c.energy();
       c.touching = false;
     }
@@ -313,7 +338,7 @@ export class Combat {
     for (const c of this.spin) {
       const b = c.bot;
       if (c.touching) {
-        if (!c.active) { c.active = true; c.lost = 0; c.start = now; c.eStart = c.eBefore; }
+        if (!c.active) { c.active = true; c.lost = 0; c.start = now; c.eStart = c.ext && c.gain ? (c.ext.eBefore ?? c.eBefore) : c.eBefore; }
         if (c.gain) {
           // net gain over the contact (peak), not a sum of every jiggle
           this.addPierce(c, dt);
@@ -324,8 +349,8 @@ export class Combat {
         c.idle++;
       }
       if (c.active && (c.idle >= SPIN_DMG.gapSteps || now - c.start >= (c.maxHitMs ?? SPIN_DMG.maxHitMs))) {
-        if (c.victim) this.spinHit(b, c.victim, c);
-        c.active = false; c.lost = 0;
+        if (c.ext) this.extHit(b, c.ext, c); else if (c.victim) this.spinHit(b, c.victim, c);   // v0.58 boss
+        c.active = false; c.lost = 0; c.ext = undefined;
       }
     }
   }
@@ -334,10 +359,18 @@ export class Combat {
     const self = c.bot;
     if (ev.type !== PhysicsEventType.COLLISION_STARTED && ev.type !== PhysicsEventType.COLLISION_CONTINUED) return;
     const other = this.ownerOf(ev.collidedAgainst, self);                // v0.33: whichever bot it touched
-    if (!other) return;                                                  // floor / wall / own chassis (v0.21: their wheels count as their chassis)
+    if (!other) {                                                        // v0.58 the boss?
+      const t = ev.collidedAgainst ? this.ext.find(x => x.owns(ev.collidedAgainst!)) : undefined;
+      if (!t) return;                                                    // floor / wall / own chassis (v0.21: their wheels count as their chassis)
+      if (!c.gain || !c.active) { c.ext = t; c.victim = undefined; } else if (!c.ext) return;   // a lift already on a bot stays on it
+      c.touching = true;
+      c.point = ev.point ?? self.root.position.clone();
+      c.vsWeapon = false;
+      return;
+    }
     const hitW = weaponBodies(other).find(w => w.body === ev.collidedAgainst);
     const vsWeapon = !!hitW;
-    if (!c.gain || !c.active) c.victim = other;
+    if (!c.gain || !c.active) { c.victim = other; c.ext = undefined; }
     c.touching = true;
     this.lastWeaponTouch.set(other.id, { t: performance.now(), by: self });   // v0.12 slam credit
     c.point = this.contactPoint(self, other, ev);
@@ -351,6 +384,7 @@ export class Combat {
   }
 
   private spinHit(attacker: Bot, defender: Bot, c: SpinContact) {
+    if (this.peace?.(attacker, defender)) return;   // v0.58 friendly fire off (they still shove each other)
     const raw = canAttack(attacker.state) ? Math.round(c.lost / (c.jPerDmg ?? SPIN_DMG.joulesPerDmg) * (DMG_SCALE[attacker.weaponKind ?? ''] ?? 1) * (attacker.dmgMul ?? 1)) : 0;   // v0.31 DMG_SCALE; v0.40 weapon upgrade
     if (raw < SPIN_DMG.minDmg) return;
     const alive = (id: string) => (defender.state.parts[id]?.hp ?? 0) > 0;
@@ -367,6 +401,19 @@ export class Combat {
     defender.lastHit = { socket, t: now };
     this.fx.hit(c.point, dealt + lastSoak, defender, attacker.build.cosmetics.paint ?? '#fff', attacker);
     this.bigKnock(attacker, defender, c.point, dealt);
+  }
+
+  /** v0.58 a real weapon hit on the boss: same damage rule as spinHit, the boss picks the part it lands on. */
+  private extHit(attacker: Bot, t: ExtTarget, c: SpinContact) {
+    const raw = canAttack(attacker.state) ? Math.round(c.lost / (c.jPerDmg ?? SPIN_DMG.joulesPerDmg) * (DMG_SCALE[attacker.weaponKind ?? ''] ?? 1) * (attacker.dmgMul ?? 1)) : 0;
+    if (raw < SPIN_DMG.minDmg) return;
+    const dealt = t.hit(attacker, raw, c.point);
+    if (dealt <= 0) return;
+    const now = performance.now();
+    this.log.push({ t: now, attacker: attacker.id, socket: 'boss', dmg: dealt });
+    this.stats[attacker.id].hits++;
+    this.stats[attacker.id].dmg += dealt;   // upgrades.ts: damage dealt fills the SCRAP meter
+    this.score[attacker.id] += SCORE.perHit + dealt;
   }
 
   /** v0.29 HP = cubes (Cube Bots look only): the part nearest where the hit landed that can still take damage
@@ -413,9 +460,10 @@ export class Combat {
     const alive = (id: string) => (victim.state.parts[id]?.hp ?? 0) > 0;
     const socket = this.cubeSocket(victim, point) ?? Object.keys(victim.state.parts).find(alive);
     if (!socket) return true;
-    const dealt = hurt(victim, socket, raw, point);
     const touch = this.lastWeaponTouch.get(owner.id);
     const knocker = touch && touch.by !== owner ? touch.by : this.bots.find(b => b !== owner);   // v0.33: who last hit the owner
+    if (knocker && knocker !== victim && this.peace?.(knocker, victim)) return true;   // v0.58 friendly fire off
+    const dealt = hurt(victim, socket, raw, point);
     const now = performance.now();
     victim.lastHit = { socket, t: now };
     this.partHits++;

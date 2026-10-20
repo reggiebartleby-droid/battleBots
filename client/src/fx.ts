@@ -134,6 +134,38 @@ export class Fx {
     this.shakeAdd(add, 'hit', { dmg, point: point.asArray(), defender: defender.id });
   }
 
+  /** v0.58 boss battle: a hit on something that isn't a bot (the boss). Sparks; your hits get the gold points number
+   *  (adding up like a combo, per key). Tiers as if it were a typical bot (scaleHp), so a big boss still shows big hits. */
+  hitAt(point: Vector3, dmg: number, key: string, mine: boolean, scaleHp = 200) {
+    this.spawnSparks(point, 12, this.sparkMat, 4);
+    const tierOf = (d: number) => { let t = 1; for (const th of HIT_TIER) if (d / scaleHp >= th) t++; return t; };
+    if (!mine) return;
+    const now = performance.now(), c = this.combos.get(key);
+    if (c && c.l.life > 0 && now - c.t <= COMBO_MS) {
+      c.total += dmg; c.t = now; c.tier = Math.max(c.tier, tierOf(c.total));
+      c.l.el.textContent = `-${c.total}`; c.l.el.className = `fxlabel dmg t${c.tier}`; c.l.life = c.l.max; c.l.age = 0;
+      return;
+    }
+    const tier = tierOf(dmg);
+    const l = this.label(`-${dmg}`, point.add(new Vector3(0, 0.6, 0)), '#ffd700', `dmg t${tier}`);
+    l.fw = true; l.life = l.max = FIREWORK.life; l.drift = (Math.random() - 0.5) * 2;
+    this.combos.set(key, { l, total: dmg, t: now, tier });
+  }
+  /** v0.58 a mini scorpion pops: a burst of sparks in its colour (+ "+5" for your kill) */
+  poof(point: Vector3, color: string, text?: string) {
+    const mat = new StandardMaterial('fx_poof', this.scene);
+    mat.emissiveColor = Color3.FromHexString(color); mat.disableLighting = true;
+    this.spawnSparks(point, 14, mat, 3.2, 1.1);
+    setTimeout(() => mat.dispose(), 1500);
+    if (text) { const l = this.label(text, point.add(new Vector3(0, 0.7, 0)), '#ffd700', 'dmg t1'); l.fw = true; l.life = l.max = FIREWORK.life; }
+  }
+  /** v0.58b a big word floating over a spot (LAUNCHED!, SELF PWN!) -- lasts `life` s */
+  text(pos: Vector3, text: string, color: string, life = 1.8) {
+    const l = this.label(text, pos, color, 'word'); l.pop = true; l.life = l.max = life;
+  }
+  /** v0.58 extra camera shake (boss slam), capped like the big-hit shake */
+  kick(amount: number) { this.shakeAdd(Math.max(0, Math.min(TIER_SHAKE.cap, this.shake + amount) - this.shake), 'kick', amount); }
+
   /** Contact with no live weapon behind it. */
   bump(point: Vector3) {
     const now = performance.now();

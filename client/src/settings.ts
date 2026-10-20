@@ -9,7 +9,7 @@
  */
 export const SETTINGS_VERSION = '0.30';
 const VERSION_KEY = 'bb.settings.version';
-const SAVED_KEYS = ['battlebots.builder.v1', 'bb.camera.v1', 'bb.cubes.v1', 'bb.shellAids.v1', 'bb-hud-view', 'bb-hud-details', 'bb-arena-style'];
+const SAVED_KEYS = ['battlebots.builder.v1', 'bb.camera.v1', 'bb.camera.v2', 'bb.cubes.v1', 'bb.shellAids.v1', 'bb-hud-view', 'bb-hud-details', 'bb-arena-style'];
 
 try {
   if (localStorage.getItem(VERSION_KEY) !== SETTINGS_VERSION) {

@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 import './settings.js';   // v0.30: FIRST -- clears old saved settings once, before any module reads them
 import {
-  type AbstractMesh, ArcRotateCamera, Color3, Color4, DirectionalLight, Engine, HavokPlugin, HemisphericLight, Quaternion, Scene, Vector3,
+  type AbstractMesh, ArcRotateCamera, Color3, Color4, DirectionalLight, Engine, HavokPlugin, HemisphericLight, MeshBuilder, Quaternion, Scene, StandardMaterial, TransformNode, Vector3,
 } from '@babylonjs/core';
 import HavokPhysics from '@babylonjs/havok';
 import type { BotBuild } from '../../src/core/types.js';
@@ -26,6 +26,7 @@ import { MOBILE, MobileMenu, setupTouchControls, goFullscreen, TOUCH, tapKey } f
 import { CUBES } from './cubes.js';
 import { Upgrades } from './upgrades.js';
 import { Celebrate, CELEBRATE } from './celebrate.js';   // v0.52 first-place sign + fireworks   // v0.40 race upgrades (SCRAP meter)
+import { BossFight, BOSS } from './boss.js';   // v0.58 Boss Battle
 import { Race, RACE, TRACK_IDS, ordinal, fmtTime, flatRacePhysics, raceSpinGiveBack, autoFireAt, type Racer, type TrackId } from './race.js';
 
 const MATCH_SECONDS = 180;
@@ -75,13 +76,26 @@ const BIG = {
   targets: [0, 150, 300, 500],               // v0.51 T cycles the target (0 = off, the default): first to it wins
   protectMs: 2000,                           // v0.50 after a respawn: no damage this long (the bot blinks)
 };
+/** v0.58b (user) LAUNCHED: a bot thrown over the wall and out of the arena (Battle Royal + Boss Battle). The KO goes to the
+ *  last bot that damaged it (+25 KO, +25 more for the launch); nobody = SELF PWN!. ~3 s show: your camera pulls back to
+ *  show the arena and how far you flew; at the top of the arc the bot blows up and a cube driver parachutes out; then the
+ *  normal respawn. */
+const LAUNCH = {
+  ms: 3000,            // detection -> respawn
+  popMaxMs: 1000,      // the bot blows up at the top of its arc, or this long after it left (whichever first)
+  bonus: 25,           // points on top of BIG.pts.ko
+  wallGap: 0.3,        // m past the wall (beyond OUT.wallMargin) while still above the floor = launched
+  camBeta: 0.95,       // camera angle while you fly (higher up, sees the arena)
+  chuteFall: 1.6,      // m/s
+};
 /** v0.51 Big Arena target points (T, test aid): 0 = off -- most points at the clock wins */
 let bigTarget = 0;
 /** v0.50 KO tracker podium colours, by place -- v0.53 (user): 1st gold, 2nd silver, 3rd bronze, 4th polka-dot underwear pink
  *  (the 4th step also gets white polka dots, see .ps.dots in index.html) */
 const POD_COL = ['#ffd700', '#d4dae2', '#d08a45', '#ff6fae'];
 const BIG_ID = 'bigarena';
-type TrackPick = TrackId | 'random' | typeof BIG_ID;
+const BOSS_ID = 'boss';   // v0.58 Boss Battle (the round Big Arena, you + 3 allies vs Stingwheel)
+type TrackPick = TrackId | 'random' | typeof BIG_ID | typeof BOSS_ID;
 /** v0.21: the drive is real wheels now -- see DRIVE / driveWheels in bot.ts. */
 const PHYS_STEP = 1 / 60;
 /** v0.31: spinner motor torque x this during the 3-2-1 (spin-up is sized for 3 s; the countdown is 2.7 s). */
@@ -242,6 +256,7 @@ async function main() {
     if (mode === 'race') raceSeen = true; else readySeen = true;
     rd.box.classList.remove('on');
     for (const b of bots) if (b.weapon.mode === 'spinner' && !b.weapon.motorDead) b.weapon.spinning = true;
+    brawl?.boss?.spinUp(PRESPIN_BOOST);   // v0.58 the boss's disc too
     canvas.focus();
   };
   rd.start.addEventListener('click', () => { if (mode === 'race') goFullscreen(); beginCountdown(); });   // v0.39 phone: full screen on START
@@ -270,6 +285,7 @@ async function main() {
     ];
     for (const b of bots) { castShadows(shadows, botMeshes(b)); skinBot(b, shadows); }   // v0.16; v0.27 Cube Bots look (if on)
     combat = new Combat(bots, fx);
+    camCtl.startDefaults('arena');   // v0.58 (user) every battle starts on the default camera
     timeLeft = MATCH_SECONDS; over = false; camFocus = null;
     hud.hideWinner();
     phase = 'ready'; rd.count.className = '';
@@ -444,7 +460,8 @@ async function main() {
   interface Fighter {
     id: BotId; human: boolean; name: string; paint: string; bot: Bot;
     lapsDone: number; finished?: number;                          // for upgrades.ts (no laps here; never "finished")
-    down?: { at: number; why: 'ko' | 'off' | 'stuck' };           // out (v0.50: respawns BIG.goneMs later)
+    down?: { at: number; why: 'ko' | 'off' | 'stuck' | 'launch' };   // out (v0.50: respawns BIG.goneMs later; v0.58b launch: LAUNCH.ms)
+    flight?: { t0: number; popped: boolean; chute?: TransformNode; drift: Vector3; camBeta: number };   // v0.58b launched
     place?: number;                                               // v0.50 set at the end (by KOs)
     outT?: number;                                                // battle time when it last went out, s
     gone?: boolean;                                               // v0.49b its bot has been deleted (bodies and all)
@@ -454,7 +471,8 @@ async function main() {
     taken: number;                                                // v0.50 damage taken by its earlier lives (this battle)
     protUntil?: number; blink?: AbstractMesh[];                   // v0.50 spawn protection after a respawn
   }
-  interface Brawl { racers: Fighter[]; t: number; timeLeft: number; over: boolean; overAt: number; playerOutAt: number; spinPrev: Map<Bot, number>; standings(): Fighter[] }
+  interface Brawl { racers: Fighter[]; t: number; timeLeft: number; over: boolean; overAt: number; playerOutAt: number; spinPrev: Map<Bot, number>; standings(): Fighter[];
+    boss?: BossFight; won?: boolean }   // v0.58 Boss Battle: the boss; won = the team killed it
   let brawl: Brawl | null = null;
   let bigPractice = false;   // v0.49b test aid (P in the Big Arena): you respawn, the battle never ends
   const brawlPlayer = () => brawl?.racers.find(f => f.human);
@@ -467,7 +485,8 @@ async function main() {
   let cubePulse = 0;                       // HUD: the cube line lights up for a moment after a pickup
   // ---------------- v0.40 race upgrades: the SCRAP meter (upgrades.ts) ----------------
   const upg = new Upgrades(scene, fx, { sign: (t, ms, c) => hud.sign(t, ms, c), isPlayer: id => playerId() === id, shadows,
-    onBox: id => { if (brawl && inRace(id)) boxesTaken[id] = (boxesTaken[id] ?? 0) + 1; } });   // v0.51 Big Arena points
+    onBox: id => { if (brawl && inRace(id)) boxesTaken[id] = (boxesTaken[id] ?? 0) + 1; },   // v0.51 Big Arena points
+    ally: () => !!brawl?.boss });   // v0.58 Boss Battle: everyone's on your team
   const inRace = (id: string) => {
     if (brawl) return phase === 'fight' && !brawl.over && brawl.racers.some(f => f.id === id);   // v0.49 Big Arena
     const r = race.racers.find(x => x.id === id); return !!r && r.finished === undefined && phase === 'fight';
@@ -521,7 +540,7 @@ async function main() {
   };
   const sync = () => { for (const sel of tp.track) sel.value = raceTrack; for (const sel of tp.car) sel.value = testerCar; };
   const buildFor = (car: string): BotBuild | null => car === LAB_CAR ? (labBuild ? JSON.parse(JSON.stringify(labBuild)) : null) : JSON.parse(JSON.stringify(PRESETS[car]));
-  for (const sel of tp.track) sel.innerHTML = TRACK_IDS.map(id => `<option value="${id}">${races[id].def.name}</option>`).join('') + `<option value="${BIG_ID}">Big Arena</option>` + '<option value="random">Random</option>';   // v0.49 + Big Arena
+  for (const sel of tp.track) sel.innerHTML = TRACK_IDS.map(id => `<option value="${id}">${races[id].def.name}</option>`).join('') + `<option value="${BIG_ID}">Big Arena</option>` + `<option value="${BOSS_ID}">Boss Battle</option>` + '<option value="random">Random</option>';   // v0.49 + Big Arena; v0.58 + Boss Battle
   carOptions();
   const pick = (sel: HTMLSelectElement, rebuild: boolean) => {
     if (tp.track.includes(sel)) raceTrack = sel.value as TrackPick; else testerCar = sel.value;
@@ -546,7 +565,7 @@ async function main() {
   if (TESTER) {
     let saved: { track?: string; car?: string } = {};
     try { saved = JSON.parse(localStorage.getItem(TESTER_KEY) ?? '{}'); } catch { /* ignore */ }
-    raceTrack = saved.track === 'random' || saved.track === BIG_ID || TRACK_IDS.includes(saved.track as TrackId) ? saved.track as TrackPick : TESTER_SET.track;
+    raceTrack = saved.track === 'random' || saved.track === BIG_ID || saved.track === BOSS_ID || TRACK_IDS.includes(saved.track as TrackId) ? saved.track as TrackPick : TESTER_SET.track;
     testerCar = saved.car && PRESETS[saved.car] ? saved.car : TESTER_SET.car;
     DRIVE.boost = MOBILE ? PHONE_SET.boost : TESTER_SET.boost; raceSpeedMul = MOBILE ? PHONE_SET.raceSpeed : TESTER_SET.raceSpeed; raceDiff = TESTER_SET.ai;   // v0.41 phone x2 / x2
     CUBES.on = true; CUBES.style = 'neonEnergy'; CUBES.size = 'big';
@@ -599,7 +618,7 @@ async function main() {
     for (let i = 0; i < (others.length ? BIG.spawnTries : 1); i++) {
       const a = Math.random() * Math.PI * 2, r = R * Math.sqrt(0.15 + 0.85 * Math.random());
       const p = new Vector3(c.x + Math.sin(a) * r, c.y + 0.6, c.z + Math.cos(a) * r);
-      const d = others.length ? Math.min(...others.map(o => Math.hypot(o.x - p.x, o.z - p.z))) : 0;
+      const d = others.length ? Math.min(...others.map(o => Math.hypot(o.x - p.x, o.z - p.z))) : 0;   // v0.58 others include the boss
       if (d > bd) { bd = d; best = p; }
     }
     const pos = best!;
@@ -616,9 +635,14 @@ async function main() {
   /** v0.51 SCRAP boxes taken this battle */
   let boxesTaken: Record<string, number> = {};
   /** v0.51 battle points: damage + KO bonus + rival cubes vacuumed + SCRAP boxes */
+  /** v0.58 Boss Battle points: +1 per HP dealt to the boss, +5 per mini, +50 for the final hit */
+  let bossPts: Record<string, { boss: number; minis: number; final: number }> = {};
+  let launches: Record<string, number> = {};   // v0.58b launch KOs per bot (+LAUNCH.bonus each)
+  const bossPt = (id: string) => (bossPts[id] ??= { boss: 0, minis: 0, final: 0 });
   const pointsOf = (f: Fighter) => {
+    if (brawl?.boss) { const b = bossPt(f.id); return Math.round(b.boss + b.minis * BOSS.mini.pts + b.final); }
     const t = tally[f.id] ?? newTally();
-    return Math.round(t.dmg * BIG.pts.dmg + t.kos * BIG.pts.ko + t.got * BIG.pts.vacuum + (boxesTaken[f.id] ?? 0) * BIG.pts.box);
+    return Math.round(t.dmg * BIG.pts.dmg + t.kos * BIG.pts.ko + (launches[f.id] ?? 0) * LAUNCH.bonus + t.got * BIG.pts.vacuum + (boxesTaken[f.id] ?? 0) * BIG.pts.box);
   };
   /** v0.50 damage taken this battle, every life (any source) */
   const takenOf = (f: Fighter) => f.taken + (f.down ? 0 : f.bot.state.totalDamageTaken);
@@ -634,7 +658,8 @@ async function main() {
     if (!raceBuild) return;
     leaveCourse();
     if (mode === 'race') { endBrawl(); race.dispose(); bots = []; fx.clear(); } else clearBots();
-    clearLoot(); LOOT.on = true; tally = {}; paid = null; cubePulse = 0; boxesTaken = {}; party.stop();
+    clearLoot(); LOOT.on = true; tally = {}; paid = null; cubePulse = 0; boxesTaken = {}; bossPts = {}; launches = {}; party.stop();
+    const bossMode = raceTrack === BOSS_ID;   // v0.58
     race.setVisible(false);
     applyTrackTheme(null);   // the arena's black + neon
     mode = 'race';
@@ -643,6 +668,13 @@ async function main() {
     hud.hideWinner(); hud.clearSign();
     setArenaVisible(false); course.setVisible(false); bigBox.setVisible(true);
     combat = new Combat([], fx);
+    // v0.58 Boss Battle: Stingwheel in the middle; the team's weapons can hurt it, never each other (friendly fire off)
+    const boss = bossMode ? new BossFight(scene, bigBox.center, bigBox.half, {
+      team: () => brawl?.racers.filter(f => !f.down) ?? [], combat: () => combat, fx,
+      sign: (t, ms, c) => hud.sign(t, ms, c), isPlayer: id => playerId() === id, shadows,
+      onPoints: (id, pts, why) => { const b = bossPt(id); if (why === 'boss') b.boss += pts; else if (why === 'mini') b.minis++; else b.final += pts; },
+    }) : undefined;
+    if (boss) { combat.ext.push(boss.target3); combat.peace = () => true; }
     // the race settings (bots are built with them)
     DRIVE.raceSpeed = 2 * raceSpeedMul;
     DRIVE.raceWeaponsNeutral = true;
@@ -655,19 +687,21 @@ async function main() {
       { id: 'A', human: true, build: raceBuild },
       ...names.map((n, i) => ({ id: RIVAL_IDS[i] as BotId, human: false, build: JSON.parse(JSON.stringify(PRESETS[n])) as BotBuild })),
     ];
-    const taken: Vector3[] = [];   // v0.52 (user) random spawns, each as far as it can be from the bots already placed
+    const taken: Vector3[] = boss ? boss.avoid() : [];   // v0.52 (user) random spawns, each as far as it can be from the bots already placed (v0.58 and the boss)
     const racers = entries.map((e): Fighter => {
       const spot = bigSpawn(taken); taken.push(spot.pos);
+      if (boss) spot.facing = Math.atan2(boss.pos.x - spot.pos.x, boss.pos.z - spot.pos.z);   // v0.58 nose toward the boss
       const bot = buildBot(e.id, e.build, catalog, scene, spot.pos, spot.facing, { breakableWeapons: false });
       castShadows(shadows, botMeshes(bot)); skinBot(bot, shadows); upg.attach(bot);
       combat.replaceBot(undefined, bot);
       return { id: e.id, human: e.human, name: e.build.cosmetics.name, paint: e.build.cosmetics.paint ?? '#fff', bot, lapsDone: 0, targetAt: 0, build: e.build, taken: 0 };
     });
-    brawl = { racers, t: 0, timeLeft: BIG.seconds, over: false, overAt: 0, playerOutAt: -1, spinPrev: new Map(), standings: brawlStandings };
+    brawl = { racers, t: 0, timeLeft: boss ? BOSS.seconds : BIG.seconds, over: false, overAt: 0, playerOutAt: -1, spinPrev: new Map(), standings: brawlStandings, boss };
     bots = racers.map(f => f.bot);
     over = false; camFocus = null;
     phase = 'ready'; rd.count.className = '';
     const p = racers[0].bot;
+    camCtl.startDefaults(boss ? 'boss' : 'brawl');   // v0.57 own camera per mode; v0.58 (user) back to the defaults at every start
     cam.target = p.root.position.clone(); cam.radius = camCtl.radius(raceCamR());
     if (MOBILE && camCtl.view === 'chase') cam.beta = Math.min(cam.beta, PHONE_CAM.maxBeta);
     sun.position = p.root.position.add(SUN_OFFSET);
@@ -679,7 +713,9 @@ async function main() {
   /** Leaving the Big Arena (another track, the lab): bots, upgrades and the box go. */
   function endBrawl() {
     if (!brawl) return;
-    for (const f of brawl.racers) if (!f.gone) disposeBot(f.bot);
+    for (const f of brawl.racers) { if (!f.gone) disposeBot(f.bot); f.flight?.chute?.dispose(); }   // v0.58b parachutes too
+    brawl.boss?.dispose();   // v0.58
+    hideBossBar();
     brawl = null; bots = [];
     upg.clear();
     bigBox.setVisible(false);
@@ -696,16 +732,21 @@ async function main() {
     scene.getPhysicsEngine()?.setTimeStep(PHYS_STEP);
     const live = B.racers.filter(f => !f.down && !f.bot.eliminated);
     for (const f of live) {
-      const d: Drive = waiting || B.over ? NO_DRIVE
+      let d: Drive = waiting || B.over ? NO_DRIVE
         : f.human && !RACE_TEST.autopilot ? (MOBILE ? brawlPhoneDrive(f, dt) : steerRamp(readDrive('A', true), dt))
         : brawlAi(f, live, dt, now);
+      const minis = B.boss?.latchedOn(f.bot) ?? 0;   // v0.58 each mini scorpion on you: -10% drive
+      if (minis) d = { ...d, throttle: d.throttle * (1 - BOSS.mini.slow * minis) };
       runBot(f.bot, d, dt, now, waiting || B.over, false, phase === 'countdown');
     }
+    B.boss?.update(dt, now, !waiting && !B.over);   // v0.58 Stingwheel + the minis
     upg.update(dt, B, combat, !waiting && !B.over);   // scrap from damage + boxes, the ram, chipped upgrades
 
     // v0.49b an out bot is deleted 2 s later (as a race wreck is at its respawn). Frozen + hidden it still had a
     // working collider: an invisible wall where it died (user found it with the K probe: "botB STATIC HIDDEN").
-    for (const f of B.racers) if (f.down && !f.gone && now - f.down.at >= BIG.goneMs) {
+    for (const f of B.racers) if (f.flight) updateFlight(f, now, dt);   // v0.58b launched: pop at the top of the arc, the parachute
+    for (const f of B.racers) if (f.down && !f.gone && now - f.down.at >= (f.down.why === 'launch' ? LAUNCH.ms : BIG.goneMs)) {
+      if (f.flight && !f.flight.popped) popFlight(f, now);
       combat.removeBot(f.bot); disposeBot(f.bot); f.gone = true;
     }
     // v0.50 everyone respawns (the practice delay: right after its bot is deleted)
@@ -719,6 +760,7 @@ async function main() {
       for (const f of live) {
         const b = f.bot;
         if (isDestroyed(b.state)) { brawlOut(f, now, 'ko'); continue; }
+        if (isLaunched(b)) { brawlOut(f, now, 'launch'); continue; }   // v0.58b
         if (isBigOut(b)) { brawlOut(f, now, 'off'); continue; }
         if (isImmobilized(b.state) || (b.inverted && !b.rightingUntil)) {
           f.stuckSince ??= now;
@@ -727,7 +769,11 @@ async function main() {
       }
       // v0.51 most points at the clock (tie: least damage taken); with a target (T), first to it
       const top = B.standings()[0];
-      if (bigPractice) { /* practice: never ends */ }
+      if (B.boss) {   // v0.58 Boss Battle: kill it before the clock, or it wins
+        if (B.boss.dead) finishBoss(now, true);
+        else if (B.timeLeft <= 0 && !bigPractice) finishBoss(now, false);
+      }
+      else if (bigPractice) { /* practice: never ends */ }
       else if (bigTarget > 0 && pointsOf(top) >= bigTarget) finishBrawl(now, `${top.name} WINS — ${bigTarget} POINTS!`, top.paint);
       else if (B.timeLeft <= 0) {
         const tie = B.racers.filter(f => f !== top && pointsOf(f) === pointsOf(top)).length > 0;
@@ -739,10 +785,21 @@ async function main() {
     // camera: you; once you're out, a bot still fighting
     const pf = brawlPlayer()!;
     let target = pf.down ? (pf.bot.eliminated?.pos ?? pf.bot.root.position) : pf.bot.root.position;
-    if (pf.down && now - pf.down.at > 2000) { const s = B.standings().find(f => !f.down); if (s) target = s.bot.root.position; }
-    cam.target = Vector3.Lerp(cam.target, target, 0.1).add(fx.shakeOffset());
-    camGuard(target, 'brawl');
-    cam.radius += (camCtl.radius(raceCamR()) - cam.radius) * 0.05;
+    const flying = pf.flight && pf.down?.why === 'launch' && !pf.gone;   // v0.58b you were launched: show the arena + you
+    if (flying) {
+      const me = pf.flight!.chute?.position ?? pf.bot.root.position, c = bigBox.center;
+      target = Vector3.Lerp(c, me, 0.55);
+      const span = Math.hypot(me.x - c.x, me.z - c.z) + Math.max(0, me.y - c.y) * 0.6;
+      cam.radius += (Math.min(44, 16 + span * 0.9) - cam.radius) * 0.08;
+      cam.beta += (LAUNCH.camBeta - cam.beta) * 0.08;
+      // swing round behind the arena, looking out toward where you flew (arena in front, you beyond it)
+      const want = Math.atan2(c.z - me.z, c.x - me.x);
+      let da = want - cam.alpha; da = Math.atan2(Math.sin(da), Math.cos(da));
+      cam.alpha += da * 0.08;
+    } else if (pf.down && now - pf.down.at > 2000) { const s = B.standings().find(f => !f.down); if (s) target = s.bot.root.position; }
+    cam.target = Vector3.Lerp(cam.target, target, flying ? 0.08 : 0.1).add(fx.shakeOffset());
+    camGuard(target, brawl?.boss ? 'boss' : 'brawl');
+    if (!flying) cam.radius += (camCtl.radius(raceCamR()) - cam.radius) * 0.05;
     if (!pf.down) camCtl.chase(pf.bot.root.rotationQuaternion, dt);
     sun.position = target.add(SUN_OFFSET);
     fx.focus = target;
@@ -754,15 +811,17 @@ async function main() {
     if (pf.place !== undefined && !paid && !bigPractice) {
       paid = brawlReward(pf);
       walletAfter = payWallet(paid.total);
-      if (!B.over) hud.sign(`${signed(paid.total)} CUBES`, 1800, paid.total >= 0 ? '#39ff14' : '#ff4d4d');
+      if (!B.over && !B.boss) hud.sign(`${signed(paid.total)} CUBES`, 1800, paid.total >= 0 ? '#39ff14' : '#ff4d4d');
     }
     const doneAt = B.over ? B.overAt : -1;   // v0.50 results only at the end (you respawn)
-    const wait = pf.place === 1 ? CELEBRATE.resultsMs : BIG.resultsMs;   // v0.52 a win: let the fireworks finish first
+    const wait = pf.place === 1 || B.won ? CELEBRATE.resultsMs : BIG.resultsMs;   // v0.52 a win: let the fireworks finish first (v0.58 a team win too)
     if (paid && doneAt > 0 && now - doneAt > wait && (raceShown < 0 || now - raceShown > 500)) showRaceResults(now);
   }
 
   /** AI: go after the nearest rival (picked again every BIG.retargetMs, or when it's out), the arena AI does the rest. */
   function brawlAi(f: Fighter, live: Fighter[], dt: number, now: number): Drive {
+    const boss = brawl?.boss;
+    if (boss && !boss.dead) return bossAi(f, live, boss, dt, now);   // v0.58
     if (!f.target || f.target.down || now - f.targetAt > BIG.retargetMs) {
       const p = f.bot.root.position;
       let best: Fighter | undefined, bd = Infinity;
@@ -772,15 +831,49 @@ async function main() {
     if (!f.target) return NO_DRIVE;
     return aiDrive(f.bot, f.target.bot, bigBox.half, dt, raceDiff, { center: bigBox.center, speedLook: BIG.speedLook, round: true });
   }
+  /** v0.58 AI ally in the Boss Battle: minis on itself = turn hard to shake them off; a teammate with minis on it close by
+   *  = go help (its weapon pops them); a free mini close by = get it; otherwise the boss (the nearest point of its hull --
+   *  the arena AI flanks a live disc on its own). */
+  const shakeT = new Map<string, number>();
+  function bossAi(f: Fighter, live: Fighter[], boss: BossFight, dt: number, now: number): Drive {
+    const opts = { center: bigBox.center, speedLook: BIG.speedLook, round: true };
+    if (boss.latchedOn(f.bot) > 0) {
+      const t = (shakeT.get(f.id) ?? now); shakeT.set(f.id, t);
+      return { throttle: 0.5, turn: Math.floor((now - t) / 600) % 2 ? 1 : -1, fire: false };
+    }
+    shakeT.delete(f.id);
+    const p = f.bot.root.position;
+    const buddy = live.find(o => o !== f && boss.latchedOn(o.bot) > 0 && Vector3.Distance(o.bot.root.position, p) < 7);
+    const mini = buddy ? undefined : boss.miniNear(p, 4);
+    if (buddy || mini) {
+      const n = (bossAiNode ??= new TransformNode('boss_aiPoint', scene));
+      n.position.copyFrom(buddy ? buddy.bot.root.position : mini!);
+      return aiDrive(f.bot, { root: n, weapon: { power: () => 0 } } as unknown as Bot, bigBox.half, dt, raceDiff, opts);
+    }
+    return aiDrive(f.bot, boss.aimFor(f.id, p), bigBox.half, dt, raceDiff, opts);
+  }
+  let bossAiNode: TransformNode | undefined;
+  /** v0.58 Boss Battle over: the team killed it (won) or the clock ran out (it wins). Places = points. */
+  function finishBoss(now: number, won: boolean) {
+    const B = brawl!;
+    B.won = won;
+    B.standings().forEach((f, i) => { f.place = i + 1; });
+    B.over = true; B.overAt = now; over = true;
+    const me = brawlPlayer();
+    if (won && me) { hud.clearSign(); party.start(() => me.bot.root.position); }   // everyone's win: the 1ST PLACE celebration
+    else hud.sign('TIME! STINGWHEEL WINS', 2600, BOSS.paint);
+  }
+
   /** v0.50 back in the fight (every bot; v0.49b was the practice respawn): a fresh bot at the spawn point furthest
    *  from the bots still in, SCRAP upgrades back on (lost ones wait in the rebuild queue, as a race wreck), spawn protection. */
   function brawlRespawn(f: Fighter, now: number) {
     const B = brawl!, live = B.racers.filter(o => !o.down);
-    const spot = bigSpawn(live.filter(o => o !== f).map(o => o.bot.root.position));   // v0.52 random, furthest from the others
+    const spot = bigSpawn([...live.filter(o => o !== f).map(o => o.bot.root.position), ...(B.boss?.avoid() ?? [])]);   // v0.52 random, furthest from the others (v0.58 and the boss)
     const bot = buildBot(f.id, f.build, catalog, scene, spot.pos, spot.facing, { breakableWeapons: false });
     castShadows(shadows, botMeshes(bot)); skinBot(bot, shadows); upg.attach(bot);
     combat.replaceBot(undefined, bot);
     if (bot.weapon.mode === 'spinner') bot.weapon.spinning = true;
+    if (f.flight) { f.flight.chute?.dispose(); if (f.human) cam.beta = f.flight.camBeta; f.flight = undefined; }   // v0.58b
     f.bot = bot; f.down = undefined; f.stuckSince = undefined; f.gone = false; f.target = undefined;
     // spawn protection: no damage for BIG.protectMs (wraps the upgrades' armour shield)
     f.protUntil = now + BIG.protectMs; f.blink = bot.root.getChildMeshes(false);
@@ -807,27 +900,106 @@ async function main() {
     return (Math.hypot(p.x - c.x, p.z - c.z) > lim && p.y < c.y + OUT.belowFloor) || p.y < c.y - 12;   // v0.52 round: past the ring
   }
   /** A bot is out: blown apart (Cube Bots: its cubes are loot for the others); v0.50 it respawns BIG.goneMs later. */
-  function brawlOut(f: Fighter, now: number, why: 'ko' | 'off' | 'stuck') {
+  function brawlOut(f: Fighter, now: number, why: 'ko' | 'off' | 'stuck' | 'launch') {
     const B = brawl!, b = f.bot;
     f.taken += b.state.totalDamageTaken;   // v0.50 (before it's marked down: takenOf adds the live bot's)
     f.down = { at: now, why }; f.stuckSince = undefined; f.outT = B.t;
     if (f.blink) { f.protUntil = Math.min(f.protUntil ?? 0, now); blinkFighter(f, now); }
     const pos = b.root.position.clone();
-    // knocking a bot out of the arena counts as a KO too; v0.50 stuck = nobody's KO (self-out penalty: parked)
-    const koBy = why === 'stuck' ? undefined : combat.lastAttacker(b, BIG.koCreditMs);   // v0.51 1 s
+    // v0.58b (user) the KO goes to the last bot that damaged it (this life, however long ago; hazards, the boss and the
+    // fall don't count); nobody = SELF PWN!. Stuck = nobody's KO, and no SELF PWN! either.
+    const by = why === 'stuck' ? undefined : combat.lastDamager(b);
+    const koBy = by && by !== f.id ? by : undefined;
     const label = why === 'ko' ? 'WRECKED!' : why === 'off' ? 'OUT!' : 'IMMOBILIZED!';
-    if (why !== 'off' && cubeSkinOf(b.root)) { cubeKnockout(b, true); dropBot(b); }
-    else { fx.explode(b, pos, label); freezeBot(b); }
-    if (!b.eliminated) b.eliminated = { t: now, pos, vel: Vector3.Zero(), reason: why === 'off' ? 'out' : 'ko' };
+    if (why === 'launch') {   // v0.58b still flying: it blows up at the top of its arc (updateFlight)
+      f.flight = { t0: now, popped: false, drift: Vector3.Zero(), camBeta: cam.beta };
+    } else {
+      if (why !== 'off' && cubeSkinOf(b.root)) { cubeKnockout(b, true); dropBot(b); }
+      else { fx.explode(b, pos, label); freezeBot(b); }
+      if (!b.eliminated) b.eliminated = { t: now, pos, vel: Vector3.Zero(), reason: why === 'off' ? 'out' : 'ko' };
+    }
     // cubes: out = this battle's count back to 0 (a crash); the rival whose hit did it gets the KO bonus
     const t = (tally[f.id] ??= newTally()); t.count = 0; t.crashes++;
-    if (koBy && koBy !== f.id) {
+    const killer = koBy ? B.racers.find(o => o.id === koBy) : undefined;
+    if (koBy) {
       (tally[koBy] ??= newTally()).kos++;
-      if (playerId() === koBy) hud.sign(`KO! +${BIG.pts.ko} PTS`, 1300, '#00e5ff');
+      if (why === 'launch') launches[koBy] = (launches[koBy] ?? 0) + 1;
+      const pts = B.boss ? 0 : BIG.pts.ko + (why === 'launch' ? LAUNCH.bonus : 0);   // (Boss Battle: no KO points -- friendly fire is off)
+      if (playerId() === koBy && pts) hud.sign(why === 'launch' ? `LAUNCH KO! +${pts} PTS` : `KO! +${pts} PTS`, 1400, '#00e5ff');
     }
-    const what = why === 'ko' ? 'WRECKED' : why === 'off' ? 'OUT OF THE ARENA' : 'IMMOBILIZED';
-    if (f.human) { crashFlash = now; hud.sign(`${what}!`, 1200, '#ff4d4d'); }
-    else if (playerId() !== koBy) hud.sign(`${f.name.toUpperCase()} ${what}!`, 1100, f.paint);
+    const self = !koBy && why !== 'stuck';
+    if (self) fx.text(pos.add(new Vector3(0, 1.4, 0)), 'SELF PWN!', '#ff2e4d');
+    const what = why === 'ko' ? 'WRECKED' : why === 'off' ? 'OUT OF THE ARENA' : why === 'launch' ? 'LAUNCHED' : 'IMMOBILIZED';
+    if (f.human) { crashFlash = now; hud.sign(self ? 'SELF PWN!' : why === 'launch' && killer ? `LAUNCHED BY ${killer.name.toUpperCase()}!` : `${what}!`, 1400, '#ff4d4d'); }
+    else if (playerId() !== koBy) hud.sign(`${f.name.toUpperCase()} ${self ? '— SELF PWN!' : `${what}!`}`, 1100, f.paint);
+  }
+  /** v0.58b launched: past the wall while still above the floor (it went over the top) */
+  function isLaunched(b: Bot): boolean {
+    const p = b.root.position, c = bigBox.center;
+    return Math.hypot(p.x - c.x, p.z - c.z) > bigBox.half + OUT.wallMargin + LAUNCH.wallGap && p.y > c.y - 0.2;
+  }
+  /** v0.58b per frame while launched: pop at the top of the arc (or LAUNCH.popMaxMs), then the parachute drifts down */
+  function updateFlight(f: Fighter, now: number, dt: number) {
+    const fl = f.flight!;
+    if (!fl.popped) {
+      const vy = f.gone ? 0 : f.bot.body.getLinearVelocity().y;
+      if ((vy <= 0 && now - fl.t0 > 150) || now - fl.t0 >= LAUNCH.popMaxMs) popFlight(f, now);
+      return;
+    }
+    const ch = fl.chute;
+    if (!ch) return;
+    const k = (now - fl.t0) / 1000;
+    ch.position.addInPlace(fl.drift.scale(dt));
+    ch.position.y -= LAUNCH.chuteFall * dt;
+    ch.rotation.z = Math.sin(k * 3.2) * 0.25; ch.rotation.y += dt * 0.6;
+  }
+  /** v0.58b the top of the arc: the bot blows up (its cubes fall away -- no loot out there), the driver bails out */
+  function popFlight(f: Fighter, now: number) {
+    const fl = f.flight!, b = f.bot;
+    fl.popped = true;
+    const pos = b.root.position.clone(), c = bigBox.center;
+    const v = b.body.getLinearVelocity();
+    if (cubeSkinOf(b.root)) { cubeKnockout(b, false); dropBot(b); } else { fx.explode(b, pos, ''); freezeBot(b); }
+    if (!b.eliminated) b.eliminated = { t: now, pos, vel: Vector3.Zero(), reason: 'out' };
+    fl.drift = new Vector3(v.x, 0, v.z).scale(0.25);
+    fl.chute = makeChute(f.paint, pos.add(new Vector3(0, 0.6, 0)));
+    const out = Math.max(1, Math.round(Math.hypot(pos.x - c.x, pos.z - c.z) - bigBox.half)), up = Math.max(0, Math.round(pos.y - c.y));
+    fx.text(pos.add(new Vector3(0, 2.6, 0)), `LAUNCHED! ${out} m OUT · ${up} m UP`, '#ffd23f', 2.2);
+    if (f.human) fx.kick(0.25);
+  }
+  /** v0.58b a little cube driver under a striped cube parachute (team paint + white) */
+  const chuteMats: Record<string, StandardMaterial> = {};
+  function makeChute(paint: string, at: Vector3): TransformNode {
+    const mat = (hex: string) => {
+      if (!chuteMats[hex]) { const m = new StandardMaterial(`chute_${hex}`, scene); m.diffuseColor = Color3.FromHexString(hex); m.emissiveColor = Color3.FromHexString(hex).scale(0.35); chuteMats[hex] = m; }
+      return chuteMats[hex];
+    };
+    const root = new TransformNode('chute', scene);
+    root.position.copyFrom(at);
+    root.scaling.setAll(2.2);   // cartoon size: readable from the pulled-back camera
+    const cube = (w: number, h: number, d: number, x: number, y: number, z: number, hex: string) => {
+      const m = MeshBuilder.CreateBox('chute_c', { width: w, height: h, depth: d }, scene);
+      m.material = mat(hex); m.parent = root; m.position.set(x, y, z); m.isPickable = false; return m;
+    };
+    // driver: head, body, arms up holding the lines, legs
+    cube(0.16, 0.16, 0.16, 0, 0.32, 0, '#ffd2a6');
+    cube(0.2, 0.24, 0.14, 0, 0.12, 0, paint);
+    for (const x of [-0.14, 0.14]) { cube(0.07, 0.2, 0.07, x, 0.3, 0, paint); cube(0.08, 0.2, 0.08, x * 0.5, -0.1, 0, '#2b2e33'); }
+    // canopy: a stepped dome of cubes, striped
+    const R = 0.75, top = 1.45;
+    for (let i = -4; i <= 4; i++) for (let j = -4; j <= 4; j++) {
+      const x = i * 0.18, z = j * 0.18, r = Math.hypot(x, z);
+      if (r > R) continue;
+      cube(0.17, 0.12, 0.17, x, top - (r * r) * 0.45, z, (i + 4) % 2 ? '#ffffff' : paint);
+    }
+    // lines from the hands to the canopy edge
+    for (const [x, z] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+      const a = new Vector3(x * 0.12, 0.4, z * 0.03), bp = new Vector3(x * 0.5, top - 0.3, z * 0.5);
+      const l = MeshBuilder.CreateBox('chute_l', { width: 0.02, height: Vector3.Distance(a, bp), depth: 0.02 }, scene);
+      l.material = mat('#dddddd'); l.parent = root; l.position = a.add(bp).scale(0.5); l.isPickable = false;
+      l.rotationQuaternion = new Quaternion(); Quaternion.FromUnitVectorsToRef(Vector3.Up(), bp.subtract(a).normalize(), l.rotationQuaternion);
+    }
+    return root;
   }
   function finishBrawl(now: number, text: string, color: string) {
     const B = brawl!;
@@ -840,6 +1012,7 @@ async function main() {
   const clock = (t: number) => { const s = Math.ceil(t), m = Math.floor(s / 60); return `${m}:${String(s % 60).padStart(2, '0')}`; };
 
   function showBrawlReady() {
+    if (brawl?.boss) { showBossReady(); return; }   // v0.58
     const p = brawlPlayer()!.bot;
     const pad = padConnected();
     rd.title.innerHTML = `BIG ARENA <span class="vs">4 BOTS · ${bigTarget ? `FIRST TO ${bigTarget} POINTS` : `MOST POINTS IN ${clock(BIG.seconds)}`}</span>`;
@@ -847,8 +1020,8 @@ async function main() {
       ['DRIVE', pad ? 'Controller: RT gas · LT brake, then reverse · left stick steers' : MOBILE ? 'It drives itself forward: ◀ ▶ steer (tap = small turn, hold = full turn) · BRAKE held = slow down, then reverse' : 'W A S D (or gamepad left stick)'],
       ['WEAPON', pad ? p.weapon.hint('A') : MOBILE ? 'Fires on its own when a bot is close in front of you' : p.weapon.hint('SPACE')],
       ['TO WIN', `Every bot for itself — ${bigTarget ? `first to ${bigTarget} points wins; at ${clock(BIG.seconds)}` : `at ${clock(BIG.seconds)}`}, most points wins (tie: least damage taken).`],
-      ['POINTS', `+${BIG.pts.dmg} per cube you knock off a bot · +${BIG.pts.ko} per KO · +${BIG.pts.vacuum} per cube of theirs you vacuum up · +${BIG.pts.box} per gold SCRAP box.`],
-      ['KO', `Wreck a bot, or knock it out of the arena (your hit in the last ${BIG.koCreditMs / 1000} s). Every bot respawns right away, safe for ${BIG.protectMs / 1000} s (it blinks). Stuck upside down / can't drive for ${BIG.stuckMs / 1000} s = respawn, nobody's KO.`],
+      ['POINTS', `+${BIG.pts.dmg} per cube you knock off a bot · +${BIG.pts.ko} per KO (+${LAUNCH.bonus} more for a launch) · +${BIG.pts.vacuum} per cube of theirs you vacuum up · +${BIG.pts.box} per gold SCRAP box.`],
+      ['KO', `Wreck a bot, or knock it out of the arena: the KO goes to the last bot that damaged it (nobody = SELF PWN!). Launch one over the wall = +${LAUNCH.bonus} more. Every bot respawns right away, safe for ${BIG.protectMs / 1000} s (it blinks). Stuck upside down / can't drive for ${BIG.stuckMs / 1000} s = respawn, nobody's KO.`],
       ['DAMAGE', `DMG = cubes you knock off the other bots (+${REWARD.koBonus} for each one you put out).`],
       ['CUBES', `Your bot's cubes are your money. This battle's count starts at 0: +1 for each loose cube from another bot you vacuum up (they repair you too), −1 for each one knocked off you, never below 0. Out = back to 0. You earn cubes for your place and your damage.`],
       ['UPGRADES', 'Vacuumed cubes, damage and the gold SCRAP boxes fill your SCRAP meter: 25 = MOTOR, 60 = ARMOR plating, 100 = WEAPON power, 150 = a spiked RAM on your back that punches the first bot to get close behind you (once). Upgrades are cubes: hits knock them off. 25 more scrap rebuilds a lost one.'],
@@ -864,11 +1037,47 @@ async function main() {
     rd.box.classList.add('on');
   }
 
+  /** v0.58 Boss Battle start card */
+  function showBossReady() {
+    const p = brawlPlayer()!.bot;
+    const pad = padConnected();
+    rd.title.innerHTML = `BOSS BATTLE <span class="vs">YOU + 3 ALLIES VS STINGWHEEL · ${clock(BOSS.seconds)}</span>`;
+    const rows: [string, string][] = [
+      ['DRIVE', pad ? 'Controller: RT gas · LT brake, then reverse · left stick steers' : MOBILE ? 'It drives itself forward: ◀ ▶ steer · BRAKE held = slow down, then reverse' : 'W A S D (or gamepad left stick)'],
+      ['WEAPON', pad ? p.weapon.hint('A') : MOBILE ? 'Fires on its own when a bot is close in front of you' : p.weapon.hint('SPACE')],
+      ['TO WIN', `Your team destroys STINGWHEEL before ${clock(BOSS.seconds)} — or the boss wins. Friendly fire is off. Wrecked = back in right away (safe for ${BIG.protectMs / 1000} s).`],
+      ['BOSS', `A giant scorpion (${BOSS.hp.chassis + BOSS.hp.carapace + BOSS.hp.tail + BOSS.hp.pincerL + BOSS.hp.pincerR + BOSS.hp.disc} HP). Its tail holds a huge spinning disc in front of its face — hit it from the sides and the back. Pincers grab and throw you at the disc. At 66% it gets faster and SLAMS (red ring = get out); at 33% it's ENRAGED and spins.`],
+      ['MINIS', `Mini scorpions crawl out of the burrows. Hit one or run it over (fast) to pop it. On you they slow you down and nibble — turn hard or hit a wall to shake them off; a teammate's weapon pops them too.`],
+      ['POINTS', `+1 per HP you knock off the boss · +${BOSS.mini.pts} per mini · +${BOSS.pts.final} for the final hit. Most points = top of the podium.`],
+      ['CUBES', `Boss cubes you knock loose are loot: vacuum them up (they repair you and fill your SCRAP meter). You earn cubes for your place.`],
+      ['WALLET', `${CUBE_ICON}<b class="cubes">${walletCubes()}</b> cubes`],
+      pad ? ['BUTTONS', 'Y: camera · Back / View: restart'] : MOBILE ? ['BUTTONS', 'CAM: change the view · RESTART: start over'] : ['KEYS', pickRace ? 'R: restart · Q: camera' : 'R: restart · B: lab · Q: camera'],
+    ];
+    const shown = MOBILE ? rows.filter(([k]) => (raceSeen ? ['WALLET'] : ['DRIVE', 'WEAPON', 'WALLET']).includes(k))
+      : raceSeen ? rows.filter(([k]) => k === 'TO WIN' || k === 'WALLET') : rows;
+    rd.table.innerHTML = shown.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+    rd.start.style.display = '';
+    rd.small.textContent = pad ? 'LB / RB: track · D-pad ◀ ▶: car · A or Start: START · Y: camera · Back: restart' : MOBILE ? 'Pick a car · tap START' : pickRace ? 'Pick a car · Enter or click START' : 'Pick a car · Enter or click START · B: back to the lab';
+    rd.box.classList.add('on');
+  }
+  /** v0.58 boss HP bar (top centre; the podium moves down under it) */
+  const bossBar = document.getElementById('bossbar')!;
+  function drawBossBar(boss: BossFight) {
+    document.body.classList.add('bossfight');
+    const f = Math.max(0, boss.hp / boss.maxHp);
+    bossBar.querySelector<HTMLElement>('.bf')!.style.width = `${(f * 100).toFixed(1)}%`;
+    bossBar.querySelector<HTMLElement>('.bh')!.textContent = `${Math.ceil(boss.hp)} / ${boss.maxHp}`;
+    bossBar.querySelector<HTMLElement>('.bp')!.textContent = boss.dead ? 'DESTROYED' : boss.state === 'stagger' ? 'STAGGERED!' : `PHASE ${boss.phase}`;
+    bossBar.classList.toggle('p2', boss.phase === 2); bossBar.classList.toggle('p3', boss.phase === 3);
+  }
+  function hideBossBar() { document.body.classList.remove('bossfight'); }
+
   function drawBrawlHud(now: number) {
     const B = brawl!, pf = brawlPlayer();
     if (!pf) return;
+    if (B.boss) drawBossBar(B.boss); else hideBossBar();
     const st = B.standings();
-    const tag = (f: Fighter) => f.down ? ` <i class="x">${f.down.why === 'off' ? 'OUT' : f.down.why === 'ko' ? 'WRECK' : 'STUCK'}</i>`
+    const tag = (f: Fighter) => f.down ? ` <i class="x">${f.down.why === 'off' ? 'OUT' : f.down.why === 'launch' ? 'LAUNCHED' : f.down.why === 'ko' ? 'WRECK' : 'STUCK'}</i>`
       : B.over ? (f.place === 1 ? ' <i>WIN</i>' : '')
       : f.stuckSince !== undefined && now - f.stuckSince >= 1000 ? ` <i class="x">STUCK ${Math.max(1, Math.ceil((BIG.stuckMs - (now - f.stuckSince)) / 1000))}</i>` : '';
     if (MOBILE) {
@@ -876,7 +1085,11 @@ async function main() {
       const lit = now - crashFlash < 900 ? ' crash' : now - cubePulse < 350 ? ' lit' : '';
       rr.hud.innerHTML = `<b class="mp">${pointsOf(pf)}<span>${bigTarget ? `/${bigTarget}` : ''} PTS</span></b> · <b>${clock(B.timeLeft)}</b> · <span class="mc${lit}">${CUBE_ICON}<b>${signed(net)}</b></span>`;
     } else
-    rr.hud.innerHTML = `<div class="pos">${pointsOf(pf)}<span>${bigTarget ? ` / ${bigTarget}` : ''} PTS</span></div>`
+    rr.hud.innerHTML = B.boss ? `<div class="pos">${pointsOf(pf)}<span> PTS</span></div>`   // v0.58 Boss Battle
+      + `<div>BOSS DMG <b>${Math.round(bossPt(pf.id).boss)}</b> &nbsp; MINIS <b>${bossPt(pf.id).minis}</b></div>`
+      + `<div>TIME <b>${clock(B.timeLeft)}</b>${bigPractice ? ' &nbsp; <b style="color:#36f1ff">PRACTICE</b>' : ''}</div>`
+      + cubeLine(pf, now) + upg.hud(pf.id, now)
+    : `<div class="pos">${pointsOf(pf)}<span>${bigTarget ? ` / ${bigTarget}` : ''} PTS</span></div>`
       + `<div>KOs <b>${kosOf(pf)}</b>${bigTarget ? '' : ' &nbsp; <span style="color:#8fa3ad">no target (T)</span>'}</div>`
       + `<div>TIME <b>${clock(B.timeLeft)}</b> &nbsp; DMG <b>${dmgOf(pf)}</b>${bigPractice ? ' &nbsp; <b style="color:#36f1ff">PRACTICE</b>' : ''}</div>`
       + cubeLine(pf, now)
@@ -891,6 +1104,12 @@ async function main() {
     g.clearRect(0, 0, cv.width, cv.height);
     g.fillStyle = 'rgba(20,26,30,.85)'; g.strokeStyle = 'rgba(0,229,255,.7)'; g.lineWidth = 1.5;   // v0.52 round
     g.beginPath(); g.arc(ox + side / 2, oy + side / 2, side / 2, 0, Math.PI * 2); g.fill(); g.stroke();
+    if (B.boss && !B.boss.dead) {   // v0.58 the boss (big) + the minis (small)
+      const bp = B.boss.pos, fw = B.boss.forward();
+      g.fillStyle = BOSS.paint; g.beginPath(); g.arc(X(bp.x), Y(bp.z), 2.2 * k, 0, Math.PI * 2); g.fill();
+      g.strokeStyle = BOSS.core; g.lineWidth = 2; g.beginPath(); g.moveTo(X(bp.x), Y(bp.z)); g.lineTo(X(bp.x + fw.x * 3.2), Y(bp.z + fw.z * 3.2)); g.stroke();
+    }
+    if (B.boss) for (const m of B.boss.minisInfo()) { g.fillStyle = BOSS.mini.paint; g.fillRect(X(m.pos.x) - 1.5, Y(m.pos.z) - 1.5, 3, 3); }
     for (const f of [...B.racers].sort((a, c) => Number(a.human) - Number(c.human))) {
       if (f.down) continue;
       const p = f.bot.root.position;
@@ -915,9 +1134,13 @@ async function main() {
 
   function showBrawlResults() {
     const B = brawl!;
-    rrTitle.textContent = 'BATTLE RESULTS';
+    rrTitle.textContent = B.boss ? (B.won ? 'BOSS BATTLE — STINGWHEEL DESTROYED!' : 'BOSS BATTLE — STINGWHEEL WINS') : 'BATTLE RESULTS';
     const st = B.standings();
-    rr.table.innerHTML = `<tr><th></th><th>BOT</th><th>POINTS</th><th>KOs</th><th>DAMAGE</th><th>CUBES</th></tr>` + st.map((f, i) => {
+    if (B.boss) rr.table.innerHTML = `<tr><th></th><th>BOT</th><th>POINTS</th><th>BOSS DMG</th><th>MINIS</th><th>CUBES</th></tr>` + st.map((f, i) => {   // v0.58
+      const c = f.human && paid ? paid.total : brawlReward(f).total, b = bossPt(f.id);
+      return `<tr class="${f.human ? 'you' : ''}"><td>${ordinal(f.place ?? i + 1)}</td><td style="color:${f.paint}">${f.name}${f.human ? ' (YOU)' : ''}</td><td>${pointsOf(f)}${b.final ? ' · FINAL HIT' : ''}</td><td>${Math.round(b.boss)}</td><td>${b.minis}</td><td class="${c < 0 ? 'neg' : 'pos'}">${signed(c)}</td></tr>`;
+    }).join('');
+    else rr.table.innerHTML = `<tr><th></th><th>BOT</th><th>POINTS</th><th>KOs</th><th>DAMAGE</th><th>CUBES</th></tr>` + st.map((f, i) => {
       const c = f.human && paid ? paid.total : brawlReward(f).total;
       return `<tr class="${f.human ? 'you' : ''}"><td>${ordinal(f.place ?? i + 1)}</td><td style="color:${f.paint}">${f.name}${f.human ? ' (YOU)' : ''}</td><td>${pointsOf(f)}${f.place === 1 ? ' · WINNER' : ''}</td><td>${kosOf(f)}</td><td>${dmgOf(f)}</td><td class="${c < 0 ? 'neg' : 'pos'}">${signed(c)}${f.place === undefined ? '…' : ''}</td></tr>`;
     }).join('');
@@ -936,7 +1159,7 @@ async function main() {
   /** skipCard (v0.37 tester): started from the results screen's START -- straight to 3-2-1. */
   function startRace(skipCard = false) {
     if (!raceBuild) return;
-    if (raceTrack === BIG_ID) { startBrawl(skipCard); return; }   // v0.49 Big Arena
+    if (raceTrack === BIG_ID || raceTrack === BOSS_ID) { startBrawl(skipCard); return; }   // v0.49 Big Arena; v0.58 Boss Battle
     leaveCourse();
     if (brawl) { endBrawl(); fx.clear(); }
     if (mode === 'race') { race.dispose(); bots = []; fx.clear(); } else clearBots();
@@ -980,6 +1203,7 @@ async function main() {
     over = false; camFocus = null;
     phase = 'ready'; rd.count.className = '';
     const p = race.player()!.bot;
+    camCtl.startDefaults('race');   // v0.57 races have their own camera; v0.58 (user) back to the defaults at every start
     cam.target = p.root.position.clone(); cam.radius = camCtl.radius(raceCamR());
     if (MOBILE && camCtl.view === 'chase') cam.beta = Math.min(cam.beta, PHONE_CAM.maxBeta);   // v0.41 phone: a bit higher
     sun.position = p.root.position.add(SUN_OFFSET);
@@ -1203,11 +1427,12 @@ async function main() {
   let modeSel = 0;
   const modeBtns = Array.from(modeEl.querySelectorAll('button')) as HTMLButtonElement[];
   const modeHi = () => modeBtns.forEach((b, i) => b.classList.toggle('hi', i === modeSel));
+  /** v0.58 0 = BATTLE ROYAL, 1 = RACE MODE, 2 = BOSS BATTLE */
+  const modeOf = (t: TrackPick) => t === BIG_ID ? 0 : t === BOSS_ID ? 2 : 1;
   function chooseMode(i: number) {
     modeEl.classList.remove('on'); document.body.classList.remove('choosing');
-    const battle = i === 0, now = raceTrack === BIG_ID;
-    if (battle !== now) {
-      raceTrack = battle ? BIG_ID : TESTER_SET.track;
+    if (modeOf(raceTrack) !== i) {
+      raceTrack = i === 0 ? BIG_ID : i === 2 ? BOSS_ID : TESTER_SET.track;
       sync();
       try { localStorage.setItem(TESTER_KEY, JSON.stringify({ track: raceTrack, car: testerCar })); } catch { /* ignore */ }
       startRace();
@@ -1217,19 +1442,21 @@ async function main() {
   modeBtns.forEach((b, i) => { b.onclick = () => { goFullscreen(); chooseMode(i); }; b.onmouseenter = () => { modeSel = i; modeHi(); }; });
   window.addEventListener('keydown', e => {
     if (!modeEl.classList.contains('on') || e.repeat) return;
-    if (['ArrowLeft', 'KeyA', 'Digit1'].includes(e.code)) { modeSel = 0; modeHi(); if (e.code === 'Digit1') chooseMode(0); }
-    else if (['ArrowRight', 'KeyD', 'Digit2'].includes(e.code)) { modeSel = 1; modeHi(); if (e.code === 'Digit2') chooseMode(1); }
+    const n = modeBtns.length;   // v0.58 three modes
+    if (['Digit1', 'Digit2', 'Digit3'].includes(e.code)) { modeSel = Number(e.code.slice(5)) - 1; modeHi(); chooseMode(modeSel); }
+    else if (['ArrowLeft', 'KeyA'].includes(e.code)) { modeSel = (modeSel + n - 1) % n; modeHi(); }
+    else if (['ArrowRight', 'KeyD'].includes(e.code)) { modeSel = (modeSel + 1) % n; modeHi(); }
     else if (e.code === 'Enter' || e.code === 'NumpadEnter') { e.preventDefault(); chooseMode(modeSel); }
   });
   onPadButton(btn => {
     if (!modeEl.classList.contains('on')) return;
-    if (btn === 14 || btn === 15) { modeSel = btn === 14 ? 0 : 1; modeHi(); }
+    if (btn === 14 || btn === 15) { const n = modeBtns.length; modeSel = (modeSel + (btn === 14 ? n - 1 : 1)) % n; modeHi(); }   // v0.58 three modes
     else if (btn === 0) chooseMode(modeSel);   // A (Start already presses Enter)
   });
   if (TESTER) {   // v0.37 tester version: the start card; v0.50 the chooser first (the last pick is built behind it)
     startRace();
     rd.box.classList.remove('on');
-    modeSel = raceTrack === BIG_ID ? 0 : 1; modeHi();
+    modeSel = modeOf(raceTrack); modeHi();
     modeEl.classList.add('on'); document.body.classList.add('choosing');
   } else openLab();
   // v0.33 test aids (not advertised): ?race=<preset> jumps straight into a race with that bot; &autopilot=1 lets the AI
@@ -1239,8 +1466,8 @@ async function main() {
   if (qs.get('race') && PRESETS[qs.get('race')!]) {
     builder.hide(); modeEl.classList.remove('on'); document.body.classList.remove('choosing');
     raceBuild = JSON.parse(JSON.stringify(PRESETS[qs.get('race')!])); raceDiff = (qs.get('ai') as Difficulty) ?? 'normal'; DRIVE.boost = Number(qs.get('boost') ?? 3); raceSpeedMul = Number(qs.get('racespeed') ?? 1);
-    const qt = qs.get('track') as TrackPick | null; if (qt && (qt === 'random' || qt === BIG_ID || TRACK_IDS.includes(qt as TrackId))) raceTrack = qt;   // v0.35 &track=oval; v0.49 &track=bigarena
-    raceSeen = true; startRace();
+    const qt = qs.get('track') as TrackPick | null; if (qt && (qt === 'random' || qt === BIG_ID || qt === BOSS_ID || TRACK_IDS.includes(qt as TrackId))) raceTrack = qt;   // v0.35 &track=oval; v0.49 &track=bigarena
+    raceSeen = true; sync(); startRace();
   }
   (window as unknown as { __bb: unknown }).__bb = { get race() { return race; }, get phase() { return phase; }, scene, cam,
     get tally() { return tally; }, get brawl() { return brawl; }, get combat() { return combat; }, bigBox, get knockFree() { return knockFree; }, get paid() { return paid; }, upg, skinCount: (id: string) => { const r = race.racers.find(x => x.id === id); return r ? cubeSkinOf(r.bot.root)?.count : undefined; } };   // v0.38   // v0.35b scene + cam for sandbox screenshots   // v0.35 race changes with the track
@@ -1253,6 +1480,7 @@ async function main() {
     for (const b of bots) if (!b.eliminated) { if (!racing) applyGyro(b, stepDt); armBefore(b); if (!racing) applyMagnets(b, stepDt); hingesBefore(b); wheelsBefore(b, stepDt); }   // v0.8 gyro; v0.11 arm + magnets; v0.12 hinges; v0.21 drive motors
     // v0.31 countdown: the weapons spin up but the bots stay where they were put (a spinning-up shell would turn its chassis)
     if (racing) { if (brawl) flatRacePhysics(bots, stepDt, BIG.origin.y, BIG.sideGrip, brawl.spinPrev); else race.beforePhysics(stepDt); }   // v0.49 Big Arena: race handling on its floor
+    brawl?.boss?.beforePhysics(stepDt);   // v0.58 the boss's drive base, disc motor, pincer hold
     if (mode !== 'course' && phase === 'countdown') for (const b of bots) if (!b.eliminated) {
       const w = b.body.getAngularVelocity(); b.body.setAngularVelocity(new Vector3(w.x, 0, w.z));
     }
@@ -1261,6 +1489,7 @@ async function main() {
     const stepDt = SUB_STEP_MS / 1000;
     if (mode === 'course') courseCombat?.afterPhysics(stepDt); else combat?.afterPhysics(stepDt);
     for (const b of bots) if (!b.eliminated) armAfter(b, stepDt);   // v0.11 reactionless hammer
+    brawl?.boss?.afterPhysics();   // v0.58 what the boss's disc hit
     if (mode === 'race') { if (brawl) raceSpinGiveBack(brawl.spinPrev); else race.afterPhysics(); }   // v0.34 race: spinner spin-up doesn't twist the chassis
     if (mode === 'course' && bots.length) course.afterPhysics();     // v0.23: timing lines + readouts, every sub-step
   });
@@ -1330,7 +1559,7 @@ async function main() {
   window.addEventListener('keydown', e => {
     if (e.repeat || inMenu()) return;
     if (e.code === 'KeyK') runProbe();
-    else if (e.code === 'KeyT' && brawl) {   // v0.51 target points (Big Arena test aid): off -> 150 -> 300 -> 500 -> off
+    else if (e.code === 'KeyT' && brawl && !brawl.boss) {   // (v0.58 not in the Boss Battle)   // v0.51 target points (Big Arena test aid): off -> 150 -> 300 -> 500 -> off
       const T = BIG.targets; bigTarget = T[(T.indexOf(bigTarget) + 1) % T.length];
       hud.sign(bigTarget ? `TARGET: ${bigTarget} POINTS` : 'TARGET OFF — MOST POINTS AT THE CLOCK', 1400, '#36f1ff');
       if (rd.box.classList.contains('on')) showRaceReady();
@@ -1360,6 +1589,8 @@ async function main() {
   });
   scene.onBeforeRenderObservable.add(() => {
     const dt = engine.getDeltaTime() / 1000;
+    camCtl.setMode(mode === 'race' ? (brawl ? (brawl.boss ? 'boss' : 'brawl') : 'race') : 'arena');   // v0.57 per-mode camera (no-op when unchanged); v0.58 + boss
+    camCtl.update();                                                          // v0.57 FOV for this screen shape + tuner numbers
     if (mode === 'race') { if (bots.length) raceFrame(dt, performance.now()); return; }   // v0.33
     if (mode === 'course') {
       if (!bots.length) return;

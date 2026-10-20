@@ -71,7 +71,7 @@ interface RState {
 interface Box { node: TransformNode; inner: Mesh; outer: Mesh; pos: Vector3; away: number; spin: number }
 
 /** v0.49 what update() needs from a race -- the Big Arena brawl hands in its own fighters (no laps) */
-export interface UpgRacer { id: BotId; bot: Bot; down?: { why: 'ko' | 'off' | 'stuck' }; lapsDone: number; finished?: number }
+export interface UpgRacer { id: BotId; bot: Bot; down?: { why: 'ko' | 'off' | 'stuck' | 'launch' }; lapsDone: number; finished?: number }
 export interface UpgField { racers: UpgRacer[]; standings(): UpgRacer[] }
 
 export interface UpgHooks {
@@ -79,6 +79,7 @@ export interface UpgHooks {
   isPlayer: (id: BotId) => boolean;
   shadows?: ShadowGenerator;
   onBox?: (id: BotId) => void;   // v0.51 a SCRAP box was taken (Big Arena points)
+  ally?: (a: BotId, b: BotId) => boolean;   // v0.58 boss battle: teammates (the ram never punches one)
 }
 
 export class Upgrades {
@@ -382,7 +383,7 @@ export class Upgrades {
     // anyone close behind?
     const inv = Matrix.Invert(b.root.getWorldMatrix());
     const victim = race.racers.find(o => {
-      if (o.id === s.id || o.down || o.bot.eliminated) return false;
+      if (o.id === s.id || o.down || o.bot.eliminated || this.hooks.ally?.(s.id, o.id)) return false;   // v0.58 boss battle: never a teammate
       const l = Vector3.TransformCoordinates(o.bot.root.getAbsolutePosition(), inv);
       return l.z < g.rear && l.z > g.rear - R.range && Math.abs(l.x) < g.w / 2 + R.side && Math.abs(l.y) < 1;
     });

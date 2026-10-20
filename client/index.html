@@ -214,6 +214,19 @@
     #kopod .ps.dots { background-color: color-mix(in srgb, var(--c) 45%, transparent); background-image: radial-gradient(#fff 26%, transparent 30%); background-size: 9px 9px; }   /* v0.53 4th place: polka-dot underwear */
     #kopod i { font-style: normal; font-size: 9px; letter-spacing: .1em; color: #ff4d4d; }
     body.inlab #kopod { display: none !important; }
+    /* v0.58 Boss Battle: boss HP bar, top centre (the podium moves down under it) */
+    #bossbar { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); width: clamp(240px, calc(100% - 840px), 560px); display: none; pointer-events: none; font: 700 12px/1 system-ui, sans-serif; color: #fff; text-shadow: 0 0 6px #000; letter-spacing: .1em; }
+    body.bossfight #bossbar { display: block; }
+    body.bossfight #kopod { top: 50px; }
+    #bossbar .bn { display: flex; justify-content: space-between; margin-bottom: 4px; color: #d9b3ff; }
+    #bossbar .bp { color: #6dff2e; }
+    #bossbar.p2 .bp { color: #ffb020; } #bossbar.p3 .bp { color: #ff2e4d; }
+    #bossbar .bt { position: relative; height: 14px; background: rgba(20,10,30,.75); border: 1px solid #8a2be2; border-radius: 3px; overflow: hidden; }
+    #bossbar .bf { position: absolute; left: 0; top: 0; bottom: 0; width: 100%; background: linear-gradient(90deg, #6a1fc0, #b45cff); box-shadow: 0 0 10px #8a2be2; transition: width .15s; }
+    #bossbar.p3 .bf { background: linear-gradient(90deg, #a0102c, #ff2e4d); }
+    #bossbar .bt i { position: absolute; top: 0; bottom: 0; width: 2px; background: rgba(255,255,255,.7); }
+    #bossbar .bh { position: absolute; right: 6px; top: 19px; font-size: 10px; color: #fff; }
+    body.choosing #bossbar, body.inlab #bossbar { display: none !important; }
     #rmap { position: absolute; top: 12px; right: 12px; background: rgba(14,16,20,.6); border: 1px solid rgba(120,130,145,.35); border-radius: 6px; display: none; pointer-events: none; }
     #rresults { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); background: #141b20; border: 2px solid #2a363f; border-radius: 6px; box-shadow: 0 0 0 1px #0a0e11, 0 20px 50px rgba(0,0,0,.6); font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; color: #d7e3e6; display: none; width: min(560px, calc(100% - 32px)); }
     #rresults.on { display: block; }
@@ -418,10 +431,12 @@
   <canvas id="rmap" width="260" height="130"></canvas>
   <div id="kopod"></div>
   <div id="firstplace"><b>1ST</b> PLACE!</div>
+  <div id="bossbar"><div class="bn"><span>STINGWHEEL</span><span class="bp">PHASE 1</span></div><div class="bt"><div class="bf"></div><i style="left:66%"></i><i style="left:33%"></i></div><div class="bh"></div></div>
   <div id="modepick"><div class="mp-card">
     <h1>ROBOT REVOLUTION</h1>
     <div class="mp-row"><button type="button" class="mp-b"><b>BATTLE ROYAL</b><span>Big Arena · 4 bots · most points in 2:00</span></button>
-    <button type="button" class="mp-b"><b>RACE MODE</b><span>4 tracks · 3 laps · weapons on</span></button></div>
+    <button type="button" class="mp-b"><b>RACE MODE</b><span>4 tracks · 3 laps · weapons on</span></button>
+    <button type="button" class="mp-b"><b>BOSS BATTLE</b><span>You + 3 allies vs Stingwheel · 2:00</span></button></div>
     <div class="mp-s">Click a mode · or ◀ ▶ and Enter</div>
   </div></div>
   <div id="rresults">
@@ -478,6 +493,6 @@
     <div class="board" id="board2"></div>
   </div>
   <script type="module" src="/src/main.ts"></script>
-  <div id="ver">v0.56</div>
+  <div id="ver">v0.58b</div>
 </body>
 </html>

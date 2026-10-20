@@ -315,8 +315,10 @@ export class Skin {
   private t = 0;
   private mat: StandardMaterial;
 
-  constructor(private scene: Scene, readonly root: Mesh, meshes: AbstractMesh[], paintHex: string, socketOf: (m: AbstractMesh) => string | null, shadows?: ShadowGenerator) {
-    this.v = CUBE_SIZE[CUBES.size] ?? 0.08;
+  /** v0.58 opts (boss battle): size = cube edge in m instead of the CUBES.size setting (the 3x boss uses bigger cubes);
+   *  core = glow-core colour instead of the palette's molten orange (Xeno bugs: alien green). */
+  constructor(private scene: Scene, readonly root: Mesh, meshes: AbstractMesh[], paintHex: string, socketOf: (m: AbstractMesh) => string | null, shadows?: ShadowGenerator, opts: { size?: number; core?: string } = {}) {
+    this.v = opts.size ?? CUBE_SIZE[CUBES.size] ?? 0.08;
     this.style = CUBES.style in STYLE ? CUBES.style : 'glow';
     const st = STYLE[this.style], v = this.v;
     // v0.31 armoured / weathered palette: team hue kept, paint darker and less saturated (industrial paint)
@@ -324,7 +326,7 @@ export class Skin {
     const P = PAL[st.neon ? 'neon' : 'armor'];
     const paint = P.paint(hsvP.r, hsvP.g, hsvP.b);
     const accent = Color3.FromHexString(P.can);                       // motor cans: copper / brass
-    const coreCol = Color3.FromHexString(P.core).scale(1.15);         // inner core: hot molten metal under the armour
+    const coreCol = Color3.FromHexString(opts.core ?? P.core).scale(1.15);   // inner core: hot molten metal under the armour (v0.58 bugs: alien green)
     const SCRATCH = Color3.FromHexString(P.scratchCol);
 
     root.computeWorldMatrix(true);
@@ -1160,6 +1162,13 @@ function glowOf(c: Color3, k: number): Color3 { const m = Math.max(c.r, c.g, c.b
 export function skinPreview(scene: Scene, root: Mesh, partMeshes: Record<string, Mesh>, paint: string, shadows?: ShadowGenerator): Skin | null {
   if (!CUBES.on) return null;
   return new Skin(scene, root, [root, ...root.getChildMeshes()], paint, m => socketByAncestry(m, partMeshes), shadows);
+}
+
+/** v0.58 boss battle: cube a thing that isn't a bot (a boss part, a mini scorpion). No HP of its own: the caller knocks
+ *  cubes off with chip() / knockout(); each loose cube is worth hpPerCube (set it after). null = Cube Bots look off. */
+export function skinThing(scene: Scene, root: Mesh, paint: string, opts: { size?: number; core?: string } = {}, shadows?: ShadowGenerator): Skin | null {
+  if (!CUBES.on) return null;
+  return new Skin(scene, root, [root, ...root.getChildMeshes()], paint, () => null, shadows, opts);
 }
 
 /** Match / course bot: cube it and follow its real parts (weapons + tyres live on their own bodies). */
