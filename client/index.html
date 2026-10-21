@@ -341,6 +341,7 @@
     @media (orientation: portrait) {
       body.mobile #rotate { display: flex; position: fixed; inset: 0; z-index: 100; background: #0b0d10; align-items: center; justify-content: center; text-align: center; font: 800 20px/1.5 system-ui, sans-serif; letter-spacing: .08em; color: #f2b134; padding: 24px; }
     }
+    #rotate small { display: block; margin-top: 18px; font: 600 14px/1.5 system-ui, sans-serif; letter-spacing: .04em; color: #d7e3e6; }   /* v0.62 (user) open-in-browser hint for Discord */
     /* v0.37 tester version (body.tester): race only, track + car pickers on the start card and the results */
     .pick { display: flex; gap: 10px; margin: 0 0 12px; }   /* v0.48 every race (was tester only) */
     .pick label { flex: 1; display: flex; flex-direction: column; gap: 4px; font: 700 11px/1 system-ui, sans-serif; letter-spacing: .12em; color: #8fa3ad; }
@@ -547,7 +548,7 @@
     <button class="go" id="mm-fight" type="button">FIGHT ▶</button>
     <div class="note">Phone version: preset bots only. Build your own bot on a computer.</div>
   </div>
-  <div id="rotate">⟳ Turn your phone sideways to play</div>
+  <div id="rotate"><div>⟳ Turn your phone sideways to play<small>Not turning? (Discord) For landscape, tap ⋯ → Open in browser.</small></div></div>   <!-- v0.62 (user) Discord's in-app browser won't rotate -->
   <div id="finish">FINISH HIM!</div>
   <div id="winner"></div>
   <div id="hud">
@@ -556,6 +557,6 @@
     <div class="board" id="board2"></div>
   </div>
   <script type="module" src="/src/main.ts"></script>
-  <div id="ver">v0.61</div>
+  <div id="ver">v0.62</div>
 </body>
 </html>
