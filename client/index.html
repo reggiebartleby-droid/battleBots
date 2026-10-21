@@ -342,6 +342,8 @@
       body.mobile #rotate { display: flex; position: fixed; inset: 0; z-index: 100; background: #0b0d10; align-items: center; justify-content: center; text-align: center; font: 800 20px/1.5 system-ui, sans-serif; letter-spacing: .08em; color: #f2b134; padding: 24px; }
     }
     #rotate small { display: block; margin-top: 18px; font: 600 14px/1.5 system-ui, sans-serif; letter-spacing: .04em; color: #d7e3e6; }   /* v0.62 (user) open-in-browser hint for Discord */
+    #rotate .safari { display: none; margin: 18px auto 0; width: max-content; font: 800 16px/1 system-ui, sans-serif; letter-spacing: .12em; color: #141b20; background: #f2b134; border-radius: 6px; padding: 14px 22px; text-decoration: none; }   /* v0.62b (user) iPhone only */
+    #rotate.iphone .safari { display: block; }
     /* v0.37 tester version (body.tester): race only, track + car pickers on the start card and the results */
     .pick { display: flex; gap: 10px; margin: 0 0 12px; }   /* v0.48 every race (was tester only) */
     .pick label { flex: 1; display: flex; flex-direction: column; gap: 4px; font: 700 11px/1 system-ui, sans-serif; letter-spacing: .12em; color: #8fa3ad; }
@@ -548,7 +550,16 @@
     <button class="go" id="mm-fight" type="button">FIGHT ▶</button>
     <div class="note">Phone version: preset bots only. Build your own bot on a computer.</div>
   </div>
-  <div id="rotate"><div>⟳ Turn your phone sideways to play<small>Not turning? (Discord) For landscape, tap ⋯ → Open in browser.</small></div></div>   <!-- v0.62 (user) Discord's in-app browser won't rotate -->
+  <div id="rotate"><div>⟳ Turn your phone sideways to play<small>Not turning? (Discord) For landscape, tap ⋯ → Open in browser.</small><a class="safari" id="rot-safari" href="#">OPEN IN SAFARI</a></div></div>   <!-- v0.62 (user) Discord's in-app browser won't rotate -->
+  <script>
+    /* v0.62b (user) OPEN IN SAFARI button, iPhone only: x-safari-https:// hands this page to Safari */
+    (function () {
+      if (!/iPhone/.test(navigator.userAgent)) return;
+      var r = document.getElementById('rotate'), a = document.getElementById('rot-safari');
+      a.href = location.href.replace(/^https?:\/\//, 'x-safari-https://');
+      r.classList.add('iphone');
+    })();
+  </script>
   <div id="finish">FINISH HIM!</div>
   <div id="winner"></div>
   <div id="hud">
@@ -557,6 +568,6 @@
     <div class="board" id="board2"></div>
   </div>
   <script type="module" src="/src/main.ts"></script>
-  <div id="ver">v0.62</div>
+  <div id="ver">v0.62b</div>
 </body>
 </html>
